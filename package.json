@@ -1,0 +1,38 @@
+{
+  "name": "pi-email-subagent",
+  "version": "0.1.0",
+  "description": "Persistent parallel Pi subagents coordinated through virtual email",
+  "type": "module",
+  "keywords": ["pi-package", "pi", "subagent", "agents"],
+  "license": "MIT",
+  "files": ["src", "plans", "README.md", "LICENSE"],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "test:unit": "tsx --test test/unit/**/*.test.ts",
+    "test:integration": "tsx --test test/integration/**/*.test.ts",
+    "test:e2e": "tsx --test test/e2e/**/*.test.ts",
+    "test:live": "tsx scripts/live-e2e.ts",
+    "validate": "npm run check && npm test"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": ">=0.81.1 <0.82.0",
+    "@earendil-works/pi-ai": ">=0.81.1 <0.82.0",
+    "@earendil-works/pi-coding-agent": ">=0.81.1 <0.82.0",
+    "@earendil-works/pi-tui": ">=0.81.1 <0.82.0",
+    "typebox": "^1.1.38"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@earendil-works/pi-tui": "0.81.1",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typebox": "1.1.38",
+    "typescript": "^5.8.0"
+  }
+}

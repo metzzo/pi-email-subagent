@@ -1,0 +1,90 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+import { loadConfig, resolveAgentProfile } from "../../src/config.ts";
+
+describe("configuration", () => {
+  it("applies exact address over role over defaults", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      defaultEffort: "low",
+      roles: { reviewer: { effort: "medium", tools: ["read"] } },
+    }));
+    await writeFile(join(cwd, ".pi", "subagents.json"), JSON.stringify({
+      roles: { reviewer: { effort: "high" } },
+      addresses: { "reviewer.audit@gpt-5.4.com": { instructions: "Exact audit instructions." } },
+    }));
+    const { config, warnings } = loadConfig(agentDir, cwd, true);
+    assert.deepEqual(warnings, []);
+    const profile = resolveAgentProfile(config, "reviewer.audit@gpt-5.4.com", "reviewer");
+    assert.equal(profile.effort, "high");
+    assert.deepEqual(profile.tools, ["read", "send_email", "fetch_emails"]);
+    assert.equal(profile.instructions, "Exact audit instructions.");
+  });
+
+  it("loads bounded sender, queue, and batch controls", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      maxMailsPerSenderPerMinute: 12,
+      maxQueuedMessages: 120,
+      maxQueuedBytes: 2_000_000,
+      maxBatchMessages: 20,
+      maxBatchBytes: 200_000,
+    }));
+    const { config, warnings } = loadConfig(agentDir, root, false);
+    assert.deepEqual(warnings, []);
+    assert.equal(config.maxMailsPerSenderPerMinute, 12);
+    assert.equal(config.maxQueuedMessages, 120);
+    assert.equal(config.maxQueuedBytes, 2_000_000);
+    assert.equal(config.maxBatchMessages, 20);
+    assert.equal(config.maxBatchBytes, 200_000);
+  });
+
+  it("provides bounded queue and sender defaults", () => {
+    const config = loadConfig("/nonexistent-agent", "/nonexistent-project", false).config;
+    assert.equal(config.maxMailsPerSenderPerMinute, 30);
+    assert.equal(config.maxQueuedMessages, 256);
+    assert.equal(config.maxQueuedBytes, 4 * 1024 * 1024);
+    assert.equal(config.maxBatchMessages, 32);
+    assert.equal(config.maxBatchBytes, 512 * 1024);
+  });
+
+  it("discovers project config through the runtime config directory name", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    await mkdir(join(cwd, ".rebranded-pi"), { recursive: true });
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(cwd, ".rebranded-pi", "subagents.json"), JSON.stringify({ defaultEffort: "high" }));
+    assert.equal(loadConfig(agentDir, cwd, true, ".rebranded-pi").config.defaultEffort, "high");
+  });
+
+  it("ignores project config when project is untrusted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(cwd, ".pi", "subagents.json"), JSON.stringify({ defaultEffort: "max" }));
+    assert.equal(loadConfig(agentDir, cwd, false).config.defaultEffort, "medium");
+  });
+
+  it("warns and falls back for invalid values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), "{\"maxAgents\": 0, \"defaultEffort\": \"huge\"}");
+    const loaded = loadConfig(agentDir, root, true);
+    assert.equal(loaded.config.maxAgents, 8);
+    assert.equal(loaded.config.defaultEffort, "medium");
+    assert.equal(loaded.warnings.length, 2);
+  });
+});
