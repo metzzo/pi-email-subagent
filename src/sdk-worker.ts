@@ -1,0 +1,387 @@
+import { existsSync } from "node:fs";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
+import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  defineTool,
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import type {
+  ActivityItem,
+  AgentRecord,
+  EmailEnvelope,
+  SendEmailInput,
+  SendEmailResult,
+  WorkerEvent,
+  WorkerSnapshot,
+  WorkerStartConfig,
+  WorkerTransport,
+} from "./types.ts";
+import { formatUnanswered } from "./prompts.ts";
+import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
+
+const PrioritySchema = Type.Union([Type.Literal("high"), Type.Literal("low")]);
+
+export interface SendToolDetails {
+  result?: SendEmailResult;
+  error?: string;
+}
+
+export interface FetchToolDetails {
+  emails: EmailEnvelope[];
+}
+
+function textResult(text: string, details?: unknown, isError = false) {
+  return {
+    content: [{ type: "text" as const, text }],
+    details,
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail" | "fetchEmails">) {
+  const send = defineTool({
+    name: "send_email",
+    label: "Send email",
+    description:
+      "Send virtual email to another Pi agent. Sender identity is automatic. Unknown valid recipients spawn. Use low normally and high only for blockers. To answer, copy the exact `Re: [mail-id] subject` from fetch_emails().",
+    promptSnippet: "Send internal mail to persistent subagents; unknown valid addresses spawn.",
+    promptGuidelines: [
+      "Use low-priority email by default; high is only for blockers that should change ongoing work.",
+      "Answer received requests with the exact reply subject returned by fetch_emails().",
+    ],
+    executionMode: "parallel" as const,
+    parameters: Type.Object({
+      to: Type.String({ description: "Recipient `<name>.<task-slug>@<registered-model>.com` or a main address" }),
+      subject: Type.String({ description: "New subject, or exact reply subject from fetch_emails()" }),
+      message: Type.String({ description: "Self-contained request or substantive response" }),
+      priority: PrioritySchema,
+    }),
+    async execute(_id, params, signal) {
+      if (signal?.aborted) return textResult("Email send aborted before acceptance.", { error: "aborted" }, true);
+      try {
+        const result = await config.sendEmail(params as SendEmailInput);
+        const lines = [
+          "Email accepted.",
+          `ID: ${result.envelope.id}`,
+          `To: ${result.envelope.to}`,
+          `Priority: ${result.envelope.priority}`,
+          `Spawned recipient: ${result.spawned ? "yes" : "no"}`,
+          `Recipient disposition: ${result.recipientDisposition}`,
+          `Delivery state: ${result.envelope.deliveryState}`,
+          `Correlation ID: ${result.correlationId}`,
+          `Expected reply subject: ${result.expectedReplySubject ?? "none"}`,
+          `Answered email: ${result.answeredEmailId ?? "none"}`,
+        ];
+        if (result.recipientModel) lines.push(`Recipient model: ${result.recipientModel}`);
+        if (result.recipientEffort) lines.push(`Recipient effort: ${result.recipientEffort}`);
+        if (result.recipientRole) lines.push(`Recipient role: ${result.recipientRole}`);
+        if (result.recipientTools) lines.push(`Recipient tools: ${result.recipientTools.join(", ")}`);
+        if (result.recipientState) lines.push(`Recipient state: ${result.recipientState}`);
+        return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
+      } catch (error) {
+        const message = errorMessage(error);
+        return textResult(`Email was not accepted: ${message}`, { error: message } satisfies SendToolDetails, true);
+      }
+    },
+  });
+
+  const fetch = defineTool({
+    name: "fetch_emails",
+    label: "Fetch unanswered emails",
+    description:
+      "Return response-required emails in your mailbox that do not yet have a successful reply. Call at the beginning of mailbox work and before stopping; use each exact Reply subject with send_email.",
+    promptSnippet: "List your unanswered response-required virtual emails.",
+    promptGuidelines: ["Before becoming idle, call fetch_emails() and substantively answer every returned request."],
+    executionMode: "sequential" as const,
+    parameters: Type.Object({}, { additionalProperties: false }),
+    async execute() {
+      const emails = config.fetchEmails();
+      return textResult(formatUnanswered(emails), { emails } satisfies FetchToolDetails);
+    },
+  });
+
+  return [send, fetch] as const;
+}
+
+function usageFromRecord(record: AgentRecord): AgentRecord["usage"] {
+  return { ...record.usage };
+}
+
+export function awaitPromptAcceptance(
+  start: (preflight: (success: boolean) => void) => Promise<void>,
+  onError?: (error: unknown) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let accepted = false;
+    let settled = false;
+    const resolveOnce = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const rejectOnce = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    void start((success) => {
+      if (success) {
+        accepted = true;
+        resolveOnce();
+      } else rejectOnce(new Error("Worker prompt was rejected during preflight."));
+    }).then(() => {
+      if (!accepted) rejectOnce(new Error("Worker prompt completed without being accepted."));
+    }).catch((error: unknown) => {
+      onError?.(error);
+      if (!accepted) rejectOnce(error);
+    });
+  });
+}
+
+export function terminalAgentError(messages: readonly AgentMessage[], willRetry: boolean): string | undefined {
+  if (willRetry) return undefined;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "assistant" && message.stopReason === "error") {
+      return message.errorMessage?.trim() || "The model request failed without an error message.";
+    }
+  }
+  return undefined;
+}
+
+export function effectiveWorkerModel(configModel: Model<any>, runtimeModel?: Model<any>): Model<any> {
+  return runtimeModel ?? configModel;
+}
+
+export class SdkWorker implements WorkerTransport {
+  private session?: AgentSession;
+  private record?: AgentRecord;
+  private listeners = new Set<(event: WorkerEvent) => void>();
+  private unsubscribeSession?: () => void;
+  private disposed = false;
+  private startGeneration = 0;
+  private runFailure?: string;
+
+  constructor(private readonly modelRuntime: ModelRuntime, private readonly runtimeModel?: Model<any>) {}
+
+  subscribe(listener: (event: WorkerEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: WorkerEvent): void {
+    if (this.disposed) return;
+    for (const listener of this.listeners) listener(event);
+  }
+
+  private activity(kind: ActivityItem["kind"], summary: string): void {
+    if (!this.record) return;
+    const item: ActivityItem = { at: nowIso(), kind, summary: truncateText(summary.replace(/\s+/g, " ").trim(), 500) };
+    this.record.activity.push(item);
+    if (this.record.activity.length > 40) this.record.activity.splice(0, this.record.activity.length - 40);
+    this.record.lastActivityAt = item.at;
+    this.record.currentActivity = item.summary;
+    this.record.updatedAt = item.at;
+    this.emit({ type: "activity", activity: item });
+  }
+
+  private setState(state: AgentRecord["state"]): void {
+    if (!this.record) return;
+    this.record.state = state;
+    this.record.updatedAt = nowIso();
+    this.emit({ type: "state", state });
+  }
+
+  async start(config: WorkerStartConfig): Promise<void> {
+    if (this.session) return;
+    if (this.disposed) throw new Error("Disposed workers cannot be restarted.");
+    const generation = ++this.startGeneration;
+    this.record = clone(config.record);
+    this.setState("spawning");
+
+    const settings = SettingsManager.inMemory(
+      { steeringMode: "all", followUpMode: "all", defaultThinkingLevel: this.record.effort },
+      { projectTrusted: config.projectTrusted },
+    );
+    const loader = new DefaultResourceLoader({
+      cwd: config.cwd,
+      agentDir: config.agentDir,
+      settingsManager: settings,
+      noExtensions: true,
+      noThemes: true,
+      appendSystemPrompt: [config.systemPrompt],
+    });
+    await loader.reload();
+    if (this.disposed || generation !== this.startGeneration) throw new Error("Worker start was cancelled.");
+
+    const sessionManager = this.record.sessionFile && existsSync(this.record.sessionFile)
+      ? SessionManager.open(this.record.sessionFile, config.sessionDir, config.cwd)
+      : SessionManager.create(config.cwd, config.sessionDir);
+
+    const requestedTools = [...this.record.tools];
+    const { session } = await createAgentSession({
+      cwd: config.cwd,
+      agentDir: config.agentDir,
+      modelRuntime: this.modelRuntime,
+      model: effectiveWorkerModel(config.model, this.runtimeModel),
+      thinkingLevel: this.record.effort,
+      tools: this.record.tools,
+      customTools: [...createWorkerMailTools(config)],
+      resourceLoader: loader,
+      sessionManager,
+      settingsManager: settings,
+      sessionStartEvent: { type: "session_start", reason: this.record.sessionFile ? "resume" : "new" },
+    });
+    if (this.disposed || generation !== this.startGeneration) {
+      if (session.isStreaming) await session.abort().catch(() => undefined);
+      session.dispose();
+      throw new Error("Worker start was cancelled.");
+    }
+    this.session = session;
+    this.record.sessionFile = session.sessionFile;
+    this.record.effort = session.thinkingLevel;
+    this.record.tools = session.getActiveToolNames();
+    if (!this.record.tools.includes("send_email") || !this.record.tools.includes("fetch_emails")) {
+      throw new Error("Worker mailbox tools were not activated.");
+    }
+    this.unsubscribeSession = session.subscribe((event) => this.onSessionEvent(event));
+    session.setSteeringMode("all");
+    session.setFollowUpMode("all");
+    this.setState("idle");
+    const unknownTools = requestedTools.filter((tool) => !this.record!.tools.includes(tool));
+    if (unknownTools.length > 0) this.activity("error", `Unknown tools omitted: ${unknownTools.join(", ")}`);
+    this.activity("status", this.record.sessionFile ? "Session ready" : "Session ready in memory");
+  }
+
+  private onSessionEvent(event: AgentSessionEvent): void {
+    if (!this.record) return;
+    switch (event.type) {
+      case "agent_start":
+        this.runFailure = undefined;
+        this.setState("running");
+        this.activity("status", "Agent run started");
+        break;
+      case "tool_execution_start":
+        this.activity("tool", `${event.toolName} ${JSON.stringify(event.args ?? {})}`);
+        break;
+      case "tool_execution_end":
+        this.activity(event.isError ? "error" : "tool", `${event.toolName} ${event.isError ? "failed" : "completed"}`);
+        break;
+      case "message_end": {
+        if (event.message.role !== "assistant") break;
+        const text = event.message.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n")
+          .trim();
+        if (text) this.activity("text", text);
+        const usage = event.message.usage;
+        if (usage) {
+          this.record.usage.input += usage.input ?? 0;
+          this.record.usage.output += usage.output ?? 0;
+          this.record.usage.cacheRead += usage.cacheRead ?? 0;
+          this.record.usage.cacheWrite += usage.cacheWrite ?? 0;
+          this.record.usage.cost += usage.cost?.total ?? 0;
+          this.record.usage.contextTokens = usage.totalTokens ?? this.record.usage.contextTokens;
+          this.record.usage.turns += 1;
+        }
+        break;
+      }
+      case "agent_end": {
+        const failure = terminalAgentError(event.messages, event.willRetry);
+        if (failure) {
+          this.runFailure = failure;
+          this.activity("error", failure);
+          this.emit({ type: "failure", error: failure });
+        }
+        break;
+      }
+      case "agent_settled":
+        if (this.runFailure) {
+          this.setState("failed");
+          this.activity("status", "Agent run failed");
+        } else {
+          this.setState("idle");
+          this.activity("status", "Agent run settled");
+        }
+        this.emit({ type: "settled" });
+        this.runFailure = undefined;
+        break;
+      default:
+        break;
+    }
+  }
+
+  private requiredSession(): AgentSession {
+    if (!this.session || this.disposed) throw new Error("Worker session is not available.");
+    return this.session;
+  }
+
+  async prompt(message: string): Promise<void> {
+    const session = this.requiredSession();
+    if (!session.isIdle) throw new Error("Worker is not idle; use steer or follow-up delivery.");
+    await awaitPromptAcceptance(
+      (preflightResult) => session.prompt(message, {
+        source: "extension",
+        expandPromptTemplates: false,
+        preflightResult,
+      }),
+      (error) => {
+        const messageText = errorMessage(error);
+        this.activity("error", messageText);
+        this.emit({ type: "failure", error: messageText });
+      },
+    );
+  }
+
+  async steer(message: string): Promise<void> {
+    await this.requiredSession().steer(message);
+  }
+
+  async followUp(message: string): Promise<void> {
+    await this.requiredSession().followUp(message);
+  }
+
+  async abort(): Promise<void> {
+    if (this.session?.isStreaming) await this.session.abort();
+    this.setState("stopped");
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.startGeneration += 1;
+    if (this.session?.isStreaming) await this.session.abort();
+    this.unsubscribeSession?.();
+    this.unsubscribeSession = undefined;
+    this.session?.dispose();
+    this.session = undefined;
+    this.listeners.clear();
+  }
+
+  setEffort(level: AgentRecord["effort"]): void {
+    const session = this.requiredSession();
+    if (!session.isIdle) throw new Error("Effort can only be changed while the worker is idle.");
+    session.setThinkingLevel(level);
+    if (this.record) this.record.effort = session.thinkingLevel;
+  }
+
+  getSnapshot(): WorkerSnapshot {
+    if (!this.record) throw new Error("Worker has not started.");
+    return {
+      record: { ...clone(this.record), usage: usageFromRecord(this.record) },
+      isIdle: this.session?.isIdle ?? true,
+      isStreaming: this.session?.isStreaming ?? false,
+    };
+  }
+
+  getSessionFile(): string | undefined {
+    return this.session?.sessionFile ?? this.record?.sessionFile;
+  }
+}

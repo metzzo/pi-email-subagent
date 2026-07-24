@@ -1,0 +1,59 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { createWorkerMailTools } from "../../src/sdk-worker.ts";
+import type { EmailEnvelope, SendEmailInput } from "../../src/types.ts";
+
+const envelope: EmailEnvelope = {
+  id: "mail_tool",
+  from: "worker.tool@gpt-5.4.com",
+  to: "main@gpt-5.4.com",
+  subject: "Result",
+  message: "Done",
+  priority: "low",
+  kind: "request",
+  requiresResponse: true,
+  createdAt: new Date().toISOString(),
+  deliveryState: "queued",
+};
+
+describe("worker mail tools", () => {
+  it("binds sender outside model-supplied arguments and reports acceptance", async () => {
+    let input: SendEmailInput | undefined;
+    const [send] = createWorkerMailTools({
+      sendEmail: async (value) => {
+        input = value;
+        return {
+          envelope,
+          spawned: false,
+          recipientDisposition: "main",
+          correlationId: envelope.id,
+          expectedReplySubject: "Re: [mail_tool] Result",
+        };
+      },
+      fetchEmails: () => [],
+    });
+    const result = await send.execute(
+      "tool-1",
+      { to: envelope.to, subject: envelope.subject, message: envelope.message, priority: "low" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    assert.deepEqual(input, { to: envelope.to, subject: envelope.subject, message: envelope.message, priority: "low" });
+    const text = (result.content[0] as { text: string }).text;
+    assert.match(text, /Email accepted/);
+    assert.match(text, /Correlation ID: mail_tool/);
+    assert.match(text, /Expected reply subject: Re: \[mail_tool\] Result/);
+    assert.equal(Object.hasOwn(input as object, "from"), false);
+  });
+
+  it("fetches only broker-provided unanswered mail", async () => {
+    const [_, fetch] = createWorkerMailTools({
+      sendEmail: async () => ({ envelope, spawned: false, recipientDisposition: "main", correlationId: envelope.id }),
+      fetchEmails: () => [envelope],
+    });
+    const result = await fetch.execute("tool-2", {}, undefined, undefined, {} as never);
+    assert.match((result.content[0] as { text: string }).text, /UNANSWERED EMAILS \(1\)/);
+    assert.match((result.content[0] as { text: string }).text, /mail_tool/);
+  });
+});
