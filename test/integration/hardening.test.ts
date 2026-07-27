@@ -476,4 +476,54 @@ describe("broker hardening", () => {
       await second.broker.shutdown();
     }
   });
+
+  it("marks requests delivered before the worker run observes its mailbox", async () => {
+    // A fast worker can read its mailbox during the first moments of a run,
+    // before a post-acceptance markDelivered would land; delivery must be
+    // journaled before prompt acceptance and before steering.
+    class EagerWorker extends FakeWorker {
+      mailboxAtPrompt: number[] = [];
+      mailboxAtSteer: number[] = [];
+      override async prompt(message: string): Promise<void> {
+        await super.prompt(message);
+        this.mailboxAtPrompt.push(this.fetch().length);
+      }
+      override async steer(message: string): Promise<void> {
+        this.mailboxAtSteer.push(this.fetch().length);
+        await super.steer(message);
+      }
+    }
+    const root = await mkdtemp(join(tmpdir(), "pi-email-hardening-"));
+    const workers: EagerWorker[] = [];
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config: structuredClone(DEFAULT_CONFIG),
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: new FakeMainAdapter(),
+      workerFactory: () => {
+        const worker = new EagerWorker();
+        workers.push(worker);
+        return worker;
+      },
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.eager@gpt-5.4.com", subject: "Eager", message: "Read your mailbox immediately.", priority: "low",
+      });
+      assert.deepEqual(workers[0]!.mailboxAtPrompt, [1]);
+
+      // The fake worker stays streaming; a high-priority request is steered
+      // and must already be visible in the worker mailbox at steer time.
+      await broker.send(broker.mainAddress, {
+        to: "worker.eager@gpt-5.4.com", subject: "Urgent", message: "Steered while busy.", priority: "high",
+      });
+      assert.deepEqual(workers[0]!.mailboxAtSteer, [2]);
+    } finally {
+      await broker.shutdown();
+    }
+  });
 });

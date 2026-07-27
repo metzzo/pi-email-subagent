@@ -663,8 +663,12 @@ export class AgentBroker {
     if (snapshot.record.state === "stopped") return;
     if (snapshot.isStreaming) {
       if (envelope.priority === "high") {
+        // Requests are marked delivered before steering so the worker's own
+        // fetch_emails sees them immediately; replies commit their answer only
+        // after steer acceptance so a rejection still releases the reservation.
+        if (envelope.kind === "request") await this.mailStore.markDelivered([envelope.id]);
         await worker.steer(formatEmail(envelope));
-        await this.mailStore.markDelivered([envelope.id]);
+        if (envelope.kind !== "request") await this.mailStore.markDelivered([envelope.id]);
       }
       return;
     }
@@ -730,10 +734,17 @@ export class AgentBroker {
     record.currentActivity = `Receiving ${queued.length} email${queued.length === 1 ? "" : "s"}`;
     record.updatedAt = nowIso();
     this.publish();
+    // Requests are marked delivered before the prompt so a fast worker sees
+    // them in fetch_emails from the first tool call of the run; a rejected
+    // prompt fails them again below. Replies commit their answer only after
+    // prompt acceptance so a rejection still releases the reservation.
+    const requestIds = queued.filter((email) => email.kind === "request").map((email) => email.id);
+    const replyIds = queued.filter((email) => email.kind !== "request").map((email) => email.id);
     try {
+      if (requestIds.length > 0) await this.mailStore.markDelivered(requestIds);
       await worker.prompt(formatEmailBatch(queued));
       if (this.disposed || this.workers.get(address) !== worker) return;
-      await this.mailStore.markDelivered(queued.map((email) => email.id));
+      if (replyIds.length > 0) await this.mailStore.markDelivered(replyIds);
       this.syncWorker(address, worker);
       await this.persistRegistry();
     } catch (error) {
