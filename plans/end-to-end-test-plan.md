@@ -172,7 +172,7 @@ Defects found and fixed during validation:
 
 Hardening implementation record:
 
-- `npm run validate`: passed, 79 tests, 79 passed, 0 failed.
+- `npm run validate`: passed, 84 tests, 84 passed, 0 failed.
 - Live provider acceptance passed with `openai-codex/gpt-5.6-terra` as main and `kimi-coding/k3` as worker while loading `pi-provider-kimi-code`.
 - Main used the allocated correlation ID with `wait_for_replies`; the K3 reply was returned as one collected tool result.
 - Atomic reply reservation/release, cancellation-safe restoration, restart/send serialization, priority scheduling, bounded queues, archival, schemas, escaped framing, effective role tools, and provider fail-fast paths have deterministic coverage.

@@ -1,4 +1,4 @@
-import { appendFile, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { EmailEnvelope } from "./types.ts";
@@ -115,9 +115,13 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && left.createdAt === right.createdAt;
 }
 
+// Rewrite the journal as a snapshot once it grows past this many events.
+export const MAIL_JOURNAL_COMPACT_THRESHOLD = 8192;
+
 export class MailStore {
   private readonly emails = new Map<string, EmailEnvelope>();
   private writeChain: Promise<void> = Promise.resolve();
+  private eventCount = 0;
 
   constructor(readonly path: string) {}
 
@@ -185,6 +189,7 @@ export class MailStore {
   }
 
   private apply(event: MailEvent): void {
+    this.eventCount += 1;
     if (event.type === "email.created") {
       const existing = this.emails.get(event.email.id);
       if (existing && !sameCreatedEmail(existing, event.email)) throw new Error(`Conflicting duplicate email ${event.email.id}.`);
@@ -395,5 +400,33 @@ export class MailStore {
 
   async flush(): Promise<void> {
     await this.writeChain;
+  }
+
+  /**
+   * Rewrite the journal as one `email.created` snapshot per known envelope.
+   * Envelopes carry their full state (delivery, reservations, answers), so
+   * replaying the snapshot reconstructs the same in-memory state.
+   */
+  async compact(): Promise<void> {
+    const operation = this.writeChain.catch(() => undefined).then(async () => {
+      const events: MailEvent[] = [...this.emails.values()].map((email) => ({
+        type: "email.created" as const,
+        email: clone(email),
+      }));
+      const payload = events.length > 0 ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
+      const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(temp, payload, { encoding: "utf8", mode: 0o600 });
+      await rename(temp, this.path);
+      try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+      this.eventCount = events.length;
+    });
+    this.writeChain = operation;
+    await operation;
+  }
+
+  async compactIfNeeded(threshold = MAIL_JOURNAL_COMPACT_THRESHOLD): Promise<boolean> {
+    if (this.eventCount <= threshold) return false;
+    await this.compact();
+    return true;
   }
 }

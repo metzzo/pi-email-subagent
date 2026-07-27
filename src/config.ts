@@ -6,8 +6,16 @@ import type { AddressConfig, RoleConfig, SubagentConfig } from "./types.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
+export const DEFAULT_MODEL_POLICY = `- Use model ID \`k3\` (email-domain suffix \`k3.com\`) for challenging, web-development-related, or creative tasks.
+- Use model ID \`gpt-5.6-sol\` (email-domain suffix \`gpt-5.6-sol.com\`) for very difficult, complicated, or high-reasoning-dependent tasks. This higher threshold takes precedence over \`k3\`.
+- Use model ID \`gpt-5.6-terra\` (email-domain suffix \`gpt-5.6-terra.com\`) only for very simple, fully explicit tasks that are not open to interpretation.
+- Never use any other model unless the user explicitly requests that specific model.
+- For ambiguous tasks, never choose \`gpt-5.6-terra\` if interpretation is needed; use \`k3\` unless the \`gpt-5.6-sol\` threshold is clearly met.
+- If a preferred model is not currently routable, report that limitation instead of silently substituting another model.`;
+
 export const DEFAULT_CONFIG: SubagentConfig = {
   defaultEffort: "medium",
+  modelPolicy: DEFAULT_MODEL_POLICY,
   maxAgents: 8,
   maxConcurrent: 4,
   maxMessageBytes: 32 * 1024,
@@ -41,6 +49,7 @@ export const DEFAULT_CONFIG: SubagentConfig = {
 
 interface RawConfig {
   defaultEffort?: unknown;
+  modelPolicy?: unknown;
   maxAgents?: unknown;
   maxConcurrent?: unknown;
   maxMessageBytes?: unknown;
@@ -133,6 +142,11 @@ function mergeProfiles<T extends RoleConfig>(base: Record<string, T>, overlay: R
 function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: string, warnings: string[]): SubagentConfig {
   if (!raw) return base;
   const defaultEffort = effort(raw.defaultEffort, base.defaultEffort, `${label}.defaultEffort`, warnings);
+  let modelPolicy = base.modelPolicy;
+  if (raw.modelPolicy !== undefined) {
+    if (typeof raw.modelPolicy === "string" && raw.modelPolicy.trim()) modelPolicy = raw.modelPolicy;
+    else warnings.push(`${label}.modelPolicy must be a non-empty string; ignoring it.`);
+  }
   const maxAgents = positiveInt(raw.maxAgents, base.maxAgents, `${label}.maxAgents`, warnings, 64);
   const maxConcurrent = Math.min(
     maxAgents,
@@ -140,6 +154,7 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
   );
   return {
     defaultEffort,
+    modelPolicy,
     maxAgents,
     maxConcurrent,
     maxMessageBytes: positiveInt(raw.maxMessageBytes, base.maxMessageBytes, `${label}.maxMessageBytes`, warnings, 1024 * 1024),

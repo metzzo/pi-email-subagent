@@ -29,6 +29,13 @@ function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
+// Generous upper bound for the `Re: [<mail-id>] ` prefix added to reply subjects.
+const REPLY_PREFIX_ALLOWANCE_BYTES = 64;
+
+function swallow(promise: Promise<unknown>): void {
+  promise.catch(() => undefined);
+}
+
 function sortMail(emails: EmailEnvelope[]): EmailEnvelope[] {
   return emails.sort((a, b) => {
     if (a.priority !== b.priority) return a.priority === "high" ? -1 : 1;
@@ -94,6 +101,8 @@ export class AgentBroker {
     try {
       await this.mailStore.init();
       this.checkpoint(generation);
+      await this.mailStore.compactIfNeeded();
+      this.checkpoint(generation);
       const currentMain = this.options.mainAdapter.getAddress().toLowerCase();
       this.registry = await this.registryStore.load(currentMain);
       this.checkpoint(generation);
@@ -151,8 +160,8 @@ export class AgentBroker {
 
       for (const record of this.records.values()) {
         if (!this.workers.has(record.address)) continue;
-        if (this.mailStore.unanswered(record.address).length > 0) void this.resumeEnforcement(record.address);
-        else if (this.mailStore.queued(record.address).length > 0) void this.schedule(record.address);
+        if (this.mailStore.unanswered(record.address).length > 0) swallow(this.resumeEnforcement(record.address));
+        else if (this.mailStore.queued(record.address).length > 0) swallow(this.schedule(record.address));
         else {
           record.state = "idle";
           record.updatedAt = nowIso();
@@ -273,7 +282,7 @@ export class AgentBroker {
     this.publish();
   }
 
-  private validateInput(input: SendEmailInput): void {
+  private validateInput(input: SendEmailInput, isReply: boolean): void {
     if (!input.to.trim()) throw new Error("Recipient is required.");
     if (!input.subject.trim()) throw new Error("Subject is required.");
     if (/[\r\n\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(input.subject)) {
@@ -281,8 +290,12 @@ export class AgentBroker {
     }
     if (!input.message.trim()) throw new Error("Message is required.");
     if (input.priority !== "high" && input.priority !== "low") throw new Error("Priority must be high or low.");
-    if (byteLength(input.subject) > this.options.config.maxSubjectBytes) {
-      throw new Error(`Subject exceeds ${this.options.config.maxSubjectBytes} bytes.`);
+    // Reply subjects carry the `Re: [mail-id] ` prefix on top of the original
+    // subject; without the allowance, maximally sized requests would be
+    // impossible to answer.
+    const subjectLimit = this.options.config.maxSubjectBytes + (isReply ? REPLY_PREFIX_ALLOWANCE_BYTES : 0);
+    if (byteLength(input.subject) > subjectLimit) {
+      throw new Error(`Subject exceeds ${subjectLimit} bytes.`);
     }
     if (byteLength(input.message) > this.options.config.maxMessageBytes) {
       throw new Error(`Message exceeds ${this.options.config.maxMessageBytes} bytes.`);
@@ -310,7 +323,7 @@ export class AgentBroker {
       this.options.mainAdapter.notifyFailure(`Reply ${envelope.id} failed delivery; request ${original.id} is open again.`);
       return;
     }
-    if (this.workers.has(original.to)) void this.resumeEnforcement(original.to);
+    if (this.workers.has(original.to)) swallow(this.resumeEnforcement(original.to));
   }
 
   send(senderInput: string, input: SendEmailInput): Promise<SendEmailResult> {
@@ -331,7 +344,8 @@ export class AgentBroker {
 
   private async sendInternal(senderInput: string, input: SendEmailInput): Promise<SendEmailResult> {
     this.assertActive();
-    this.validateInput(input);
+    const reply = parseReplySubject(input.subject);
+    this.validateInput(input, Boolean(reply));
     const sender = this.validateSender(senderInput);
     const requestedTo = input.to.trim().toLowerCase();
     if (this.sameIdentity(sender, requestedTo)) throw new Error("Sending email to yourself is not supported.");
@@ -351,7 +365,6 @@ export class AgentBroker {
       if (!steersImmediately) this.validateQueueCapacity(to, input);
     }
 
-    const reply = parseReplySubject(input.subject);
     if (!reply && looksLikeReply(input.subject)) {
       throw new Error("Malformed reply subject. Copy the exact `Re: [mail-id] original subject` from fetch_emails().");
     }
@@ -559,7 +572,7 @@ export class AgentBroker {
         agentDir: this.options.agentDir,
         sessionDir: join(this.options.namespaceDir, "sessions"),
         projectTrusted: this.options.projectTrusted,
-        systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds),
+        systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, this.options.config.modelPolicy),
         sendEmail: (input) => this.send(record.address, input),
         fetchEmails: () => this.fetchUnanswered(record.address),
       });
@@ -628,17 +641,20 @@ export class AgentBroker {
       record.activity = record.activity.slice(-40);
       record.updatedAt = nowIso();
       this.active.delete(address);
-      void this.persistRegistry().finally(() => this.pump());
+      this.persistRegistry().then(() => this.pump(), () => this.pump());
       if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${event.error}`);
       this.publish();
       return;
     }
     record.updatedAt = nowIso();
-    void this.persistRegistry();
+    // Activity-only events are frequent; the registry is a cache, so persist
+    // on state transitions only. Usage and activity are still durable via
+    // settlement, stop, archive, and shutdown persists.
+    if (event.type === "state" || event.type === "settled") swallow(this.persistRegistry());
     this.publish();
     if (event.type === "settled") {
       if (this.settling.has(address)) this.pendingSettlements.add(address);
-      else void this.onWorkerSettled(address, worker);
+      else swallow(this.onWorkerSettled(address, worker));
     }
   }
 
@@ -734,7 +750,7 @@ export class AgentBroker {
       this.scheduling.delete(address);
       this.publish();
       if (!this.disposed && this.workers.get(address) !== worker && this.mailStore.queued(address).length > 0) {
-        void this.schedule(address);
+        swallow(this.schedule(address));
       }
     }
   }
@@ -803,7 +819,7 @@ export class AgentBroker {
       record.updatedAt = nowIso();
       this.active.delete(address);
       await this.persistRegistry();
-      if (this.mailStore.queued(address).length > 0) void this.schedule(address);
+      if (this.mailStore.queued(address).length > 0) swallow(this.schedule(address));
       this.pump();
     } catch (error) {
       if (this.disposed || this.workers.get(address) !== worker) return;
@@ -820,7 +836,7 @@ export class AgentBroker {
       this.settling.delete(address);
       this.publish();
       if (this.pendingSettlements.delete(address) && !this.disposed && this.workers.get(address) === worker) {
-        void this.onWorkerSettled(address, worker);
+        swallow(this.onWorkerSettled(address, worker));
       }
     }
   }
@@ -831,8 +847,8 @@ export class AgentBroker {
       if (!address) break;
       const record = this.records.get(address);
       if (!record || ["stopped", "failed", "archived"].includes(record.state)) continue;
-      if (this.fetchUnanswered(address).length > 0) void this.resumeEnforcement(address);
-      else void this.schedule(address);
+      if (this.fetchUnanswered(address).length > 0) swallow(this.resumeEnforcement(address));
+      else swallow(this.schedule(address));
     }
   }
 
@@ -1018,6 +1034,9 @@ export class AgentBroker {
       if (record?.state === "failed") return { requestId, state: "failed", request, error: record.failure ?? "Agent failed." };
       if (record?.state === "stopped") return { requestId, state: "stopped", request, error: "Agent is stopped." };
       if (record?.state === "archived") return { requestId, state: "archived", request, error: "Agent is archived." };
+      if (record?.state === "paused" && !this.workers.has(request.to)) {
+        return { requestId, state: "paused", request, error: "Agent is paused by capacity and has no live worker." };
+      }
     }
     return { requestId, state: "pending", request };
   }

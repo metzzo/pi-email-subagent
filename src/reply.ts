@@ -12,7 +12,9 @@ export function parseReplySubject(subject: string): ParsedReplySubject | undefin
 }
 
 export function looksLikeReply(subject: string): boolean {
-  return /^\s*re\s*:/i.test(subject);
+  // Only `Re: [...`-shaped subjects are treated as malformed reply attempts;
+  // plain subjects that happen to start with "Re:" remain valid new mail.
+  return /^\s*re\s*:\s*\[/i.test(subject);
 }
 
 export function makeReplySubject(emailId: string, originalSubject: string): string {

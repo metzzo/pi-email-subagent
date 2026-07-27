@@ -64,6 +64,7 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
 ```json
 {
   "defaultEffort": "medium",
+  "modelPolicy": "- Use model ID `k3` ... (override the model selection policy section of every agent prompt)",
   "maxAgents": 8,
   "maxConcurrent": 4,
   "maxMailsPerMinute": 60,
@@ -91,7 +92,7 @@ Provider definitions, the model catalog, and persistent credentials are snapshot
 
 ## Persistence and limits
 
-State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. Mail is journaled before acceptance and worker sessions are resumed after reload. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
+State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. Mail is journaled before acceptance and worker sessions are resumed after reload. The append-only mail journal is compacted into a snapshot once it grows past 8192 events. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
 
 Reply obligations use durable reservation, delivery, commit, and release transitions: concurrent replies cannot both claim one request, and a failed reply delivery reopens it. Delivery across process-crash recovery is at least once, not exactly once. Stable email IDs let workers recognize retries and avoid repeating completed side effects. Durability targets ordinary process crashes, not sudden power loss.
 
