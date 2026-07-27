@@ -11,7 +11,14 @@ import { WorkerRuntimeFactory } from "./model-runtime.ts";
 import { formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
 import type { BrokerSnapshot, EmailEnvelope, MainAdapter, SubagentConfig } from "./types.ts";
-import { UIController } from "./ui.ts";
+import {
+  ConversationSource,
+  formatConversationPreview,
+  HISTORY_PREVIEW_MAX_BLOCKS,
+  sanitizeConversationBody,
+  sanitizeConversationLabel,
+  UIController,
+} from "./ui.ts";
 import { errorMessage, truncateText } from "./util.ts";
 
 const MESSAGE_TYPE = "pi-email-subagent.email";
@@ -36,7 +43,34 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   let mainAliases = new Set<string>();
   let currentContext: ExtensionContext | undefined;
   let effectiveConfig: SubagentConfig | undefined;
+  let latestBrokerSnapshot: BrokerSnapshot | undefined;
   let generation = 0;
+  const conversationSources = new Map<string, ConversationSource>();
+
+  const recordedConversationPreview = (address: string): string | undefined => {
+    const source = conversationSources.get(address.toLowerCase());
+    return source ? formatConversationPreview(source.blocks) : undefined;
+  };
+
+  const refreshConversationSources = async (snapshot: BrokerSnapshot, expectedGeneration: number): Promise<void> => {
+    const retained = new Set<string>();
+    const refreshes: Promise<boolean>[] = [];
+    for (const record of snapshot.agents) {
+      if (!record.sessionFile) continue;
+      retained.add(record.address);
+      let source = conversationSources.get(record.address);
+      if (!source || source.sessionFile !== record.sessionFile) {
+        source = new ConversationSource(record.sessionFile, 1_000, HISTORY_PREVIEW_MAX_BLOCKS);
+        conversationSources.set(record.address, source);
+      }
+      refreshes.push(source.refresh());
+    }
+    for (const address of conversationSources.keys()) {
+      if (!retained.has(address)) conversationSources.delete(address);
+    }
+    const changed = (await Promise.all(refreshes)).some(Boolean);
+    if (changed && generation === expectedGeneration && latestBrokerSnapshot) ui.update(latestBrokerSnapshot);
+  };
 
   const [sendTool, fetchTool] = createWorkerMailTools({
     sendEmail: async (input) => {
@@ -53,23 +87,40 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     ...sendTool,
     renderCall(args: any, theme) {
       const priorityColor = args.priority === "high" ? "warning" : "accent";
-      const subject = truncateText(args.subject || "(no subject)", 100);
+      const priority = sanitizeConversationLabel(String(args.priority ?? "")).toUpperCase();
+      const subject = truncateText(sanitizeConversationLabel(String(args.subject || "(no subject)")), 100);
+      const recipient = sanitizeConversationLabel(String(args.to ?? ""));
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("send_email "))}${theme.fg(priorityColor, `[${String(args.priority).toUpperCase()}]`)} ${theme.fg("accent", args.to)}\n  ${theme.fg("dim", subject)}`,
+        `${theme.fg("toolTitle", theme.bold("send_email "))}${theme.fg(priorityColor, `[${priority}]`)} ${theme.fg("accent", recipient)}\n  ${theme.fg("dim", subject)}`,
         0,
         0,
       );
     },
     renderResult(result, { expanded }, theme) {
       const details = result.details as SendToolDetails | undefined;
-      if (!details?.result) return new Text(theme.fg(details?.error ? "error" : "toolOutput", resultText(result)), 0, 0);
+      if (!details?.result) {
+        return new Text(theme.fg(details?.error ? "error" : "toolOutput", sanitizeConversationBody(resultText(result))), 0, 0);
+      }
       const sent = details.result;
       const icon = theme.fg("success", "✓");
-      let text = `${icon} ${theme.fg("accent", sent.envelope.to)} ${theme.fg("muted", sent.envelope.id)}`;
-      text += `\n${theme.fg("dim", `${sent.recipientDisposition} · ${sent.recipientModel ?? "main"}${sent.recipientEffort ? ` · effort ${sent.recipientEffort}` : ""}`)}`;
-      if (sent.expectedReplySubject) text += `\n${theme.fg("muted", `reply: ${sent.expectedReplySubject}`)}`;
-      if (sent.answeredEmailId) text += `\n${theme.fg("success", `answered ${sent.answeredEmailId}`)}`;
-      if (expanded) text += `\n\n${theme.fg("toolOutput", sent.envelope.message)}`;
+      const recipient = sanitizeConversationLabel(sent.envelope.to);
+      const envelopeId = sanitizeConversationLabel(sent.envelope.id);
+      const disposition = sanitizeConversationLabel(sent.recipientDisposition);
+      const model = sanitizeConversationLabel(sent.recipientModel ?? "main");
+      const effort = sent.recipientEffort ? ` · effort ${sanitizeConversationLabel(sent.recipientEffort)}` : "";
+      let text = `${icon} ${theme.fg("accent", recipient)} ${theme.fg("muted", envelopeId)}`;
+      text += `\n${theme.fg("dim", `${disposition} · ${model}${effort}`)}`;
+      if (sent.expectedReplySubject) text += `\n${theme.fg("muted", `reply: ${sanitizeConversationLabel(sent.expectedReplySubject)}`)}`;
+      if (sent.answeredEmailId) text += `\n${theme.fg("success", `answered ${sanitizeConversationLabel(sent.answeredEmailId)}`)}`;
+      if (expanded) {
+        text += `\n\n${theme.fg("toolOutput", sanitizeConversationBody(sent.envelope.message))}`;
+        const conversation = recordedConversationPreview(sent.envelope.to);
+        if (conversation) {
+          text += `\n\n${theme.fg("toolTitle", "Recent subagent conversation")}\n${theme.fg("toolOutput", conversation)}`;
+        } else if (sent.envelope.to !== broker?.mainAddress) {
+          text += `\n\n${theme.fg("dim", "Conversation preview is loading. Full transcript: /agents → select agent → Ctrl+O")}`;
+        }
+      }
       return new Text(text, 0, 0);
     },
   });
@@ -83,12 +134,14 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
     renderResult(result, { expanded }, theme) {
       const details = result.details as FetchToolDetails | undefined;
-      if (!details) return new Text(theme.fg("toolOutput", resultText(result)), 0, 0);
+      if (!details) return new Text(theme.fg("toolOutput", sanitizeConversationBody(resultText(result))), 0, 0);
       if (details.emails.length === 0) return new Text(theme.fg("success", "✓ no unanswered emails"), 0, 0);
       let text = theme.fg("warning", `${details.emails.length} unanswered email${details.emails.length === 1 ? "" : "s"}`);
       for (const email of details.emails) {
-        text += `\n${theme.fg(email.priority === "high" ? "warning" : "accent", `[${email.priority.toUpperCase()}]`)} ${theme.fg("text", email.subject)} ${theme.fg("dim", `from ${email.from}`)}`;
-        if (expanded) text += `\n  ${theme.fg("toolOutput", email.message)}`;
+        const subject = sanitizeConversationLabel(email.subject);
+        const from = sanitizeConversationLabel(email.from);
+        text += `\n${theme.fg(email.priority === "high" ? "warning" : "accent", `[${email.priority.toUpperCase()}]`)} ${theme.fg("text", subject)} ${theme.fg("dim", `from ${from}`)}`;
+        if (expanded) text += `\n  ${theme.fg("toolOutput", sanitizeConversationBody(email.message))}`;
       }
       return new Text(text, 0, 0);
     },
@@ -103,11 +156,25 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     if (!email) return new Text(String(message.content), 0, 0);
     const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
     const color = email.priority === "high" ? "warning" : "accent";
-    let text = `${theme.fg(color, "📬")} ${theme.fg("accent", email.from)} ${theme.fg("muted", "→")} ${theme.fg("accent", email.to)} ${theme.fg(color, `[${email.priority.toUpperCase()}]`)}`;
-    text += `\n${theme.fg("toolTitle", email.subject)}`;
-    text += `\n\n${theme.fg("customMessageText", expanded ? email.message : truncateText(email.message, 500))}`;
+    const from = sanitizeConversationLabel(email.from);
+    const to = sanitizeConversationLabel(email.to);
+    const subject = sanitizeConversationLabel(email.subject);
+    const body = sanitizeConversationBody(email.message);
+    let text = `${theme.fg(color, "📬")} ${theme.fg("accent", from)} ${theme.fg("muted", "→")} ${theme.fg("accent", to)} ${theme.fg(color, `[${email.priority.toUpperCase()}]`)}`;
+    text += `\n${theme.fg("toolTitle", subject)}`;
+    text += `\n\n${theme.fg("customMessageText", expanded ? body : truncateText(body, 500))}`;
     if (expanded) {
-      text += `\n\n${theme.fg("dim", `id ${email.id} · ${email.kind}${email.inReplyTo ? ` · reply to ${email.inReplyTo}` : ""} · ${email.createdAt}`)}`;
+      const id = sanitizeConversationLabel(email.id);
+      const kind = sanitizeConversationLabel(email.kind);
+      const reply = email.inReplyTo ? ` · reply to ${sanitizeConversationLabel(email.inReplyTo)}` : "";
+      const createdAt = sanitizeConversationLabel(email.createdAt);
+      text += `\n\n${theme.fg("dim", `id ${id} · ${kind}${reply} · ${createdAt}`)}`;
+      const conversation = recordedConversationPreview(email.from);
+      if (conversation) {
+        text += `\n\n${theme.fg("toolTitle", "Recent subagent conversation")}\n${theme.fg("customMessageText", conversation)}`;
+      } else {
+        text += `\n\n${theme.fg("dim", "Conversation preview is loading. Full transcript: /agents → select agent → Ctrl+O")}`;
+      }
     }
     box.addChild(new Text(text, 0, 0));
     return box;
@@ -115,7 +182,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
 
   pi.registerMessageRenderer<{ message: string }>(ALERT_TYPE, (message, _options, theme) => {
     const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-    box.addChild(new Text(`${theme.fg("error", "Subagent alert")}\n${theme.fg("customMessageText", message.details?.message ?? String(message.content))}`, 0, 0));
+    const alert = sanitizeConversationBody(message.details?.message ?? String(message.content));
+    box.addChild(new Text(`${theme.fg("error", "Subagent alert")}\n${theme.fg("customMessageText", alert)}`, 0, 0));
     return box;
   });
 
@@ -166,6 +234,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const myGeneration = generation;
     currentContext = ctx;
     effectiveConfig = undefined;
+    latestBrokerSnapshot = undefined;
+    conversationSources.clear();
     ui.bind(ctx);
     if (broker) await broker.shutdown().catch(() => undefined);
     if (generation !== myGeneration) return;
@@ -211,7 +281,10 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
         } catch { /* stale runtime */ }
       },
       updateState(snapshot: BrokerSnapshot) {
-        if (generation === myGeneration) ui.update(snapshot);
+        if (generation !== myGeneration) return;
+        latestBrokerSnapshot = snapshot;
+        ui.update(snapshot);
+        refreshConversationSources(snapshot, myGeneration).catch(() => undefined);
       },
     };
 
@@ -273,6 +346,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     broker = undefined;
     currentContext = undefined;
     effectiveConfig = undefined;
+    latestBrokerSnapshot = undefined;
+    conversationSources.clear();
     ui.clear();
     if (current) await current.shutdown();
   });
