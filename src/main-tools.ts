@@ -53,7 +53,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           `${inspection.exists ? "Existing" : "Prospective"} agent: ${inspection.address}`,
           `State: ${inspection.state}`,
           `Model: ${inspection.provider}/${inspection.modelId} · effort ${inspection.effort}`,
-          `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"}`,
+          `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"} · ${inspection.canSpawn ? "can spawn" : "spawn disabled"}`,
           `Tools: ${inspection.tools.join(", ")}`,
           `Capacity available: ${inspection.capacityAvailable ? "yes" : "no"}`,
           `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} unanswered · ${inspection.pendingReplies} pending replies`,

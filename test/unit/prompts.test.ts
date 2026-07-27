@@ -88,6 +88,7 @@ describe("mail prompts", () => {
     config.roles.worker!.tools = ["read", "grep"];
     config.roles.scout!.tools = ["read", "bash", "edit"];
     config.roles.reviewer!.tools = ["read"];
+    config.roles.reviewer!.canSpawn = false;
     config.addresses["worker.special@gpt-5.6-sol.com"] = { tools: ["read", "write"] };
 
     const prompt = mainCoordinatorPrompt(
@@ -98,10 +99,10 @@ describe("mail prompts", () => {
       0,
       config,
     );
-    assert.match(prompt, /worker: read, grep, send_email, fetch_emails \(read-only\)/);
-    assert.match(prompt, /scout: read, bash, edit, send_email, fetch_emails \(writable\)/);
-    assert.match(prompt, /reviewer: read, send_email, fetch_emails \(read-only\)/);
-    assert.match(prompt, /worker\.special@gpt-5\.6-sol\.com: read, write, send_email, fetch_emails \(writable\)/);
+    assert.match(prompt, /worker: read, grep, send_email, fetch_emails \(read-only, can spawn\)/);
+    assert.match(prompt, /scout: read, bash, edit, send_email, fetch_emails \(writable, can spawn\)/);
+    assert.match(prompt, /reviewer: read, send_email, fetch_emails \(read-only, spawn disabled\)/);
+    assert.match(prompt, /worker\.special@gpt-5\.6-sol\.com: read, write, send_email, fetch_emails \(writable, can spawn\)/);
     assert.doesNotMatch(prompt, /built-in `worker` role has writable/);
   });
 
@@ -114,6 +115,7 @@ describe("mail prompts", () => {
       modelId: "gpt-5.6-sol",
       effort: "high",
       tools: ["read", "edit", "bash", "send_email", "fetch_emails"],
+      canSpawn: true,
       state: "idle",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
@@ -122,6 +124,9 @@ describe("mail prompts", () => {
       activity: [],
     };
     const prompt = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
+    assert.doesNotMatch(prompt, /not permitted to create new agents/);
+    const restricted = subagentPrompt({ ...record, canSpawn: false }, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
+    assert.match(restricted, /not permitted to create new agents/);
     assert.match(prompt, /Use model ID `k3`/);
     const custom = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"], "- Always use `gpt-5.4`.");
     assert.match(custom, /Always use `gpt-5\.4`/);

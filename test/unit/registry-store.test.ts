@@ -16,6 +16,7 @@ function record(address = "worker.registry@gpt-5.4.com"): AgentRecord {
     modelId: "gpt-5.4",
     effort: "medium",
     tools: ["read", "send_email", "fetch_emails"],
+    canSpawn: true,
     state: "archived",
     createdAt: now,
     updatedAt: now,
@@ -43,6 +44,16 @@ describe("registry schema", () => {
     await store.save(registry());
     const restored = await store.load("main@gpt-5.4.com");
     assert.equal(restored.agents[0]?.state, "archived");
+  });
+
+  it("defaults canSpawn for registries written before spawn control", () => {
+    const legacy = registry() as unknown as { agents: Record<string, unknown>[] };
+    delete legacy.agents[0]!.canSpawn;
+    const parsed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
+    assert.equal(parsed.agents[0]?.canSpawn, true);
+
+    legacy.agents[0]!.canSpawn = "yes";
+    assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);
   });
 
   it("rejects malformed records and duplicate identities", async () => {

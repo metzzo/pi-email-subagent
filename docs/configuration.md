@@ -33,7 +33,8 @@ Project values merge over global values, which merge over the defaults below. In
     "reviewer": {
       "effort": "high",
       "tools": ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
-      "instructions": "Review for correctness; do not modify files."
+      "instructions": "Review for correctness; do not modify files.",
+      "canSpawn": false
     }
   },
   "addresses": {
@@ -46,6 +47,7 @@ Project values merge over global values, which merge over the defaults below. In
 
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key.
 - Resolution order per field: exact address → role → defaults. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
+- `canSpawn` (default `true`) controls whether an agent may send to an unknown address and thereby create a new identity. Spawn-disabled agents get an actionable error and may still reuse existing addresses, reply, and mail main; their system prompt states the restriction. Main is never spawn-restricted.
 - Unknown tool names are dropped at worker start and noted in the agent's activity log.
 - Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
@@ -57,6 +59,8 @@ Project values merge over global values, which merge over the defaults below. In
 | `scout` | low | read, grep, find, ls + mail | Explore and report evidence; read-only |
 | `reviewer` | high | read, grep, find, ls + mail | Review with findings and validation; read-only |
 | `worker` | medium | read, grep, find, ls, bash, edit, write + mail | Implement and validate changes |
+
+All default roles may spawn; set `canSpawn: false` on read-only roles to prevent fan-out and unplanned token spend.
 
 ## Notes
 

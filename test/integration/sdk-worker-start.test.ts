@@ -21,6 +21,7 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
     modelId: model.id,
     effort: "low",
     tools: ["read", "grep", "find", "ls", "not_a_real_tool", "send_email", "fetch_emails"],
+    canSpawn: true,
     state: "paused",
     createdAt: now,
     updatedAt: now,

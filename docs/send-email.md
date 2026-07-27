@@ -66,7 +66,7 @@ Recipient state: running
 | `answeredEmailId` | Present when this send answered an earlier request |
 | `recipientModel/Effort/Role/Tools/State` | Effective recipient profile (agents only) |
 
-Failure text is `Email was not accepted: <reason>` with `isError: true` and `details.error`. Notable reasons: rate limit exceeded, agent limit reached, mailbox queue full, subject/message too long, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
+Failure text is `Email was not accepted: <reason>` with `isError: true` and `details.error`. Notable reasons: rate limit exceeded, agent limit reached, mailbox queue full, subject/message too long, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
 
 If the tool call is aborted before acceptance, the result is `Email send aborted before acceptance.` and nothing is journaled.
 

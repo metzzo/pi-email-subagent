@@ -123,6 +123,7 @@ export class AgentBroker {
         record.provider = parsed.model.provider;
         record.modelId = parsed.model.id;
         record.tools = profile.tools;
+        record.canSpawn = profile.canSpawn;
         record.instructions = profile.instructions;
         if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
         this.records.set(record.address, record);
@@ -357,6 +358,10 @@ export class AgentBroker {
       parsed = parseSubagentAddress(requestedTo, this.catalog);
       to = parsed.address;
       if (this.sameIdentity(sender, to)) throw new Error("Sending email to yourself is not supported.");
+      const senderRecord = this.records.get(sender);
+      if (senderRecord && !senderRecord.canSpawn && !this.records.has(to)) {
+        throw new Error(`Agent ${sender} is not permitted to spawn new agents; reuse an existing address.`);
+      }
       if (!this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
         throw new Error(`Agent limit reached (${this.options.config.maxAgents}); archive or reuse an existing address.`);
       }
@@ -528,6 +533,7 @@ export class AgentBroker {
       modelId: parsed.model.id,
       effort: profile.effort,
       tools: profile.tools,
+      canSpawn: profile.canSpawn,
       ...(profile.instructions !== undefined ? { instructions: profile.instructions } : {}),
       state: "spawning",
       createdAt: now,
@@ -1001,6 +1007,7 @@ export class AgentBroker {
       tools: [...tools],
       ...(record?.instructions ?? profile.instructions ? { instructions: record?.instructions ?? profile.instructions } : {}),
       writable: tools.some((tool) => ["bash", "edit", "write"].includes(tool)),
+      canSpawn: record?.canSpawn ?? profile.canSpawn,
       state: record?.state ?? "new",
       ...(record?.currentActivity ? { currentActivity: record.currentActivity } : {}),
       queued: this.mailStore.queued(parsed.address).length,

@@ -20,7 +20,7 @@ Preview or inspect an agent address without spawning it. Main-thread only. Execu
 Existing agent: reviewer.audit@gpt-5.6-sol.com
 State: idle
 Model: openai/gpt-5.6-sol · effort high
-Role: reviewer · read-only
+Role: reviewer · read-only · spawn disabled
 Tools: read, grep, find, ls, send_email, fetch_emails
 Capacity available: yes
 Mailbox: 0 queued · 1 unanswered · 0 pending replies
@@ -35,6 +35,7 @@ Last failure: …            (only when present)
 | `capacityAvailable` | Whether the address holds or could obtain an activation lease under `maxAgents` |
 | `modelId`, `provider`, `effort`, `role`, `tools`, `instructions` | Effective profile (record if live, resolved config otherwise) |
 | `writable` | Effective tools include a mutation tool |
+| `canSpawn` | Whether the agent may create new identities by mailing unknown addresses |
 | `state` | `new` for prospective addresses, otherwise the lifecycle state |
 | `currentActivity` | Latest activity summary, when present |
 | `queued` / `unanswered` / `pendingReplies` | Mailbox counts: queued inbound, open obligations to it, replies reserved but not yet delivered |

@@ -24,7 +24,7 @@ Well-engineered: journaled mail store with crash repair and a reply reservation 
 ### Design observations
 
 8. **Hardcoded model policy.** `k3`/`gpt-5.6-sol`/`gpt-5.6-terra` baked into every system prompt regardless of routability. Fix: make the policy text configurable (`modelPolicy` config key), current text as default.
-9. **Workers can spawn workers** — contained by rate limits and `maxAgents`; a `canSpawn` role option deferred (new feature, out of scope).
+9. **Workers can spawn workers** — contained by rate limits and `maxAgents`. **Fixed:** `canSpawn` role/address option (default `true`); spawn-disabled agents cannot create identities but may reuse existing ones, with config validation, prompt disclosure, `inspect_agent` visibility, and broker enforcement.
 10. Failed batch prompts permanently fail envelopes (documented at-least-once philosophy); intentional.
 11. Activation leases retained for failed workers until `archive` (intentional capacity accounting).
 
