@@ -65,6 +65,10 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-071 | Shutdown | Active workers are aborted/paused, disposed, and registry/mail writes flush | Covered by every broker test `finally` plus persistence restart test |
 | E2E-080 | Dashboard width safety | Dashboard lines remain within 20/40/60/80/120-column widths with long addresses and activity | `test/unit/ui.test.ts` |
 | E2E-081 | Full conversation viewer | `Ctrl+O` on the selected dashboard agent opens a live-refreshing recorded active-branch conversation with scroll controls; expanded history rows show a bounded recent preview and full-viewer directions; hidden thinking and terminal controls remain excluded | `test/unit/ui.test.ts`, `test/unit/conversation-ui.test.ts`, `test/e2e/extension-load.test.ts` |
+| E2E-090 | Real delegation flow in a real Pi process | RPC-driven real `pi` with a scripted mock provider: main delegates, a real SDK worker spawns, fetches, and replies with the exact subject; `wait_for_replies` collects the answer; widget publishes state; registry/journal/worker session file persist correctly | `test/e2e/real-flow.test.ts`, `test/e2e/helpers/` |
+| E2E-091 | Real identity reuse and lifecycle control | Second delegation reports `reused`; `manage_agent` stop then archive transitions state on disk; no second identity is created | `test/e2e/real-flow.test.ts` |
+| E2E-092 | Real high-priority steering | High mail sent while the worker is genuinely mid-run is marked delivered through steering immediately; both requests are answered exactly once | `test/e2e/real-flow.test.ts` |
+| E2E-093 | Delivery precedes worker mailbox visibility | Batch and steered requests are journaled delivered before prompt acceptance/steering so a fast worker's own `fetch_emails` always sees them | `test/integration/hardening.test.ts` |
 
 ## Interactive TUI acceptance scenarios
 
@@ -183,3 +187,9 @@ Interactive notes:
 
 - Dashboard line-width behavior is automated at 20, 40, 60, 80, and 120 columns.
 - Keyboard focus, terminal theme switching, and visual styling still require a human TUI because they depend on an attached terminal; the exact checklist is retained above.
+
+### 2026-07-27
+
+- `npm run validate`: passed, 88 tests, 88 passed, 0 failed.
+- Added the real end-to-end suite (`test/e2e/real-flow.test.ts`): a real `pi --mode rpc` process loads the extension next to `test/e2e/helpers/mock-provider-extension.ts`, a deterministic `streamSimple` provider that scripts tool calls from conversation context. Main turns, the broker, journaling, real SDK worker sessions, steering, and reply collection all execute for real; no paid provider calls.
+- The suite immediately caught a real delivery race: batch and steered requests were journaled delivered only after prompt acceptance, so a fast worker's own `fetch_emails` (and the settlement enforcement check) could run before delivery was visible, stranding the obligation. Requests are now marked delivered before prompt acceptance and before steering; replies keep post-acceptance commit so a rejected prompt still releases the reservation. Deterministic regression coverage added (`E2E-093`).
