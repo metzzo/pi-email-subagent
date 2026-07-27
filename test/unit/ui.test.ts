@@ -21,6 +21,7 @@ function record(): AgentRecord {
     modelId: "gpt-5.4-mini",
     effort: "high",
     tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
+    canSpawn: true,
     state: "running",
     createdAt: now,
     updatedAt: now,

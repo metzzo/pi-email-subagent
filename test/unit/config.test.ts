@@ -93,6 +93,27 @@ describe("configuration", () => {
     assert.match(invalid.warnings[0]!, /modelPolicy/);
   });
 
+  it("resolves canSpawn exact-over-role-over-default with warnings for invalid values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      roles: { scout: { canSpawn: false } },
+      addresses: { "scout.privileged@gpt-5.4.com": { canSpawn: true } },
+    }));
+    const { config, warnings } = loadConfig(agentDir, root, false);
+    assert.deepEqual(warnings, []);
+    assert.equal(resolveAgentProfile(config, "scout.a@gpt-5.4.com", "scout").canSpawn, false);
+    assert.equal(resolveAgentProfile(config, "scout.privileged@gpt-5.4.com", "scout").canSpawn, true);
+    assert.equal(resolveAgentProfile(config, "worker.a@gpt-5.4.com", "worker").canSpawn, true);
+
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ roles: { scout: { canSpawn: "no" } } }));
+    const invalid = loadConfig(agentDir, root, false);
+    assert.equal(invalid.config.roles.scout?.canSpawn, undefined);
+    assert.equal(invalid.warnings.length, 1);
+    assert.match(invalid.warnings[0]!, /canSpawn/);
+  });
+
   it("warns and falls back for invalid values", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
     const agentDir = join(root, "agent");

@@ -124,6 +124,10 @@ function roleRecord(value: unknown, label: string, warnings: string[]): Record<s
       if (typeof entry.instructions === "string") next.instructions = entry.instructions;
       else warnings.push(`${label}.${name}.instructions must be a string; ignoring it.`);
     }
+    if (entry.canSpawn !== undefined) {
+      if (typeof entry.canSpawn === "boolean") next.canSpawn = entry.canSpawn;
+      else warnings.push(`${label}.${name}.canSpawn must be a boolean; ignoring it.`);
+    }
     result[name.toLowerCase()] = next;
   }
   return result;
@@ -222,14 +226,19 @@ export function loadConfig(
   return { config, warnings };
 }
 
-export function resolveAgentProfile(config: SubagentConfig, address: string, name: string): Required<Pick<RoleConfig, "effort" | "tools">> & Pick<RoleConfig, "instructions"> {
+export function resolveAgentProfile(
+  config: SubagentConfig,
+  address: string,
+  name: string,
+): Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions"> {
   const role = config.roles[name] ?? {};
   const exact = config.addresses[address] ?? {};
   const tools = exact.tools ?? role.tools ?? ["read", "grep", "find", "ls", "send_email", "fetch_emails"];
   const merged = {
     effort: exact.effort ?? role.effort ?? config.defaultEffort,
     tools: [...new Set([...tools, "send_email", "fetch_emails"])],
-  } as Required<Pick<RoleConfig, "effort" | "tools">> & Pick<RoleConfig, "instructions">;
+    canSpawn: exact.canSpawn ?? role.canSpawn ?? true,
+  } as Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions">;
   const instructions = exact.instructions ?? role.instructions;
   if (instructions !== undefined) merged.instructions = instructions;
   return merged;

@@ -38,6 +38,7 @@ export interface RoleConfig {
   effort?: ThinkingLevel;
   tools?: string[];
   instructions?: string;
+  canSpawn?: boolean;
 }
 
 export interface AddressConfig extends RoleConfig {}
@@ -84,6 +85,7 @@ export interface AgentRecord {
   modelId: string;
   effort: ThinkingLevel;
   tools: string[];
+  canSpawn: boolean;
   instructions?: string;
   state: AgentStatus;
   sessionFile?: string;
@@ -140,6 +142,7 @@ export interface AgentInspection {
   tools: string[];
   instructions?: string;
   writable: boolean;
+  canSpawn: boolean;
   state: AgentStatus | "new";
   currentActivity?: string;
   queued: number;

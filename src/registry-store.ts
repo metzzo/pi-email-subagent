@@ -71,6 +71,9 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   if (!Number.isInteger(raw.enforcementAttempts) || (raw.enforcementAttempts as number) < 0) {
     throw new Error(`${label}.enforcementAttempts must be a non-negative integer.`);
   }
+  if (raw.canSpawn !== undefined && typeof raw.canSpawn !== "boolean") {
+    throw new Error(`${label}.canSpawn must be a boolean.`);
+  }
   const record: AgentRecord = {
     address: string(raw.address, `${label}.address`).toLowerCase(),
     name: string(raw.name, `${label}.name`),
@@ -79,6 +82,8 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     modelId: string(raw.modelId, `${label}.modelId`),
     effort,
     tools: stringArray(raw.tools, `${label}.tools`),
+    // Absent in registries written before spawn control existed.
+    canSpawn: raw.canSpawn === undefined ? true : (raw.canSpawn as boolean),
     state,
     createdAt: string(raw.createdAt, `${label}.createdAt`),
     updatedAt: string(raw.updatedAt, `${label}.updatedAt`),

@@ -477,6 +477,45 @@ describe("broker hardening", () => {
     }
   });
 
+  it("blocks spawn-disabled agents from creating identities but allows reuse", async () => {
+    const roles = structuredClone(DEFAULT_CONFIG.roles);
+    roles.scout!.canSpawn = false;
+    const { broker, workers } = await setup({ roles });
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "scout.one@gpt-5.4.com", subject: "One", message: "First.", priority: "low",
+      });
+      await broker.send(broker.mainAddress, {
+        to: "scout.two@gpt-5.4.com", subject: "Two", message: "Second.", priority: "low",
+      });
+      assert.equal(workers.length, 2);
+
+      // Reusing an existing address is still permitted.
+      const reuse = await workers[0]!.send({
+        to: "scout.two@gpt-5.4.com", subject: "Reuse", message: "Existing identity.", priority: "low",
+      });
+      assert.equal(reuse.spawned, false);
+      assert.equal(reuse.recipientDisposition, "reused");
+
+      // Spawning a new identity is rejected for the spawn-disabled role.
+      await assert.rejects(workers[0]!.send({
+        to: "scout.three@gpt-5.4.com", subject: "Spawn", message: "New identity.", priority: "low",
+      }), /not permitted to spawn new agents/);
+      assert.equal(workers.length, 2, "no third worker was created");
+
+      // A spawn-enabled worker role remains unrestricted.
+      await broker.send(broker.mainAddress, {
+        to: "worker.three@gpt-5.4.com", subject: "Three", message: "Third.", priority: "low",
+      });
+      const spawned = await workers[2]!.send({
+        to: "scout.four@gpt-5.4.com", subject: "Four", message: "Fourth.", priority: "low",
+      });
+      assert.equal(spawned.spawned, true);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("marks requests delivered before the worker run observes its mailbox", async () => {
     // A fast worker can read its mailbox during the first moments of a run,
     // before a post-acceptance markDelivered would land; delivery must be

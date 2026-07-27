@@ -95,17 +95,18 @@ Email delivery is at least once across crash recovery. Every envelope has a stab
 const MUTATION_TOOLS = new Set(["bash", "edit", "write"]);
 
 export function effectiveRoleToolSummary(config: SubagentConfig): string {
-  const describe = (label: string, tools: readonly string[]) => {
-    const capability = tools.some((tool) => MUTATION_TOOLS.has(tool)) ? "writable" : "read-only";
-    return `- ${label}: ${tools.join(", ") || "(none)"} (${capability})`;
+  const describe = (label: string, profile: { tools: readonly string[]; canSpawn: boolean }) => {
+    const capability = profile.tools.some((tool) => MUTATION_TOOLS.has(tool)) ? "writable" : "read-only";
+    const spawn = profile.canSpawn ? "can spawn" : "spawn disabled";
+    return `- ${label}: ${profile.tools.join(", ") || "(none)"} (${capability}, ${spawn})`;
   };
   const roles = Object.keys(config.roles).sort().map((name) => {
     const profile = resolveAgentProfile(config, `__summary__.role@invalid`, name);
-    return describe(name, profile.tools);
+    return describe(name, profile);
   });
   const addresses = Object.keys(config.addresses).sort().map((address) => {
     const name = address.split(".", 1)[0]!.toLowerCase();
-    return describe(address, resolveAgentProfile(config, address, name).tools);
+    return describe(address, resolveAgentProfile(config, address, name));
   });
   return ["Effective configured role tools:", ...roles, ...(addresses.length ? ["Effective exact-address overrides:", ...addresses] : [])].join("\n");
 }
@@ -151,6 +152,9 @@ export function subagentPrompt(
   modelPolicy: string = DEFAULT_MODEL_POLICY,
 ): string {
   const role = record.instructions ? `\nRole-specific instructions:\n${record.instructions}\n` : "";
+  const spawnRule = record.canSpawn
+    ? ""
+    : "\nYou are not permitted to create new agents: sending to an unknown address is rejected. Reuse an existing agent or ask the main thread to spawn one.\n";
   return `${sharedMailPrompt({ address: record.address, modelId: record.modelId, effort: record.effort }, modelIds, modelPolicy)}
 ## Subagent Role
 
@@ -159,7 +163,7 @@ You are a persistent Pi subagent.
 - Your address: \`${record.address}\`
 - Your task slug: \`${record.taskSlug}\`
 - Main thread: \`${mainAddress}\`
-${role}
+${role}${spawnRule}
 Your transcript is private to your session. The requester cannot be assumed to see assistant output or tool results.
 
 For every work cycle:
