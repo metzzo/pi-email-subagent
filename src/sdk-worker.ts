@@ -220,8 +220,11 @@ export class SdkWorker implements WorkerTransport {
     await loader.reload();
     if (this.disposed || generation !== this.startGeneration) throw new Error("Worker start was cancelled.");
 
-    const sessionManager = this.record.sessionFile && existsSync(this.record.sessionFile)
-      ? SessionManager.open(this.record.sessionFile, config.sessionDir, config.cwd)
+    const resumableSessionFile = this.record.sessionFile && existsSync(this.record.sessionFile)
+      ? this.record.sessionFile
+      : undefined;
+    const sessionManager = resumableSessionFile
+      ? SessionManager.open(resumableSessionFile, config.sessionDir, config.cwd)
       : SessionManager.create(config.cwd, config.sessionDir);
 
     const requestedTools = [...this.record.tools];
@@ -236,7 +239,7 @@ export class SdkWorker implements WorkerTransport {
       resourceLoader: loader,
       sessionManager,
       settingsManager: settings,
-      sessionStartEvent: { type: "session_start", reason: this.record.sessionFile ? "resume" : "new" },
+      sessionStartEvent: { type: "session_start", reason: resumableSessionFile ? "resume" : "new" },
     });
     if (this.disposed || generation !== this.startGeneration) {
       if (session.isStreaming) await session.abort().catch(() => undefined);

@@ -122,6 +122,10 @@ describe("mail prompts", () => {
       activity: [],
     };
     const prompt = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
+    assert.match(prompt, /Use model ID `k3`/);
+    const custom = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"], "- Always use `gpt-5.4`.");
+    assert.match(custom, /Always use `gpt-5\.4`/);
+    assert.doesNotMatch(custom, /Use model ID `k3`/);
     assert.match(prompt, /objective, scope, constraints, and deliverables intact/i);
     assert.match(prompt, /make the relevant changes, not merely describe, suggest, or draft them/i);
     assert.match(prompt, /run the requested or appropriate validation/i);

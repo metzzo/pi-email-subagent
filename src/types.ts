@@ -44,6 +44,7 @@ export interface AddressConfig extends RoleConfig {}
 
 export interface SubagentConfig {
   defaultEffort: ThinkingLevel;
+  modelPolicy: string;
   maxAgents: number;
   maxConcurrent: number;
   maxMessageBytes: number;
@@ -149,7 +150,7 @@ export interface AgentInspection {
   providerReady: "available" | "unknown";
 }
 
-export type ReplyWaitState = "answered" | "failed" | "stopped" | "archived" | "pending";
+export type ReplyWaitState = "answered" | "failed" | "stopped" | "archived" | "paused" | "pending";
 
 export interface ReplyWaitItem {
   requestId: string;

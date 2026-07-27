@@ -10,7 +10,14 @@ describe("reply subjects", () => {
   });
 
   it("recognizes malformed reply attempts without accepting them", () => {
+    assert.equal(parseReplySubject("Re: [mail_abc_123]"), undefined);
+    assert.equal(looksLikeReply("Re: [mail_abc_123]"), true);
+    assert.equal(looksLikeReply(" re : [not-an-id] subject"), true);
+  });
+
+  it("allows new subjects that merely start with Re:", () => {
     assert.equal(parseReplySubject("Re: Audit token handling"), undefined);
-    assert.equal(looksLikeReply(" re : Audit token handling"), true);
+    assert.equal(looksLikeReply(" re : Audit token handling"), false);
+    assert.equal(looksLikeReply("Re: factor the auth module"), false);
   });
 });

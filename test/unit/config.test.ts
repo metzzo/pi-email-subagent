@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { loadConfig, resolveAgentProfile } from "../../src/config.ts";
+import { DEFAULT_MODEL_POLICY, loadConfig, resolveAgentProfile } from "../../src/config.ts";
 
 describe("configuration", () => {
   it("applies exact address over role over defaults", async () => {
@@ -75,6 +75,22 @@ describe("configuration", () => {
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(cwd, ".pi", "subagents.json"), JSON.stringify({ defaultEffort: "max" }));
     assert.equal(loadConfig(agentDir, cwd, false).config.defaultEffort, "medium");
+  });
+
+  it("allows overriding the model selection policy and warns on invalid values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ modelPolicy: "- Always use `gpt-5.4`." }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.deepEqual(loaded.warnings, []);
+    assert.equal(loaded.config.modelPolicy, "- Always use `gpt-5.4`.");
+
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ modelPolicy: 42 }));
+    const invalid = loadConfig(agentDir, root, false);
+    assert.equal(invalid.config.modelPolicy, DEFAULT_MODEL_POLICY);
+    assert.equal(invalid.warnings.length, 1);
+    assert.match(invalid.warnings[0]!, /modelPolicy/);
   });
 
   it("warns and falls back for invalid values", async () => {

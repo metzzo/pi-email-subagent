@@ -155,6 +155,45 @@ describe("durable mail store", () => {
     await assert.rejects(restored.init(), /Corrupt mail journal.*unknown event type/i);
   });
 
+  it("compacts the journal into a snapshot without losing state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
+    const path = join(root, "mail.jsonl");
+    const store = new MailStore(path);
+    await store.init();
+    await store.accept(email("mail_one"));
+    await store.accept(email("mail_two"));
+    await store.markDelivered(["mail_one", "mail_two"]);
+    const reply: EmailEnvelope = {
+      ...email("mail_reply"),
+      from: "worker.task@gpt-5.4.com",
+      to: "main@gpt-5.4.com",
+      subject: "Re: [mail_one] mail_one",
+      kind: "reply",
+      inReplyTo: "mail_one",
+      requiresResponse: false,
+    };
+    await store.reserveReply(reply, "mail_one");
+    await store.markDelivered(["mail_reply"]);
+    const before = store.list();
+
+    assert.equal(await store.compactIfNeeded(1), true);
+    await store.flush();
+    const lines = (await readFile(path, "utf8")).trim().split("\n");
+    assert.equal(lines.length, before.length);
+    for (const line of lines) assert.match(line, /email\.created/);
+
+    // Appends continue to work after compaction.
+    await store.accept(email("mail_three"));
+
+    const restored = new MailStore(path);
+    await restored.init();
+    assert.deepEqual(restored.list(), store.list());
+    assert.equal(restored.get("mail_one")?.answeredBy, "mail_reply");
+    assert.equal(restored.get("mail_two")?.deliveryState, "delivered");
+    assert.equal(restored.get("mail_three")?.deliveryState, "queued");
+    assert.equal(await restored.compactIfNeeded(1), true);
+  });
+
   it("sorts high priority before low while preserving FIFO", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
     const store = new MailStore(join(root, "mail.jsonl"));

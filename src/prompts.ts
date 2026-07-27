@@ -1,5 +1,5 @@
 import type { AgentRecord, EmailEnvelope, SubagentConfig } from "./types.ts";
-import { resolveAgentProfile } from "./config.ts";
+import { DEFAULT_MODEL_POLICY, resolveAgentProfile } from "./config.ts";
 import { makeReplySubject } from "./reply.ts";
 
 function xml(value: string): string {
@@ -33,7 +33,11 @@ export function formatUnanswered(emails: readonly EmailEnvelope[]): string {
   return `UNANSWERED EMAILS (${emails.length})\n\n${formatEmailBatch(emails)}`;
 }
 
-export function sharedMailPrompt(identity: { address: string; modelId: string; effort: string }, modelIds: readonly string[]): string {
+export function sharedMailPrompt(
+  identity: { address: string; modelId: string; effort: string },
+  modelIds: readonly string[],
+  modelPolicy: string = DEFAULT_MODEL_POLICY,
+): string {
   return `## Virtual Agent Email
 
 Your email identity is:
@@ -60,12 +64,7 @@ Never invent or guess a model name. Sending to a valid unknown address creates t
 
 ### Model selection policy
 
-- Use model ID \`k3\` (email-domain suffix \`k3.com\`) for challenging, web-development-related, or creative tasks.
-- Use model ID \`gpt-5.6-sol\` (email-domain suffix \`gpt-5.6-sol.com\`) for very difficult, complicated, or high-reasoning-dependent tasks. This higher threshold takes precedence over \`k3\`.
-- Use model ID \`gpt-5.6-terra\` (email-domain suffix \`gpt-5.6-terra.com\`) only for very simple, fully explicit tasks that are not open to interpretation.
-- Never use any other model unless the user explicitly requests that specific model.
-- For ambiguous tasks, never choose \`gpt-5.6-terra\` if interpretation is needed; use \`k3\` unless the \`gpt-5.6-sol\` threshold is clearly met.
-- If a preferred model is not currently routable, report that limitation instead of silently substituting another model.
+${modelPolicy}
 
 ### Delivery priority
 
@@ -122,7 +121,7 @@ export function mainCoordinatorPrompt(
   const capabilitySummary = effectiveConfig
     ? effectiveRoleToolSummary(effectiveConfig)
     : "No effective role/tool snapshot was supplied to this prompt. Do not infer capabilities from role labels; use the recipient's actual configured tools.";
-  return `${sharedMailPrompt({ address, modelId, effort }, modelIds)}
+  return `${sharedMailPrompt({ address, modelId, effort }, modelIds, effectiveConfig?.modelPolicy ?? DEFAULT_MODEL_POLICY)}
 ## Main Agent Coordination
 
 You are the main Pi thread at \`${address}\`. Default to doing work directly unless delegation has a concrete benefit. Appropriate uses are an isolated, self-contained work package; an unbiased independent review or opinion; a scout that compresses a large context into relevant findings; or genuinely independent, substantial parallel branches. Do not delegate trivial work, tightly coupled or sequential work, work whose coordination overhead exceeds its benefit, or duplicate work.
@@ -145,9 +144,14 @@ Current unanswered main-thread requests: ${unanswered}.
 `;
 }
 
-export function subagentPrompt(record: AgentRecord, mainAddress: string, modelIds: readonly string[]): string {
+export function subagentPrompt(
+  record: AgentRecord,
+  mainAddress: string,
+  modelIds: readonly string[],
+  modelPolicy: string = DEFAULT_MODEL_POLICY,
+): string {
   const role = record.instructions ? `\nRole-specific instructions:\n${record.instructions}\n` : "";
-  return `${sharedMailPrompt({ address: record.address, modelId: record.modelId, effort: record.effort }, modelIds)}
+  return `${sharedMailPrompt({ address: record.address, modelId: record.modelId, effort: record.effort }, modelIds, modelPolicy)}
 ## Subagent Role
 
 You are a persistent Pi subagent.

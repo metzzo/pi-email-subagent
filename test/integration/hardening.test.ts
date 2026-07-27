@@ -429,4 +429,51 @@ describe("broker hardening", () => {
       await broker.shutdown();
     }
   });
+
+  it("accepts replies to maximally sized subjects", async () => {
+    const { broker, workers } = await setup({ maxSubjectBytes: 64 });
+    try {
+      const subject = "S".repeat(64);
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.limit@gpt-5.4.com", subject, message: "Task.", priority: "low",
+      });
+      const replySubject = makeReplySubject(sent.envelope.id, subject);
+      assert.ok(Buffer.byteLength(replySubject, "utf8") > 64);
+      const reply = await workers[0]!.send({
+        to: broker.mainAddress, subject: replySubject, message: "Done.", priority: "low",
+      });
+      assert.equal(reply.answeredEmailId, sent.envelope.id);
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.limit@gpt-5.4.com", subject: "N".repeat(65), message: "Too long.", priority: "low",
+      }), /Subject exceeds 64 bytes/);
+      await assert.rejects(workers[0]!.send({
+        to: broker.mainAddress, subject: `${replySubject}${"R".repeat(64)}`, message: "Too long.", priority: "low",
+      }), /Subject exceeds 128 bytes/);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("reports capacity-paused recipients as terminal in reply waits", async () => {
+    const first = await setup({ maxAgents: 2 });
+    await first.broker.send(first.broker.mainAddress, {
+      to: "worker.one@gpt-5.4.com", subject: "One", message: "One.", priority: "low",
+    });
+    const pending = await first.broker.send(first.broker.mainAddress, {
+      to: "worker.two@gpt-5.4.com", subject: "Two", message: "Two.", priority: "low",
+    });
+    await first.broker.shutdown();
+
+    const second = await setup({ maxAgents: 1 }, first.root);
+    try {
+      assert.equal(second.broker.inspectAgent("worker.two@gpt-5.4.com").state, "paused");
+      const result = await second.broker.waitForReplies([pending.envelope.id], 0, true);
+      assert.equal(result.complete, true);
+      assert.equal(result.timedOut, false);
+      assert.equal(result.items[0]?.state, "paused");
+      assert.match(result.items[0]?.error ?? "", /paused/i);
+    } finally {
+      await second.broker.shutdown();
+    }
+  });
 });

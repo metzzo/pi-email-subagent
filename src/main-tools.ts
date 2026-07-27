@@ -71,7 +71,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
-      "Join already-sent response-required email requests. Waits until each is answered, failed, stopped, archived, or the bounded timeout expires; returns completed and pending results together. With collection enabled, correlated replies do not trigger separate model turns.",
+      "Join already-sent response-required email requests. Waits until each is answered, failed, stopped, archived, paused without a live worker, or the bounded timeout expires; returns completed and pending results together. With collection enabled, correlated replies do not trigger separate model turns.",
     promptSnippet: "Wait for and collect replies to delegated email request IDs.",
     promptGuidelines: [
       "Use request IDs returned by send_email; never invent IDs.",
