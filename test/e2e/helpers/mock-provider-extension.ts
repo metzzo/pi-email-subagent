@@ -12,12 +12,17 @@
  * collection — runs for real. Only the LLM is scripted.
  *
  * Main-thread script (system prompt contains "Main Agent Coordination"):
- *   user "E2E DELEGATE [SLOW <ms>] [HIGH] [NOWAIT]" → send_email to the worker
- *   user "E2E STOP" / "E2E ARCHIVE"                  → manage_agent
+ *   user "E2E DELEGATE [SLOW <ms>] [HIGH] [NOWAIT]" → send_email to the scout
+ *   user "E2E DELEGATE REVIEWER ..."                → send_email to the reviewer
+ *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
+ *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
+ *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
+ *   user "E2E INSPECT"                              → inspect_agent on the scout
+ *   user "E2E STOP" / "E2E ARCHIVE"                 → manage_agent
  *   send_email result                                → wait_for_replies for all
  *                                                      correlation IDs seen so
  *                                                      far (or finish on NOWAIT)
- *   wait_for_replies / manage_agent result           → final text
+ *   wait_for_replies / manage_agent / inspect result → final text
  *
  * Worker script (system prompt contains "Subagent Role"):
  *   email batch / steer / enforcement prompt → fetch_emails (after optional
@@ -25,6 +30,10 @@
  *   fetch_emails result                      → one send_email reply per
  *                                              unanswered email, exact subjects
  *   send_email result                        → "WORKER DONE"
+ *   email body containing "CRASH"            → the stream throws (terminal error)
+ *   email body containing "IGNORE"           → first fetch result is met with
+ *                                              silence until a mailbox-
+ *                                              enforcement prompt arrives
  */
 import type { Api, AssistantMessage, Context, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
@@ -33,6 +42,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export const MOCK_PROVIDER_ID = "mock-e2e";
 export const MOCK_MODEL_ID = "mock-e2e";
 export const MOCK_WORKER_ADDRESS = "scout.e2e@mock-e2e.com";
+export const MOCK_REVIEWER_ADDRESS = "reviewer.e2e@mock-e2e.com";
+export const MOCK_MAIN_ADDRESS = "main@mock-e2e.com";
+const RATE_ADDRESSES = ["scout.e2e", "scout.two", "scout.three", "scout.four"].map((name) => `${name}@mock-e2e.com`);
 
 type ToolCallPlan = { name: string; arguments: Record<string, unknown> };
 type Plan = { toolCalls: ToolCallPlan[] } | { text: string };
@@ -62,6 +74,10 @@ function lastUserInstruction(messages: readonly Message[]): string {
   return "";
 }
 
+function allText(messages: readonly Message[]): string {
+  return messages.map((message) => messageText(message)).join("\n");
+}
+
 function correlationIds(messages: readonly Message[]): string[] {
   const ids: string[] = [];
   for (const message of messages) {
@@ -89,9 +105,29 @@ function unansweredPairs(text: string): MailPair[] {
   return pairs;
 }
 
+function lastToolResultIndex(messages: readonly Message[], toolName: string): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "toolResult" && message.toolName === toolName) return index;
+  }
+  return -1;
+}
+
 function planMain(messages: readonly Message[]): Plan {
   const last = messages.at(-1);
   const lastText = messageText(last);
+
+  // If requests were sent but never joined (e.g. a steered alert preempted the
+  // normal post-send turn), join them now — unless the instruction was NOWAIT
+  // or the current message is a fresh instruction to execute first.
+  const ids = correlationIds(messages);
+  const lastIsInstruction = last?.role === "user" && lastText.includes("E2E");
+  if (!lastIsInstruction
+    && ids.length > 0
+    && !lastUserInstruction(messages).includes("NOWAIT")
+    && lastToolResultIndex(messages, "send_email") > lastToolResultIndex(messages, "wait_for_replies")) {
+    return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: ids, timeout_seconds: 90, collect: true } }] };
+  }
 
   if (last?.role === "toolResult") {
     if (last.toolName === "send_email") {
@@ -102,6 +138,7 @@ function planMain(messages: readonly Message[]): Plan {
     }
     if (last.toolName === "wait_for_replies") return { text: "E2E COMPLETE" };
     if (last.toolName === "manage_agent") return { text: "E2E MANAGED" };
+    if (last.toolName === "inspect_agent") return { text: "E2E INSPECTED" };
     return { text: "E2E PONG" };
   }
 
@@ -112,18 +149,44 @@ function planMain(messages: readonly Message[]): Plan {
   if (lastText.includes("E2E ARCHIVE")) {
     return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "archive" } }] };
   }
+  if (lastText.includes("E2E INSPECT")) {
+    return { toolCalls: [{ name: "inspect_agent", arguments: { address: MOCK_WORKER_ADDRESS } }] };
+  }
+  if (lastText.includes("E2E SEND INVALID")) {
+    return {
+      toolCalls: [
+        { name: "send_email", arguments: { to: "bogus-address", subject: "Bad address", message: "No side effects.", priority: "low" } },
+        { name: "send_email", arguments: { to: MOCK_MAIN_ADDRESS, subject: "Self send", message: "No side effects.", priority: "low" } },
+        {
+          name: "send_email",
+          arguments: { to: MOCK_WORKER_ADDRESS, subject: "Re: [mail_0000_fake] Bogus", message: "Unknown reference.", priority: "low" },
+        },
+      ],
+    };
+  }
+  if (lastText.includes("E2E RATE")) {
+    return {
+      toolCalls: RATE_ADDRESSES.map((to) => ({
+        name: "send_email",
+        arguments: { to, subject: "Rate probe", message: "Report your two virtual email tools.", priority: "low" },
+      })),
+    };
+  }
   if (lastText.includes("E2E DELEGATE")) {
     const slow = /SLOW (\d+)/.exec(lastText)?.[1];
     const priority = lastText.includes("HIGH") ? "high" : "low";
+    const crash = lastText.includes("CRASH") ? " CRASH" : "";
+    const ignore = lastText.includes("IGNORE") ? " IGNORE" : "";
     const message = slow
-      ? `Simulate slow work: SLOW ${slow}. Then report the names of your two virtual email tools.`
-      : "Call fetch_emails, then report the names of your two virtual email tools. Do not modify files.";
-    return {
-      toolCalls: [{
-        name: "send_email",
-        arguments: { to: MOCK_WORKER_ADDRESS, subject: "Verify e2e mailbox", message, priority },
-      }],
-    };
+      ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
+      : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
+    const send = (to: string): ToolCallPlan => ({
+      name: "send_email",
+      arguments: { to, subject: "Verify e2e mailbox", message, priority },
+    });
+    if (lastText.includes("BOTH")) return { toolCalls: [send(MOCK_WORKER_ADDRESS), send(MOCK_REVIEWER_ADDRESS)] };
+    if (lastText.includes("REVIEWER")) return { toolCalls: [send(MOCK_REVIEWER_ADDRESS)] };
+    return { toolCalls: [send(MOCK_WORKER_ADDRESS)] };
   }
   return { text: "E2E PONG" };
 }
@@ -143,6 +206,11 @@ function planWorker(messages: readonly Message[]): Plan {
           priority: "low",
         },
       }));
+      // "IGNORE" requests are met with silence until the broker's enforcement
+      // reminder arrives, to exercise the unanswered-obligation path.
+      if (replies.length > 0 && lastText.includes("IGNORE") && !allText(messages).includes("<mailbox-enforcement")) {
+        return { text: "WORKER SILENT" };
+      }
       if (replies.length > 0) return { toolCalls: replies };
       return { text: "WORKER IDLE" };
     }
@@ -191,6 +259,11 @@ function streamMock(model: Model<Api>, context: Context, options?: SimpleStreamO
       const slow = /SLOW (\d+)/.exec(lastText)?.[1];
       if (slow) await sleep(Math.min(Number(slow), 15_000));
       if (options?.signal?.aborted) throw new Error("Mock stream aborted.");
+
+      // Simulate a terminal provider failure for crash-testing worker runs.
+      if (!system.includes("Main Agent Coordination") && lastText.includes("CRASH")) {
+        throw new Error("Simulated provider failure.");
+      }
 
       const plan = system.includes("Main Agent Coordination") ? planMain(messages) : planWorker(messages);
       if ("text" in plan) {

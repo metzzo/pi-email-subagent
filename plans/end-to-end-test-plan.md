@@ -69,6 +69,16 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-091 | Real identity reuse and lifecycle control | Second delegation reports `reused`; `manage_agent` stop then archive transitions state on disk; no second identity is created | `test/e2e/real-flow.test.ts` |
 | E2E-092 | Real high-priority steering | High mail sent while the worker is genuinely mid-run is marked delivered through steering immediately; both requests are answered exactly once | `test/e2e/real-flow.test.ts` |
 | E2E-093 | Delivery precedes worker mailbox visibility | Batch and steered requests are journaled delivered before prompt acceptance/steering so a fast worker's own `fetch_emails` always sees them | `test/integration/hardening.test.ts` |
+| E2E-094 | Invalid mail rejection | Bad address shape, self-send, and unknown reply references error with no spawned identities or journal side effects | `test/e2e/real-flow.test.ts` |
+| E2E-095 | Capability preview | `inspect_agent` reports the prospective profile (`new`, read-only, no spawn) and the live state after delegation | `test/e2e/real-flow.test.ts` |
+| E2E-096 | Uncollected reply delivery | Without a collector the worker reply arrives as a displayed custom email message triggering a main turn; journal answers exactly once | `test/e2e/real-flow.test.ts` |
+| E2E-097 | Parallel fan-out | One turn delegates to two addresses; both spawn, both answers are collected in one `wait_for_replies`; registry holds both | `test/e2e/real-flow.test.ts` |
+| E2E-098 | Concurrency queueing | With `maxConcurrent: 1` a second worker's mail stays queued (widget-visible) until the first settles, then completes | `test/e2e/real-flow.test.ts` |
+| E2E-099 | Enforcement reminder | A worker that settles silently is re-prompted; the reminder appears in its persisted transcript and the request is answered exactly once | `test/e2e/real-flow.test.ts` |
+| E2E-100 | Terminal worker failure | A crashing provider marks the worker failed, resolves `wait_for_replies` as `failed`, alerts main, and records the failure in the registry | `test/e2e/real-flow.test.ts` |
+| E2E-101 | Sender rate limiting | With a per-sender limit of 3, the fourth parallel send is rejected and only three identities spawn | `test/e2e/real-flow.test.ts` |
+| E2E-102 | Archival obligation guard | Archiving a stopped agent with queued inbound mail is rejected with an actionable error | `test/e2e/real-flow.test.ts` |
+| E2E-103 | Process-restart restore | Resuming the persisted main session in a new `pi` process restores registry, journal, and worker identity; new mail reuses it | `test/e2e/real-flow.test.ts` |
 
 ## Interactive TUI acceptance scenarios
 
@@ -193,3 +203,5 @@ Interactive notes:
 - `npm run validate`: passed, 88 tests, 88 passed, 0 failed.
 - Added the real end-to-end suite (`test/e2e/real-flow.test.ts`): a real `pi --mode rpc` process loads the extension next to `test/e2e/helpers/mock-provider-extension.ts`, a deterministic `streamSimple` provider that scripts tool calls from conversation context. Main turns, the broker, journaling, real SDK worker sessions, steering, and reply collection all execute for real; no paid provider calls.
 - The suite immediately caught a real delivery race: batch and steered requests were journaled delivered only after prompt acceptance, so a fast worker's own `fetch_emails` (and the settlement enforcement check) could run before delivery was visible, stranding the obligation. Requests are now marked delivered before prompt acceptance and before steering; replies keep post-acceptance commit so a rejected prompt still releases the reservation. Deterministic regression coverage added (`E2E-093`).
+- Expanded to 13 real scenarios (`E2E-094`–`E2E-103`): invalid-mail rejection, capability preview, uncollected reply turns, parallel fan-out, concurrency queueing, enforcement reminders, terminal failure surfacing, rate limiting, archival guards, and cross-process restart restore via `switch_session`. Per-scenario config is injected through `<agentDir>/subagents.json`; the mock provider scripts main/worker behavior including slow runs, silence-then-reminder, crash, and alert-preempted waits.
+- `npm run validate`: passed, 98 tests, 98 passed, 0 failed (twice consecutively).

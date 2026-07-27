@@ -17,6 +17,8 @@ export interface LaunchOptions {
   model: string;
   extensions: string[];
   piBin?: string;
+  /** Keep the main session on disk (omit --no-session) so it can be resumed. */
+  persistSession?: boolean;
 }
 
 export class PiRpcClient {
@@ -55,7 +57,9 @@ export class PiRpcClient {
   static launch(options: LaunchOptions): PiRpcClient {
     const args = ["-ne"];
     for (const extension of options.extensions) args.push("-e", extension);
-    args.push("--mode", "rpc", "--no-session", "--model", options.model);
+    args.push("--mode", "rpc");
+    if (!options.persistSession) args.push("--no-session");
+    args.push("--model", options.model);
     const child = spawn(options.piBin ?? process.env.PI_BIN ?? "pi", args, {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -101,21 +105,53 @@ export class PiRpcClient {
   }
 
   async prompt(message: string): Promise<void> {
+    const mark = this.mark();
     this.send({ type: "prompt", message });
     await this.waitFor(
       (line) => line.type === "response" && line.command === "prompt",
       "prompt preflight response",
       30_000,
+      mark,
     );
   }
 
   async getState(): Promise<RpcLine> {
+    const mark = this.mark();
     this.send({ type: "get_state" });
     return this.waitFor(
       (line) => line.type === "response" && line.command === "get_state",
       "get_state response",
       30_000,
+      mark,
     );
+  }
+
+  async switchSession(sessionPath: string): Promise<RpcLine> {
+    const mark = this.mark();
+    this.send({ type: "switch_session", sessionPath });
+    return this.waitFor(
+      (line) => line.type === "response" && line.command === "switch_session" && line.success === true,
+      "switch_session response",
+      30_000,
+      mark,
+    );
+  }
+
+  /** Poll buffered events until `count` matching lines exist after `mark`. */
+  async collect(
+    pred: (line: RpcLine) => boolean,
+    count: number,
+    description: string,
+    timeoutMs = 90_000,
+    after = 0,
+  ): Promise<RpcLine[]> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const matches = this.lines.slice(Math.max(after, 0)).filter(pred);
+      if (matches.length >= count) return matches;
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
+    }
+    throw new Error(`Timed out collecting ${count} × ${description}.\n${this.stderr}\nLast events: ${this.tailSummary()}`);
   }
 
   waitFor(
