@@ -205,3 +205,10 @@ Interactive notes:
 - The suite immediately caught a real delivery race: batch and steered requests were journaled delivered only after prompt acceptance, so a fast worker's own `fetch_emails` (and the settlement enforcement check) could run before delivery was visible, stranding the obligation. Requests are now marked delivered before prompt acceptance and before steering; replies keep post-acceptance commit so a rejected prompt still releases the reservation. Deterministic regression coverage added (`E2E-093`).
 - Expanded to 13 real scenarios (`E2E-094`–`E2E-103`): invalid-mail rejection, capability preview, uncollected reply turns, parallel fan-out, concurrency queueing, enforcement reminders, terminal failure surfacing, rate limiting, archival guards, and cross-process restart restore via `switch_session`. Per-scenario config is injected through `<agentDir>/subagents.json`; the mock provider scripts main/worker behavior including slow runs, silence-then-reminder, crash, and alert-preempted waits.
 - `npm run validate`: passed, 98 tests, 98 passed, 0 failed (twice consecutively).
+
+Follow-up (same day):
+
+- `canSpawn` role/address option added (default `true`): spawn-disabled agents cannot create identities but may reuse existing addresses, reply, and mail main; disclosed in the role-tool summary, subagent prompt, and `inspect_agent`. Registry files written before the option load with `canSpawn: true`.
+- `npm run validate`: passed, 101 tests, 101 passed, 0 failed (three consecutive full runs; the hardening suite additionally passed 8/8 isolated runs — the single flake observed on 2026-07-25 has not recurred).
+- Live provider acceptance re-verified after the delivery-ordering fix: `openai-codex/gpt-5.6-terra` main, `kimi-coding/k3` worker via `pi-provider-kimi-code`; the K3 worker fetched and replied, and main collected the answer through `wait_for_replies`. The live script now resolves bare npm package names from pi's package root.
+- Package dry run: 31 files, 89.1 kB, includes `src`, `docs`, `plans`, README, LICENSE. `npm audit --omit=dev`: 0 vulnerabilities. Version remains 0.1.0 for the initial release.
