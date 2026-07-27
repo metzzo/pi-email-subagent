@@ -64,6 +64,7 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-070 | Sender spoofing | Tool input has no sender field; worker-bound closure supplies identity | `test/integration/tools.test.ts` |
 | E2E-071 | Shutdown | Active workers are aborted/paused, disposed, and registry/mail writes flush | Covered by every broker test `finally` plus persistence restart test |
 | E2E-080 | Dashboard width safety | Dashboard lines remain within 20/40/60/80/120-column widths with long addresses and activity | `test/unit/ui.test.ts` |
+| E2E-081 | Full conversation viewer | `Ctrl+O` on the selected dashboard agent opens a live-refreshing recorded active-branch conversation with scroll controls; expanded history rows show a bounded recent preview and full-viewer directions; hidden thinking and terminal controls remain excluded | `test/unit/ui.test.ts`, `test/unit/conversation-ui.test.ts`, `test/e2e/extension-load.test.ts` |
 
 ## Interactive TUI acceptance scenarios
 
@@ -85,16 +86,19 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 
 1. Open `/agents` while two workers are active.
 2. Navigate with arrows; inspect detail with Enter and inbox with `i`.
-3. Confirm recent assistant text/tool activity is visible but hidden thinking is absent.
-4. Compose with `e`, stop with `k`, restart with `r`, archive with `a`, clear stale failure with `x`, and change idle effort with `m`.
-5. Confirm archive is rejected for live/obligated agents and effort changes are rejected while running.
+3. Press `Ctrl+O`; confirm the selected agent's complete recorded conversation opens, refreshes as an active worker appends, arrows/Page Up/Page Down scroll it, and `Ctrl+O` or Escape returns to the dashboard.
+4. Confirm visible assistant text and tool exchanges are present but hidden thinking and terminal control sequences are absent.
+5. Compose with `e`, stop with `k`, restart with `r`, archive with `a`, clear stale failure with `x`, and change idle effort with `m`.
+6. Confirm archive is rejected for live/obligated agents and effort changes are rejected while running.
 
 ### TUI-004 Rendering widths and expansion
 
 1. Repeat at 60, 80, and 120 columns.
 2. Verify no rendered line exceeds terminal width.
 3. Expand/collapse `send_email`, `fetch_emails`, and incoming email cards.
-4. Change theme and verify colors are recomputed.
+4. Confirm expanded `send_email` results and incoming agent email cards include only a bounded recent conversation preview plus directions to `/agents` → `Ctrl+O`; verify repeated rows do not embed unbounded full transcripts.
+5. Confirm previews omit hidden thinking and terminal control sequences.
+6. Change theme and verify colors are recomputed.
 
 ## Optional live-provider scenario
 
@@ -168,7 +172,7 @@ Defects found and fixed during validation:
 
 Hardening implementation record:
 
-- `npm run validate`: passed, 72 tests, 72 passed, 0 failed.
+- `npm run validate`: passed, 79 tests, 79 passed, 0 failed.
 - Live provider acceptance passed with `openai-codex/gpt-5.6-terra` as main and `kimi-coding/k3` as worker while loading `pi-provider-kimi-code`.
 - Main used the allocated correlation ID with `wait_for_replies`; the K3 reply was returned as one collected tool result.
 - Atomic reply reservation/release, cancellation-safe restoration, restart/send serialization, priority scheduling, bounded queues, archival, schemas, escaped framing, effective role tools, and provider fail-fast paths have deterministic coverage.

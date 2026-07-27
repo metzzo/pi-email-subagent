@@ -12,7 +12,7 @@ The existing 38 passing tests are the baseline. Every in-scope defect receives a
 
 Completed on 2026-07-24:
 
-- `npm run validate`: 72 tests passed, 0 failed, including real Pi RPC loading.
+- `npm run validate`: 79 tests passed, 0 failed, including real Pi RPC loading.
 - Live-provider acceptance passed with `openai-codex/gpt-5.6-terra` main, `kimi-coding/k3` worker, exact reply settlement, and grouped `wait_for_replies` collection without a separate injected email turn.
 - Package dry run passed and `npm audit --omit=dev` reports 0 production vulnerabilities.
 - A final independent read-only follow-up verified all six late reliability findings were resolved and found no remaining material correctness blocker.

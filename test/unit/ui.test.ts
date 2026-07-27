@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { DashboardComponent } from "../../src/ui.ts";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript } from "../../src/ui.ts";
 import type { AgentRecord, BrokerSnapshot } from "../../src/types.ts";
 
 const fakeTheme = {
@@ -51,5 +52,86 @@ describe("dashboard rendering", () => {
       assert.equal(lines.every((line) => visibleWidth(line) <= width), true, `overflow at width ${width}`);
       component.invalidate();
     }
+  });
+
+  it("opens running, stopped, and archived agent conversations with ctrl+o", () => {
+    for (const state of ["running", "stopped", "archived"] as const) {
+      const agent = record();
+      agent.state = state;
+      agent.sessionFile = `/tmp/${state}.jsonl`;
+      const snapshot: BrokerSnapshot = {
+        mainAddress: "main@gpt-5.4-mini.com",
+        agents: [agent],
+        unanswered: 0,
+        queuedMail: 0,
+      };
+      let action: { kind: string; address?: string } | undefined;
+      const component = new DashboardComponent(
+        () => snapshot,
+        () => [],
+        (next) => { action = next; },
+        () => undefined,
+        fakeTheme,
+      );
+      component.handleInput("\x0f");
+      assert.deepEqual(action, { kind: "conversation", address: agent.address });
+    }
+  });
+
+  it("renders the full visible conversation without exposing thinking", () => {
+    const timestamp = new Date().toISOString();
+    const entries = [
+      {
+        type: "message", id: "user", parentId: null, timestamp,
+        message: { role: "user", content: "Complete request body", timestamp: Date.now() },
+      },
+      {
+        type: "message", id: "assistant", parentId: "user", timestamp,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hidden chain of thought" },
+            { type: "text", text: "Visible answer with enough words to wrap across narrow terminals." },
+            { type: "toolCall", id: "call", name: "read", arguments: { path: "/tmp/example.ts" } },
+          ],
+          timestamp: Date.now(), provider: "test", model: "test", api: "test",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "toolUse",
+        },
+      },
+      {
+        type: "message", id: "tool", parentId: "assistant", timestamp,
+        message: {
+          role: "toolResult", toolCallId: "call", toolName: "read",
+          content: [{ type: "text", text: "Full tool result" }], isError: false, timestamp: Date.now(),
+        },
+      },
+    ] as unknown as SessionEntry[];
+    const blocks = conversationBlocks(entries);
+    const serialized = JSON.stringify(blocks);
+    assert.match(serialized, /Complete request body/);
+    assert.match(serialized, /Visible answer/);
+    assert.match(serialized, /example\.ts/);
+    assert.match(serialized, /Full tool result/);
+    assert.doesNotMatch(serialized, /hidden chain of thought/);
+    const transcript = formatConversationTranscript(blocks);
+    assert.match(transcript, /Complete request body/);
+    assert.match(transcript, /Full tool result/);
+    assert.doesNotMatch(transcript, /hidden chain of thought/);
+
+    let closed = false;
+    const component = new ConversationComponent(
+      record().address,
+      { blocks },
+      () => { closed = true; },
+      () => undefined,
+      fakeTheme,
+      6,
+    );
+    for (const width of [20, 40, 80]) {
+      assert.equal(component.render(width).every((line) => visibleWidth(line) <= width), true);
+    }
+    component.handleInput("\x0f");
+    assert.equal(closed, true);
   });
 });
