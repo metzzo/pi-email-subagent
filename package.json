@@ -5,7 +5,7 @@
   "type": "module",
   "keywords": ["pi-package", "pi", "subagent", "agents"],
   "license": "MIT",
-  "files": ["src", "plans", "README.md", "LICENSE"],
+  "files": ["src", "docs", "plans", "README.md", "LICENSE"],
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test test/**/*.test.ts",

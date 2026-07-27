@@ -9,6 +9,7 @@
  * comma-separated list when the target model comes from a provider extension.
  */
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +24,17 @@ if (!cliModel || !emailModel) {
 const extraExtensions = (process.env.LIVE_EXTENSIONS ?? "")
   .split(",")
   .map((value) => value.trim())
-  .filter(Boolean);
+  .filter(Boolean)
+  .map((value) => {
+    if (value.includes("/") || value.includes("\\")) return value;
+    // Bare package names live in pi's npm package root; extension entry
+    // points are usually TypeScript and not resolvable via require.resolve.
+    const packageDir = join(homedir(), ".pi", "agent", "npm", "node_modules", value);
+    const tsEntry = join(packageDir, "index.ts");
+    if (existsSync(tsEntry)) return tsEntry;
+    if (existsSync(packageDir)) return packageDir;
+    return value; // let pi report the load error with context
+  });
 const extensionArgs = extraExtensions.flatMap((extension) => ["-e", extension]);
 const child = spawn("pi", [
   "-ne",
