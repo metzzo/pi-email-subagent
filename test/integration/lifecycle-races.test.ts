@@ -169,6 +169,86 @@ describe("broker lifecycle races", () => {
     }
   });
 
+  it("disposes restored workers when initialization fails after their creation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
+    const initial = makeBroker(root, () => new FakeWorker());
+    await initial.init();
+    await initial.send(initial.mainAddress, {
+      to: "worker.init-failure@gpt-5.4.com", subject: "Persist", message: "Restore me.", priority: "low",
+    });
+    await initial.shutdown();
+
+    const workers: FakeWorker[] = [];
+    const restoring = makeBroker(root, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    const originalSave = restoring.registryStore.save.bind(restoring.registryStore);
+    let saves = 0;
+    restoring.registryStore.save = async (registry) => {
+      saves += 1;
+      if (saves === 3) throw new Error("post-restore persistence failed");
+      await originalSave(registry);
+    };
+    await assert.rejects(restoring.init(), /post-restore persistence failed/);
+    assert.equal(workers.length, 1);
+    assert.equal(workers[0]?.disposed, true);
+    await restoring.shutdown();
+  });
+
+  it("finishes stop bookkeeping even when worker abort rejects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
+    class RejectingAbortWorker extends FakeWorker {
+      override async abort(): Promise<void> { throw new Error("abort rejected"); }
+    }
+    const workers: FakeWorker[] = [];
+    const broker = makeBroker(root, () => {
+      const worker = new RejectingAbortWorker();
+      workers.push(worker);
+      return worker;
+    });
+    await broker.init();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.abort-reject@gpt-5.4.com", subject: "Run", message: "Remain active.", priority: "low",
+      });
+      await assert.rejects(broker.stop(request.envelope.to), /was stopped.*abort rejected/i);
+      assert.equal(workers[0]?.disposed, true);
+      assert.equal(broker.inspectAgent(request.envelope.to).state, "stopped");
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("restarts with consistent bookkeeping when prior worker disposal reports an error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
+    class RejectingDisposeWorker extends FakeWorker {
+      override async dispose(): Promise<void> {
+        await super.dispose();
+        throw new Error("dispose reported after cleanup");
+      }
+    }
+    const workers: FakeWorker[] = [];
+    const broker = makeBroker(root, () => {
+      const worker = workers.length === 0 ? new RejectingDisposeWorker() : new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    await broker.init();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.restart-cleanup@gpt-5.4.com", subject: "Run", message: "Restart safely.", priority: "low",
+      });
+      await broker.restart(request.envelope.to);
+      assert.equal(workers.length, 2);
+      assert.equal(workers[0]?.disposed, true);
+      assert.equal(broker.inspectAgent(request.envelope.to).state, "running");
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("serializes restart with send and keeps exactly one replacement worker", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
     const disposeEntered = deferred();

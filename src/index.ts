@@ -79,7 +79,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
     fetchEmails: () => {
       if (!broker) throw new Error("Email broker is not ready.");
-      return broker.fetchUnanswered(broker.mainAddress);
+      return broker.fetchUnansweredBatch(broker.mainAddress);
     },
   });
 
@@ -136,7 +136,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       const details = result.details as FetchToolDetails | undefined;
       if (!details) return new Text(theme.fg("toolOutput", sanitizeConversationBody(resultText(result))), 0, 0);
       if (details.emails.length === 0) return new Text(theme.fg("success", "✓ no unanswered emails"), 0, 0);
-      let text = theme.fg("warning", `${details.emails.length} unanswered email${details.emails.length === 1 ? "" : "s"}`);
+      const remainder = details.total > details.emails.length ? ` (showing ${details.emails.length} of ${details.total})` : "";
+      let text = theme.fg("warning", `${details.emails.length} unanswered email${details.emails.length === 1 ? "" : "s"}${remainder}`);
       for (const email of details.emails) {
         const subject = sanitizeConversationLabel(email.subject);
         const from = sanitizeConversationLabel(email.from);
@@ -310,7 +311,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       }
     } catch (error) {
       if (broker === next) broker = undefined;
-      ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}`, "error");
+      await next.shutdown().catch(() => undefined);
+      if (generation === myGeneration) ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}`, "error");
     }
   });
 

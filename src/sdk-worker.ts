@@ -34,6 +34,7 @@ export interface SendToolDetails {
 
 export interface FetchToolDetails {
   emails: EmailEnvelope[];
+  total: number;
 }
 
 function textResult(text: string, details?: unknown, isError = false) {
@@ -101,8 +102,11 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     executionMode: "sequential" as const,
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute() {
-      const emails = config.fetchEmails();
-      return textResult(formatUnanswered(emails), { emails } satisfies FetchToolDetails);
+      const batch = config.fetchEmails();
+      const suffix = batch.total > batch.emails.length
+        ? `\n\nShowing ${batch.emails.length} of ${batch.total}; answer this batch, then call fetch_emails again for the remainder.`
+        : "";
+      return textResult(`${formatUnanswered(batch.emails)}${suffix}`, batch satisfies FetchToolDetails);
     },
   });
 
@@ -165,6 +169,7 @@ export class SdkWorker implements WorkerTransport {
   private listeners = new Set<(event: WorkerEvent) => void>();
   private unsubscribeSession?: () => void;
   private disposed = false;
+  private disposePromise?: Promise<void>;
   private startGeneration = 0;
   private runFailure?: string;
 
@@ -352,20 +357,40 @@ export class SdkWorker implements WorkerTransport {
   }
 
   async abort(): Promise<void> {
-    if (this.session?.isStreaming) await this.session.abort();
-    this.setState("stopped");
+    try {
+      if (this.session?.isStreaming) await this.session.abort();
+    } finally {
+      this.setState("stopped");
+    }
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
     this.startGeneration += 1;
-    if (this.session?.isStreaming) await this.session.abort();
-    this.unsubscribeSession?.();
-    this.unsubscribeSession = undefined;
-    this.session?.dispose();
+    const session = this.session;
+    const unsubscribe = this.unsubscribeSession;
     this.session = undefined;
-    this.listeners.clear();
+    this.unsubscribeSession = undefined;
+    const operation = (async () => {
+      let cleanupError: unknown;
+      try {
+        if (session?.isStreaming) await session.abort();
+      } catch (error) {
+        cleanupError = error;
+      } finally {
+        unsubscribe?.();
+        try {
+          session?.dispose();
+        } catch (error) {
+          cleanupError ??= error;
+        }
+        this.listeners.clear();
+      }
+      if (cleanupError) throw cleanupError;
+    })();
+    this.disposePromise = operation;
+    return operation;
   }
 
   setEffort(level: AgentRecord["effort"]): void {

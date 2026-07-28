@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AddressError, makeMainAddress, ModelCatalog, parseSubagentAddress } from "../../src/address.ts";
+import { AddressError, makeMainAddress, ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from "../../src/address.ts";
 import { fakeModel } from "../helpers/fakes.ts";
 
 describe("email address routing", () => {
@@ -11,6 +11,15 @@ describe("email address routing", () => {
     assert.equal(parsed.name, "reviewer");
     assert.equal(parsed.taskSlug, "audit-auth");
     assert.equal(parsed.modelId, "gpt-5.4");
+  });
+
+  it("parses and canonicalizes address shape without requiring a routable model", () => {
+    assert.deepEqual(parseSubagentAddressShape(" Worker.Task@Removed.Model.com "), {
+      address: "worker.task@removed.model.com",
+      name: "worker",
+      taskSlug: "task",
+      modelId: "removed.model",
+    });
   });
 
   it("supports registered Kimi model domains", () => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -88,6 +88,34 @@ describe("broker hardening", () => {
       assert.deepEqual(restored.main.deliveries.map((delivery) => delivery.envelope.id), ["mail_restore_main", "mail_restore_reply"]);
       assert.equal(restored.broker.mailStore.get("mail_restore_main")?.deliveryState, "delivered");
       assert.equal(restored.broker.mailStore.get(original.id)?.answeredBy, "mail_restore_reply");
+    } finally {
+      await restored.broker.shutdown();
+    }
+  });
+
+  it("reconstructs a missing recipient record from accepted queued mail after a crash", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-orphan-restore-"));
+    const store = new MailStore(join(root, "state", "mail.jsonl"));
+    await store.init();
+    await store.accept({
+      id: "mail_orphaned_recipient",
+      from: "main@gpt-5.4.com",
+      to: "worker.orphaned@gpt-5.4.com",
+      subject: "Recover recipient",
+      message: "Accepted before the process crashed.",
+      priority: "low",
+      kind: "request",
+      requiresResponse: true,
+      createdAt: new Date().toISOString(),
+      deliveryState: "queued",
+    });
+
+    const restored = await setup({}, root);
+    try {
+      assert.equal(restored.workers.length, 1);
+      await eventually(() => assert.match(restored.workers[0]!.prompts[0]!, /mail_orphaned_recipient/));
+      assert.equal(restored.broker.mailStore.get("mail_orphaned_recipient")?.deliveryState, "delivered");
+      assert.equal(restored.broker.inspectAgent("worker.orphaned@gpt-5.4.com").exists, true);
     } finally {
       await restored.broker.shutdown();
     }
@@ -202,6 +230,68 @@ describe("broker hardening", () => {
       await answerAndSettle(broker, workers[0]!, { id: first.envelope.id, subject: first.envelope.subject });
       await eventually(() => assert.equal(workers[2]!.prompts.length, 1));
       assert.equal(workers[1]!.prompts.length, 0);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("enforces queue capacity atomically across parallel sends", async () => {
+    const { broker, workers } = await setup({ maxQueuedMessages: 1 });
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.parallel-cap@gpt-5.4.com", subject: "Start", message: "Keep running.", priority: "low",
+      });
+      assert.equal(workers[0]?.streaming, true);
+      const attempts = await Promise.allSettled([
+        broker.send(broker.mainAddress, {
+          to: "worker.parallel-cap@gpt-5.4.com", subject: "One", message: "Queued one.", priority: "low",
+        }),
+        broker.send(broker.mainAddress, {
+          to: "worker.parallel-cap@gpt-5.4.com", subject: "Two", message: "Queued two.", priority: "low",
+        }),
+      ]);
+      assert.equal(attempts.filter((item) => item.status === "fulfilled").length, 1);
+      assert.equal(attempts.filter((item) => item.status === "rejected").length, 1);
+      assert.equal(broker.mailStore.queued("worker.parallel-cap@gpt-5.4.com").length, 1);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("bounds formatted delivery bytes for queued and immediate high mail", async () => {
+    const { broker, workers } = await setup({ maxBatchBytes: 420 });
+    try {
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.formatted@gpt-5.4.com", subject: "Expanded", message: "&".repeat(100), priority: "low",
+      }), /formatted email exceeds/i);
+      assert.equal(workers.length, 0);
+
+      await broker.send(broker.mainAddress, {
+        to: "worker.formatted@gpt-5.4.com", subject: "Small", message: "small", priority: "low",
+      });
+      assert.equal(workers[0]?.streaming, true);
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.formatted@gpt-5.4.com", subject: "High expanded", message: "&".repeat(100), priority: "high",
+      }), /formatted email exceeds/i);
+      assert.equal(workers[0]?.steers.length, 0);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("pages fetch_emails by configured batch limits without hiding the total", async () => {
+    const { broker, workers } = await setup({ maxBatchMessages: 1 });
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.fetch-page@gpt-5.4.com", subject: "One", message: "First.", priority: "low",
+      });
+      await broker.send(broker.mainAddress, {
+        to: "worker.fetch-page@gpt-5.4.com", subject: "Two", message: "Second.", priority: "high",
+      });
+      const batch = workers[0]!.config!.fetchEmails();
+      assert.equal(batch.total, 2);
+      assert.equal(batch.emails.length, 1);
+      assert.equal(batch.emails[0]?.subject, "Two");
     } finally {
       await broker.shutdown();
     }
@@ -401,7 +491,10 @@ describe("broker hardening", () => {
       const controller = new AbortController();
       const waiting = broker.waitForReplies([request.envelope.id], 2_000, true, controller.signal);
       controller.abort();
-      await assert.rejects(waiting, /aborted/);
+      const partial = await waiting;
+      assert.equal(partial.complete, false);
+      assert.equal(partial.timedOut, false);
+      assert.equal(partial.items[0]?.state, "pending");
       await workers[0]!.send({
         to: broker.mainAddress,
         subject: request.expectedReplySubject!,
@@ -474,6 +567,74 @@ describe("broker hardening", () => {
       assert.match(result.items[0]?.error ?? "", /paused/i);
     } finally {
       await second.broker.shutdown();
+    }
+  });
+
+  it("quarantines stale-model records without blocking valid restoration", async () => {
+    const first = await setup();
+    await first.broker.send(first.broker.mainAddress, {
+      to: "worker.valid-restore@gpt-5.4.com", subject: "Valid", message: "Persist me.", priority: "low",
+    });
+    await first.broker.shutdown();
+
+    const registryPath = join(first.root, "state", "registry.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as { agents: Array<Record<string, unknown>> };
+    const stale = structuredClone(registry.agents[0]!);
+    stale.address = "worker.stale-restore@removed-model.com";
+    stale.modelId = "removed-model";
+    stale.provider = "removed-provider";
+    stale.state = "paused";
+    registry.agents.push(stale);
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+
+    const restored = await setup({}, first.root);
+    try {
+      assert.equal(restored.workers.length, 1, "valid record still restores");
+      const staleInspection = restored.broker.inspectAgent("worker.stale-restore@removed-model.com");
+      assert.equal(staleInspection.state, "failed");
+      assert.equal(staleInspection.provider, "removed-provider");
+      assert.match(staleInspection.failure ?? "", /model unavailable/i);
+      await assert.rejects(restored.broker.restart(staleInspection.address), /not routable/);
+      assert.equal(restored.broker.inspectAgent(staleInspection.address).state, "failed");
+      await restored.broker.archive(staleInspection.address);
+      assert.equal(restored.broker.inspectAgent(staleInspection.address).state, "archived");
+    } finally {
+      await restored.broker.shutdown();
+    }
+  });
+
+  it("does not report failed-delivery mail as an open obligation", async () => {
+    const { broker } = await setup({ maxBatchBytes: 300 });
+    try {
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.failed-count@gpt-5.4.com", subject: "Too large", message: "&".repeat(100), priority: "low",
+      }), /formatted email exceeds/i);
+      // Pre-acceptance rejection creates no record or mail; now exercise a persisted delivery failure.
+      const result = await broker.send(broker.mainAddress, {
+        to: "worker.failed-count@gpt-5.4.com", subject: "Start", message: "small", priority: "low",
+      });
+      await broker.mailStore.markFailed(result.envelope.id, "forced terminal failure");
+      assert.equal(broker.inspectAgent(result.envelope.to).unanswered, 0);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("schedules journal maintenance during a live broker session", async () => {
+    const { broker } = await setup();
+    const original = broker.mailStore.maintainIfNeeded.bind(broker.mailStore);
+    let calls = 0;
+    broker.mailStore.maintainIfNeeded = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.maintenance@gpt-5.4.com", subject: "Maintain", message: "Trigger maintenance.", priority: "low",
+      });
+      await eventually(() => assert.ok(calls > 0));
+    } finally {
+      await broker.shutdown();
     }
   });
 

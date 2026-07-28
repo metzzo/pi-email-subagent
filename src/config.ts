@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { parseSubagentAddressShape } from "./address.ts";
 import type { AddressConfig, RoleConfig, SubagentConfig } from "./types.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -26,6 +27,7 @@ export const DEFAULT_CONFIG: SubagentConfig = {
   maxQueuedBytes: 4 * 1024 * 1024,
   maxBatchMessages: 32,
   maxBatchBytes: 512 * 1024,
+  maxRetainedEmails: 10_000,
   responseReminderLimit: 2,
   roles: {
     scout: {
@@ -60,6 +62,7 @@ interface RawConfig {
   maxQueuedBytes?: unknown;
   maxBatchMessages?: unknown;
   maxBatchBytes?: unknown;
+  maxRetainedEmails?: unknown;
   responseReminderLimit?: unknown;
   roles?: unknown;
   addresses?: unknown;
@@ -100,41 +103,62 @@ function effort(value: unknown, fallback: ThinkingLevel, label: string, warnings
   return value as ThinkingLevel;
 }
 
-function roleRecord(value: unknown, label: string, warnings: string[]): Record<string, RoleConfig> {
+const ROLE_NAME = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
+
+function profileRecord(
+  value: unknown,
+  label: string,
+  warnings: string[],
+  kind: "role" | "address",
+): Record<string, RoleConfig> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     warnings.push(`${label} must be an object; ignoring it.`);
     return {};
   }
   const result: Record<string, RoleConfig> = {};
-  for (const [name, raw] of Object.entries(value)) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      warnings.push(`${label}.${name} must be an object; ignoring it.`);
+  for (const [sourceKey, raw] of Object.entries(value)) {
+    let key = sourceKey.trim().toLowerCase();
+    try {
+      if (kind === "role") {
+        if (!ROLE_NAME.test(key)) throw new Error("use lowercase kebab-case");
+      } else key = parseSubagentAddressShape(key).address;
+    } catch (error) {
+      warnings.push(`${label}.${sourceKey} has an invalid ${kind} key (${error instanceof Error ? error.message : String(error)}); ignoring it.`);
       continue;
     }
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      warnings.push(`${label}.${sourceKey} must be an object; ignoring it.`);
+      continue;
+    }
+    if (result[key]) warnings.push(`${label}.${sourceKey} duplicates canonical key ${key}; later fields override earlier fields.`);
     const entry = raw as Record<string, unknown>;
     const next: RoleConfig = {};
-    if (entry.effort !== undefined) next.effort = effort(entry.effort, "medium", `${label}.${name}`, warnings);
+    if (entry.effort !== undefined) next.effort = effort(entry.effort, "medium", `${label}.${sourceKey}`, warnings);
     if (entry.tools !== undefined) {
       if (Array.isArray(entry.tools) && entry.tools.every((tool) => typeof tool === "string")) {
         next.tools = [...new Set(entry.tools as string[])];
-      } else warnings.push(`${label}.${name}.tools must be an array of strings; ignoring it.`);
+      } else warnings.push(`${label}.${sourceKey}.tools must be an array of strings; ignoring it.`);
     }
     if (entry.instructions !== undefined) {
       if (typeof entry.instructions === "string") next.instructions = entry.instructions;
-      else warnings.push(`${label}.${name}.instructions must be a string; ignoring it.`);
+      else warnings.push(`${label}.${sourceKey}.instructions must be a string; ignoring it.`);
     }
     if (entry.canSpawn !== undefined) {
       if (typeof entry.canSpawn === "boolean") next.canSpawn = entry.canSpawn;
-      else warnings.push(`${label}.${name}.canSpawn must be a boolean; ignoring it.`);
+      else warnings.push(`${label}.${sourceKey}.canSpawn must be a boolean; ignoring it.`);
     }
-    result[name.toLowerCase()] = next;
+    result[key] = { ...(result[key] ?? {}), ...next };
   }
   return result;
 }
 
+function roleRecord(value: unknown, label: string, warnings: string[]): Record<string, RoleConfig> {
+  return profileRecord(value, label, warnings, "role");
+}
+
 function addressRecord(value: unknown, label: string, warnings: string[]): Record<string, AddressConfig> {
-  return roleRecord(value, label, warnings);
+  return profileRecord(value, label, warnings, "address");
 }
 
 function mergeProfiles<T extends RoleConfig>(base: Record<string, T>, overlay: Record<string, T>): Record<string, T> {
@@ -197,7 +221,14 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
       base.maxBatchBytes,
       `${label}.maxBatchBytes`,
       warnings,
-      16 * 1024 * 1024,
+      512 * 1024,
+    ),
+    maxRetainedEmails: positiveInt(
+      raw.maxRetainedEmails,
+      base.maxRetainedEmails,
+      `${label}.maxRetainedEmails`,
+      warnings,
+      1_000_000,
     ),
     responseReminderLimit: positiveInt(
       raw.responseReminderLimit,

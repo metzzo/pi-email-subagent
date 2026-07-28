@@ -191,7 +191,63 @@ describe("durable mail store", () => {
     assert.equal(restored.get("mail_one")?.answeredBy, "mail_reply");
     assert.equal(restored.get("mail_two")?.deliveryState, "delivered");
     assert.equal(restored.get("mail_three")?.deliveryState, "queued");
-    assert.equal(await restored.compactIfNeeded(1), true);
+    assert.equal(await restored.compactIfNeeded(1), false, "an already minimal snapshot is not rewritten repeatedly");
+  });
+
+  it("prunes oldest terminal mail while preserving every open obligation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
+    const path = join(root, "mail.jsonl");
+    const store = new MailStore(path);
+    await store.init();
+    for (let index = 0; index < 5; index += 1) {
+      const item = email(`mail_terminal_${index}`);
+      item.createdAt = new Date(Date.now() + index).toISOString();
+      await store.accept(item);
+      await store.markFailed(item.id, "terminal");
+    }
+    const open = email("mail_open");
+    open.createdAt = new Date(Date.now() - 10_000).toISOString();
+    await store.accept(open);
+    await store.markDelivered([open.id]);
+
+    assert.equal(await store.maintainIfNeeded(1, 3), true);
+    assert.equal(store.get(open.id)?.deliveryState, "delivered");
+    assert.equal(store.unanswered(open.to).some((item) => item.id === open.id), true);
+    assert.equal(store.list().length, 3, "open mail plus the two newest terminal envelopes are retained");
+    assert.deepEqual(store.list().filter((item) => item.id.startsWith("mail_terminal")).map((item) => item.id), [
+      "mail_terminal_3", "mail_terminal_4",
+    ]);
+
+    const restored = new MailStore(path);
+    await restored.init();
+    assert.deepEqual(restored.list(), store.list());
+  });
+
+  it("retains answered request/reply pairs atomically during pruning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
+    const store = new MailStore(join(root, "mail.jsonl"));
+    await store.init();
+    for (const suffix of ["old", "new"]) {
+      const original = email(`mail_pair_${suffix}`);
+      original.createdAt = new Date(Date.now() + (suffix === "new" ? 10 : 0)).toISOString();
+      await store.accept(original);
+      await store.markDelivered([original.id]);
+      const reply: EmailEnvelope = {
+        ...email(`mail_pair_reply_${suffix}`),
+        from: original.to,
+        to: original.from,
+        subject: `Re: [${original.id}] ${original.subject}`,
+        kind: "reply",
+        inReplyTo: original.id,
+        requiresResponse: false,
+        createdAt: new Date(Date.now() + (suffix === "new" ? 11 : 1)).toISOString(),
+      };
+      await store.reserveReply(reply, original.id);
+      await store.markDelivered([reply.id]);
+    }
+    await store.maintainIfNeeded(1, 1);
+    assert.deepEqual(store.list().map((item) => item.id), ["mail_pair_new", "mail_pair_reply_new"]);
+    assert.equal(store.get("mail_pair_new")?.answeredBy, "mail_pair_reply_new");
   });
 
   it("sorts high priority before low while preserving FIFO", async () => {

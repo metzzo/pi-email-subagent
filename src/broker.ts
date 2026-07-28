@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { ModelCatalog, parseSubagentAddress } from "./address.ts";
+import { ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from "./address.ts";
 import { resolveAgentProfile } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
@@ -50,6 +50,7 @@ export class AgentBroker {
 
   private registry?: BrokerRegistry;
   private readonly records = new Map<string, AgentRecord>();
+  private readonly routableRecords = new Set<string>();
   private readonly workers = new Map<string, WorkerTransport>();
   private readonly workerUnsubscribers = new Map<string, () => void>();
   private readonly provisionalWorkers = new Set<WorkerTransport>();
@@ -101,7 +102,7 @@ export class AgentBroker {
     try {
       await this.mailStore.init();
       this.checkpoint(generation);
-      await this.mailStore.compactIfNeeded();
+      await this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails);
       this.checkpoint(generation);
       const currentMain = this.options.mainAdapter.getAddress().toLowerCase();
       this.registry = await this.registryStore.load(currentMain);
@@ -113,22 +114,65 @@ export class AgentBroker {
         currentMain,
       ])];
 
+      const startupFailures: string[] = [];
       for (const loaded of this.registry.agents) {
-        const parsed = parseSubagentAddress(loaded.address, this.catalog);
-        const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
+        const shape = parseSubagentAddressShape(loaded.address);
         const record = clone(loaded);
-        record.address = parsed.address;
-        record.name = parsed.name;
-        record.taskSlug = parsed.taskSlug;
-        record.provider = parsed.model.provider;
-        record.modelId = parsed.model.id;
-        record.tools = profile.tools;
-        record.canSpawn = profile.canSpawn;
-        record.instructions = profile.instructions;
-        if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
+        record.address = shape.address;
+        record.name = shape.name;
+        record.taskSlug = shape.taskSlug;
+        try {
+          const parsed = parseSubagentAddress(shape.address, this.catalog);
+          const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
+          record.address = parsed.address;
+          record.provider = parsed.model.provider;
+          record.modelId = parsed.model.id;
+          record.tools = profile.tools;
+          record.canSpawn = profile.canSpawn;
+          record.instructions = profile.instructions;
+          if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
+          this.routableRecords.add(record.address);
+        } catch (error) {
+          const profile = resolveAgentProfile(this.options.config, record.address, record.name);
+          record.tools = profile.tools;
+          record.canSpawn = profile.canSpawn;
+          record.instructions = profile.instructions;
+          const priorState = record.state;
+          if (priorState !== "archived" && priorState !== "stopped") record.state = "failed";
+          record.failure = `Model unavailable during restore: ${errorMessage(error)}`;
+          record.currentActivity = record.failure;
+          record.updatedAt = nowIso();
+          if (priorState !== "archived") startupFailures.push(`${record.address}: ${record.failure}`);
+        }
         this.records.set(record.address, record);
       }
-      const registered = [...this.records.values()].filter((record) => record.state !== "archived");
+
+      // Mail acceptance precedes first worker persistence. Recover a recipient
+      // record when a crash leaves durable queued mail but no registry entry.
+      for (const email of this.mailStore.list()) {
+        if (email.deliveryState !== "queued" || this.isMainIdentity(email.to) || this.records.has(email.to)) continue;
+        const shape = parseSubagentAddressShape(email.to);
+        try {
+          const parsed = parseSubagentAddress(shape.address, this.catalog);
+          const record = this.makeRecord(parsed);
+          record.createdAt = email.createdAt;
+          record.updatedAt = nowIso();
+          record.state = "paused";
+          this.records.set(record.address, record);
+          this.routableRecords.add(record.address);
+        } catch (error) {
+          const profile = resolveAgentProfile(this.options.config, shape.address, shape.name);
+          const record = this.makeUnavailableRecord(shape, email.createdAt, errorMessage(error));
+          record.tools = profile.tools;
+          record.canSpawn = profile.canSpawn;
+          record.instructions = profile.instructions;
+          this.records.set(record.address, record);
+          startupFailures.push(`${record.address}: ${record.failure}`);
+        }
+      }
+
+      const registered = [...this.records.values()].filter((record) =>
+        record.state !== "archived" && this.routableRecords.has(record.address));
       for (const record of registered.slice(0, this.options.config.maxAgents)) this.activationLeases.add(record.address);
       for (const record of registered.slice(this.options.config.maxAgents)) {
         record.state = "paused";
@@ -169,8 +213,17 @@ export class AgentBroker {
         }
       }
       this.publish();
+      for (const failure of startupFailures) this.options.mainAdapter.notifyFailure(failure);
+      this.scheduleMailMaintenance();
     } catch (error) {
-      if (!this.cancelled(generation)) this.lifecycle = "closed";
+      const cancelled = this.cancelled(generation);
+      if (!cancelled) {
+        this.lifecycle = "closing";
+        this.disposed = true;
+        this.lifecycleGeneration += 1;
+      }
+      await this.disposeOwnedWorkers();
+      if (!cancelled) this.lifecycle = "closed";
       throw error;
     }
   }
@@ -259,6 +312,10 @@ export class AgentBroker {
     return this.catalog.routableModelIds;
   }
 
+  get toolResultByteLimit(): number {
+    return this.options.config.maxBatchBytes;
+  }
+
   private isMainIdentity(address: string): boolean {
     return this.requiredRegistry().mainAliases.includes(address.toLowerCase());
   }
@@ -303,12 +360,16 @@ export class AgentBroker {
     }
   }
 
+  private validateDeliverySize(envelope: EmailEnvelope): void {
+    const formattedBytes = byteLength(formatEmail(envelope));
+    if (formattedBytes > this.options.config.maxBatchBytes) {
+      throw new Error(`Formatted email exceeds the ${this.options.config.maxBatchBytes}-byte delivery limit.`);
+    }
+  }
+
   private validateQueueCapacity(recipient: string, input: SendEmailInput): void {
     const queued = this.mailStore.queuedMetrics(recipient);
     const messageBytes = byteLength(input.subject) + byteLength(input.message);
-    if (messageBytes > this.options.config.maxBatchBytes) {
-      throw new Error(`Email exceeds the ${this.options.config.maxBatchBytes}-byte worker batch limit.`);
-    }
     const nextBytes = queued.bytes + messageBytes;
     if (queued.count >= this.options.config.maxQueuedMessages || nextBytes > this.options.config.maxQueuedBytes) {
       throw new Error(`Mailbox queue for ${recipient} is full; wait for existing work or use another existing agent.`);
@@ -365,9 +426,6 @@ export class AgentBroker {
       if (!this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
         throw new Error(`Agent limit reached (${this.options.config.maxAgents}); archive or reuse an existing address.`);
       }
-      const currentWorker = this.workers.get(to);
-      const steersImmediately = input.priority === "high" && Boolean(currentWorker?.getSnapshot().isStreaming);
-      if (!steersImmediately) this.validateQueueCapacity(to, input);
     }
 
     if (!reply && looksLikeReply(input.subject)) {
@@ -400,12 +458,6 @@ export class AgentBroker {
       acquiredLease = true;
     }
 
-    try {
-      this.takeRateQuota(sender);
-    } catch (error) {
-      if (acquiredLease) this.activationLeases.delete(to);
-      throw error;
-    }
     const envelope: EmailEnvelope = {
       id: createMailId(),
       from: sender,
@@ -420,8 +472,15 @@ export class AgentBroker {
       deliveryState: "queued",
     };
     try {
-      if (answeredEmailId) await this.mailStore.reserveReply(envelope, answeredEmailId);
-      else await this.mailStore.accept(envelope);
+      this.validateDeliverySize(envelope);
+      await this.withAddressOperation(to, async () => {
+        const currentWorker = this.workers.get(to);
+        const steersImmediately = !toMain && input.priority === "high" && Boolean(currentWorker?.getSnapshot().isStreaming);
+        if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
+        this.takeRateQuota(sender);
+        if (answeredEmailId) await this.mailStore.reserveReply(envelope, answeredEmailId);
+        else await this.mailStore.accept(envelope);
+      });
     } catch (error) {
       if (acquiredLease) this.activationLeases.delete(to);
       throw error;
@@ -449,10 +508,12 @@ export class AgentBroker {
       }
     } catch (error) {
       await this.failEnvelope(envelope, errorMessage(error));
+      this.scheduleMailMaintenance();
       this.publish();
       throw new Error(`Email ${envelope.id} was persisted but delivery failed: ${errorMessage(error)}`);
     }
 
+    this.scheduleMailMaintenance();
     await this.persistRegistry();
     this.publish();
     const stored = this.mailStore.get(envelope.id) ?? envelope;
@@ -544,6 +605,32 @@ export class AgentBroker {
     };
   }
 
+  private makeUnavailableRecord(
+    shape: ReturnType<typeof parseSubagentAddressShape>,
+    createdAt: string,
+    reason: string,
+  ): AgentRecord {
+    const failure = `Model unavailable during restore: ${reason}`;
+    return {
+      address: shape.address,
+      name: shape.name,
+      taskSlug: shape.taskSlug,
+      provider: "unavailable",
+      modelId: shape.modelId,
+      effort: this.options.config.defaultEffort,
+      tools: [],
+      canSpawn: true,
+      state: "failed",
+      createdAt,
+      updatedAt: nowIso(),
+      currentActivity: failure,
+      failure,
+      enforcementAttempts: 0,
+      usage: emptyUsage(),
+      activity: [{ at: nowIso(), kind: "error", summary: failure }],
+    };
+  }
+
   private async createWorker(parsed: ParsedAddress, restored?: AgentRecord, generation = this.lifecycleGeneration): Promise<WorkerTransport> {
     const record = restored ?? this.makeRecord(parsed);
     record.state = "spawning";
@@ -580,7 +667,7 @@ export class AgentBroker {
         projectTrusted: this.options.projectTrusted,
         systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, this.options.config.modelPolicy),
         sendEmail: (input) => this.send(record.address, input),
-        fetchEmails: () => this.fetchUnanswered(record.address),
+        fetchEmails: () => this.fetchUnansweredBatch(record.address),
       });
       if (this.cancelled(generation)) throw new Error("Worker creation was cancelled by broker shutdown.");
       const previous = this.workers.get(record.address);
@@ -687,17 +774,32 @@ export class AgentBroker {
     if (record && !["stopped", "failed", "archived"].includes(record.state)) record.state = "queued";
   }
 
+  private formattedBatchBytes(payloadBytes: number, count: number): number {
+    if (count === 0) return 0;
+    if (count === 1) return payloadBytes;
+    return byteLength(`<agent-email-batch count="${count}">\n`)
+      + payloadBytes
+      + (count - 1)
+      + byteLength("\n</agent-email-batch>");
+  }
+
   private selectBatch(queued: readonly EmailEnvelope[]): EmailEnvelope[] {
     const selected: EmailEnvelope[] = [];
-    let bytes = 0;
+    let payloadBytes = 0;
     for (const email of queued) {
-      const size = byteLength(email.subject) + byteLength(email.message);
+      const size = byteLength(formatEmail(email));
       if (selected.length >= this.options.config.maxBatchMessages) break;
-      if (selected.length > 0 && bytes + size > this.options.config.maxBatchBytes) break;
+      const nextCount = selected.length + 1;
+      if (this.formattedBatchBytes(payloadBytes + size, nextCount) > this.options.config.maxBatchBytes) break;
       selected.push(email);
-      bytes += size;
+      payloadBytes += size;
     }
     return selected;
+  }
+
+  fetchUnansweredBatch(addressInput: string): { emails: EmailEnvelope[]; total: number } {
+    const all = this.fetchUnanswered(addressInput);
+    return { emails: this.selectBatch(all), total: all.length };
   }
 
   private pendingRank(address: string, now = Date.now()): [number, string, string] {
@@ -725,8 +827,19 @@ export class AgentBroker {
     const worker = this.workers.get(address);
     const record = this.records.get(address);
     if (!worker || !record || ["stopped", "failed"].includes(record.state)) return;
-    const queued = this.selectBatch(this.mailStore.queued(address));
-    if (queued.length === 0) return;
+    const pending = this.mailStore.queued(address);
+    const queued = this.selectBatch(pending);
+    if (queued.length === 0) {
+      const oversized = pending[0];
+      if (oversized) {
+        const error = `Formatted email exceeds the ${this.options.config.maxBatchBytes}-byte delivery limit.`;
+        await this.failEnvelope(oversized, error);
+        this.options.mainAdapter.notifyFailure(`${oversized.id} could not be delivered to ${address}: ${error}`);
+        this.scheduleMailMaintenance();
+        swallow(this.schedule(address));
+      }
+      return;
+    }
     if (this.active.size >= this.options.config.maxConcurrent) {
       this.enqueueStart(address);
       await this.persistRegistry();
@@ -876,22 +989,34 @@ export class AgentBroker {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
       if (record.state === "archived") throw new Error(`Agent ${address} is archived.`);
+      let cleanupError: unknown;
       if (worker) {
         this.syncWorker(address, worker);
-        this.workerUnsubscribers.get(address)?.();
-        this.workerUnsubscribers.delete(address);
-        this.workers.delete(address);
-        await worker.abort();
-        await worker.dispose();
+        try {
+          await worker.abort();
+        } catch (error) {
+          cleanupError = error;
+        } finally {
+          this.workerUnsubscribers.get(address)?.();
+          this.workerUnsubscribers.delete(address);
+          this.workers.delete(address);
+          try {
+            await worker.dispose();
+          } catch (error) {
+            cleanupError ??= error;
+          }
+        }
       }
       this.assertActive();
       this.active.delete(address);
       record.state = "stopped";
-      record.currentActivity = "Stopped by user";
+      if (cleanupError) record.failure = `Stop cleanup reported: ${errorMessage(cleanupError)}`;
+      record.currentActivity = cleanupError ? `Stopped after abort error: ${errorMessage(cleanupError)}` : "Stopped by user";
       record.updatedAt = nowIso();
       await this.persistRegistry();
       this.pump();
       this.publish();
+      if (cleanupError) throw new Error(`Agent was stopped, but cleanup reported: ${errorMessage(cleanupError)}`);
     });
   }
 
@@ -900,6 +1025,7 @@ export class AgentBroker {
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
+      const parsed = parseSubagentAddress(address, this.catalog);
       if (!this.activationLeases.has(address)) {
         if (this.activeIdentityCount() >= this.options.config.maxAgents) {
           throw new Error(`Agent limit reached (${this.options.config.maxAgents}).`);
@@ -910,14 +1036,23 @@ export class AgentBroker {
       this.workerUnsubscribers.get(address)?.();
       this.workerUnsubscribers.delete(address);
       this.workers.delete(address);
-      if (old) await old.dispose();
+      let cleanupError: unknown;
+      if (old) {
+        try { await old.dispose(); } catch (error) { cleanupError = error; }
+      }
       this.assertActive();
       this.active.delete(address);
       record.state = "paused";
       delete record.failure;
       record.enforcementAttempts = 0;
-      const parsed = parseSubagentAddress(address, this.catalog);
       await this.createWorker(parsed, record, this.lifecycleGeneration);
+      if (cleanupError) {
+        const warning = `Previous worker cleanup reported during restart: ${errorMessage(cleanupError)}`;
+        record.activity.push({ at: nowIso(), kind: "error", summary: warning });
+        record.activity = record.activity.slice(-40);
+        await this.persistRegistry();
+        this.options.mainAdapter.notifyFailure(`${address}: ${warning}`);
+      }
       if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
       else if (this.mailStore.queued(address).length > 0) await this.schedule(address);
       this.publish();
@@ -944,7 +1079,10 @@ export class AgentBroker {
       this.workerUnsubscribers.get(address)?.();
       this.workerUnsubscribers.delete(address);
       this.workers.delete(address);
-      if (worker) await worker.dispose();
+      let cleanupError: unknown;
+      if (worker) {
+        try { await worker.dispose(); } catch (error) { cleanupError = error; }
+      }
       this.assertActive();
       this.active.delete(address);
       const pendingIndex = this.pendingStarts.indexOf(address);
@@ -956,6 +1094,7 @@ export class AgentBroker {
       await this.persistRegistry();
       this.pump();
       this.publish();
+      if (cleanupError) throw new Error(`Agent was archived, but cleanup reported: ${errorMessage(cleanupError)}`);
     });
   }
 
@@ -990,32 +1129,38 @@ export class AgentBroker {
 
   inspectAgent(addressInput: string): AgentInspection {
     this.assertActive();
-    const parsed = parseSubagentAddress(addressInput.trim().toLowerCase(), this.catalog);
-    const record = this.records.get(parsed.address);
-    const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
+    const shape = parseSubagentAddressShape(addressInput);
+    const existing = this.records.get(shape.address);
+    const parsed = existing ? undefined : parseSubagentAddress(shape.address, this.catalog);
+    const address = existing?.address ?? parsed!.address;
+    const name = existing?.name ?? parsed!.name;
+    const record = this.records.get(address);
+    const profile = resolveAgentProfile(this.options.config, address, name);
     const tools = record?.tools ?? profile.tools;
     const mail = this.mailStore.list();
     return {
-      address: parsed.address,
+      address,
       exists: Boolean(record),
       wouldSpawn: !record,
-      capacityAvailable: this.activationLeases.has(parsed.address) || this.activeIdentityCount() < this.options.config.maxAgents,
-      modelId: parsed.model.id,
-      provider: parsed.model.provider,
+      capacityAvailable: (!record || this.routableRecords.has(address))
+        && (this.activationLeases.has(address) || this.activeIdentityCount() < this.options.config.maxAgents),
+      modelId: record?.modelId ?? parsed!.model.id,
+      provider: record?.provider ?? parsed!.model.provider,
       effort: record?.effort ?? profile.effort,
-      role: parsed.name,
+      role: name,
       tools: [...tools],
       ...(record?.instructions ?? profile.instructions ? { instructions: record?.instructions ?? profile.instructions } : {}),
       writable: tools.some((tool) => ["bash", "edit", "write"].includes(tool)),
       canSpawn: record?.canSpawn ?? profile.canSpawn,
       state: record?.state ?? "new",
       ...(record?.currentActivity ? { currentActivity: record.currentActivity } : {}),
-      queued: this.mailStore.queued(parsed.address).length,
-      unanswered: mail.filter((email) => email.to === parsed.address && email.requiresResponse && !email.answeredAt).length,
-      pendingReplies: mail.filter((email) => email.to === parsed.address && Boolean(email.replyReservedBy) && !email.answeredAt).length,
+      queued: this.mailStore.queued(address).length,
+      unanswered: mail.filter((email) =>
+        email.to === address && email.deliveryState === "delivered" && email.requiresResponse && !email.answeredAt).length,
+      pendingReplies: mail.filter((email) => email.to === address && Boolean(email.replyReservedBy) && !email.answeredAt).length,
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
-      providerReady: this.workers.has(parsed.address) ? "available" : "unknown",
+      providerReady: this.workers.has(address) ? "available" : "unknown",
     };
   }
 
@@ -1110,12 +1255,6 @@ export class AgentBroker {
         cleanup();
         resolve({ complete: items.every((item) => item.state !== "pending"), timedOut, items });
       };
-      const rejectAbort = (): void => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(new Error("Reply wait was aborted."));
-      };
       const check = (): void => {
         // A sender that has claimed collection owns delivery until its journal
         // commit finishes. Timeout, abort, and shutdown wait for that boundary
@@ -1123,8 +1262,7 @@ export class AgentBroker {
         if (this.hasCollectionClaim(requestIds)) return;
         const terminal = requestIds.map((id) => this.waitItem(id)).every((item) => item.state !== "pending");
         if (requestedFinish === "abort") {
-          if (terminal) finish(false);
-          else rejectAbort();
+          finish(false);
           return;
         }
         if (requestedFinish === "timeout") {
@@ -1157,6 +1295,12 @@ export class AgentBroker {
     const agents = [...this.records.values()].map(clone).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     const unanswered = this.mailStore.list().filter((email) => email.requiresResponse && !email.answeredAt && email.deliveryState === "delivered").length;
     return { mainAddress: this.mainAddress, agents, unanswered, queuedMail: this.mailStore.countQueued() };
+  }
+
+  private scheduleMailMaintenance(): void {
+    swallow(this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails).catch((error) => {
+      this.options.mainAdapter.notifyFailure(`Mail journal maintenance failed: ${errorMessage(error)}`);
+    }));
   }
 
   private publish(): void {

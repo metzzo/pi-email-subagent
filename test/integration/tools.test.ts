@@ -30,7 +30,7 @@ describe("worker mail tools", () => {
           expectedReplySubject: "Re: [mail_tool] Result",
         };
       },
-      fetchEmails: () => [],
+      fetchEmails: () => ({ emails: [], total: 0 }),
     });
     const result = await send.execute(
       "tool-1",
@@ -50,10 +50,11 @@ describe("worker mail tools", () => {
   it("fetches only broker-provided unanswered mail", async () => {
     const [_, fetch] = createWorkerMailTools({
       sendEmail: async () => ({ envelope, spawned: false, recipientDisposition: "main", correlationId: envelope.id }),
-      fetchEmails: () => [envelope],
+      fetchEmails: () => ({ emails: [envelope], total: 2 }),
     });
     const result = await fetch.execute("tool-2", {}, undefined, undefined, {} as never);
     assert.match((result.content[0] as { text: string }).text, /UNANSWERED EMAILS \(1\)/);
     assert.match((result.content[0] as { text: string }).text, /mail_tool/);
+    assert.match((result.content[0] as { text: string }).text, /Showing 1 of 2/);
   });
 });
