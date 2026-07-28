@@ -11,6 +11,7 @@ Preview or inspect an agent address without spawning it. Main-thread only. Execu
 ## Behavior
 
 - Never spawns. For an unknown (but valid) address it computes the *effective* profile the agent would receive: model, provider, effort, role, tools, and instructions after exact-address → role → default resolution.
+- Persisted identities whose model is no longer routable remain inspectable as failed/unavailable records; they do not prevent other agents from restoring or consume an activation lease.
 - The address must parse and reference a routable model; otherwise the tool returns an error result (no side effects).
 - `writable` is derived from the effective tools: `true` when they include any of `bash`, `edit`, `write`. Role labels alone grant nothing.
 

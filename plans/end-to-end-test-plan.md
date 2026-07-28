@@ -79,6 +79,16 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-101 | Sender rate limiting | With a per-sender limit of 3, the fourth parallel send is rejected and only three identities spawn | `test/e2e/real-flow.test.ts` |
 | E2E-102 | Archival obligation guard | Archiving a stopped agent with queued inbound mail is rejected with an actionable error | `test/e2e/real-flow.test.ts` |
 | E2E-103 | Process-restart restore | Resuming the persisted main session in a new `pi` process restores registry, journal, and worker identity; new mail reuses it | `test/e2e/real-flow.test.ts` |
+| E2E-104 | Orphan-recipient crash recovery | Queued mail with no registry record reconstructs and persists its recipient, then delivers after restart | `test/integration/hardening.test.ts` |
+| E2E-105 | Parallel queue-cap atomicity | Parallel sends cannot jointly exceed per-recipient message/byte capacity | `test/integration/hardening.test.ts` |
+| E2E-106 | Failed-init worker cleanup | A post-restoration persistence failure disposes all restored/provisional workers | `test/integration/lifecycle-races.test.ts` |
+| E2E-107 | Rejecting abort/dispose cleanup | Stop/restart/dispose complete cleanup and bookkeeping even when abort reports failure | `test/integration/lifecycle-races.test.ts`, `test/unit/sdk-worker.test.ts` |
+| E2E-108 | Stale-model quarantine | One removed/ambiguous persisted model remains inspectable and does not block valid restoration or consume capacity | `test/integration/hardening.test.ts` |
+| E2E-109 | Formatted delivery cap | XML expansion, wrapper overhead, and immediate high steering all obey `maxBatchBytes` | `test/integration/hardening.test.ts` |
+| E2E-110 | Bounded mailbox/join output | Fetch pages report total count; joined replies omit excess bodies with smaller-group retrieval guidance | `test/integration/hardening.test.ts`, `test/integration/main-tools.test.ts`, `test/integration/tools.test.ts` |
+| E2E-111 | Runtime compaction and retention | Live broker schedules maintenance; old terminal mail prunes while open mail and request/reply pairs remain atomic | `test/unit/mail-store.test.ts`, `test/integration/hardening.test.ts` |
+| E2E-112 | Profile-key safety | Config keys canonicalize or warn/reject before capability resolution | `test/unit/config.test.ts`, `test/unit/address.test.ts` |
+| E2E-113 | Abort/status contract | Aborted waits resolve partial structured state and failed deliveries are excluded from open-obligation counts | `test/integration/hardening.test.ts` |
 
 ## Interactive TUI acceptance scenarios
 
@@ -212,3 +222,9 @@ Follow-up (same day):
 - `npm run validate`: passed, 101 tests, 101 passed, 0 failed (three consecutive full runs; the hardening suite additionally passed 8/8 isolated runs — the single flake observed on 2026-07-25 has not recurred).
 - Live provider acceptance re-verified after the delivery-ordering fix: `openai-codex/gpt-5.6-terra` main, `kimi-coding/k3` worker via `pi-provider-kimi-code`; the K3 worker fetched and replied, and main collected the answer through `wait_for_replies`. The live script now resolves bare npm package names from pi's package root.
 - Package dry run: 31 files, 89.1 kB, includes `src`, `docs`, `plans`, README, LICENSE. `npm audit --omit=dev`: 0 vulnerabilities. Version remains 0.1.0 for the initial release.
+
+Post-review hardening (2026-07-28):
+
+- Added regressions for orphan-recipient crash recovery, parallel queue-cap atomicity, post-restore init cleanup, rejecting abort/dispose cleanup, stale-model quarantine, formatted byte enforcement (including high steering), bounded fetch/join output, live journal maintenance and terminal retention, config-key validation, partial abort resolution, and accurate failed-mail inspection counts.
+- `npm run validate`: passed, 117 tests, 117 passed, 0 failed. The 13-scenario real scripted-provider RPC suite remained green.
+- `maxRetainedEmails` defaults to 10000; runtime maintenance never prunes queued mail, open obligations, reservations, or one side of a retained request/reply pair.

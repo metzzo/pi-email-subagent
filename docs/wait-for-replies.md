@@ -39,6 +39,8 @@ Replies: complete
 
 The first line is `complete` (all terminal), `timed out with pending work` (timeout with pending items), or `partial` (ended early with pending items, e.g. abort/shutdown). `details.result` (`WaitForRepliesResult`) carries `complete`, `timedOut`, and `items[]` with `requestId`, `state`, `request`, optional `reply`, and optional `error`.
 
+Reply text is bounded by `maxBatchBytes`. If joined reply bodies do not fit, the result keeps their terminal states and IDs but omits excess bodies with instructions to call `wait_for_replies` again using smaller ID groups (a single ID retrieves its body).
+
 Failure text is `Could not wait for replies: <reason>` with `isError: true` — unknown IDs, replies instead of requests, requests not sent by main, too many IDs, or an out-of-range timeout.
 
 ## Usage guidance

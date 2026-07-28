@@ -73,6 +73,7 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
   "maxQueuedBytes": 4194304,
   "maxBatchMessages": 32,
   "maxBatchBytes": 524288,
+  "maxRetainedEmails": 10000,
   "roles": {
     "scout": {
       "effort": "low",
@@ -92,7 +93,7 @@ Provider definitions, the model catalog, and persistent credentials are snapshot
 
 ## Persistence and limits
 
-State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. Mail is journaled before acceptance and worker sessions are resumed after reload. The append-only mail journal is compacted into a snapshot once it grows past 8192 events. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
+State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. Mail is journaled before acceptance and worker sessions are resumed after reload. Startup reconciles queued mail whose recipient record was not persisted before a crash. The journal is maintained during live sessions: excess transitions are compacted into a snapshot and the oldest terminal envelopes above `maxRetainedEmails` are pruned, while every open obligation and retained request/reply pair is preserved. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
 
 Reply obligations use durable reservation, delivery, commit, and release transitions: concurrent replies cannot both claim one request, and a failed reply delivery reopens it. Delivery across process-crash recovery is at least once, not exactly once. Stable email IDs let workers recognize retries and avoid repeating completed side effects. Durability targets ordinary process crashes, not sudden power loss.
 

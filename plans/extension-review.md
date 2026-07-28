@@ -49,3 +49,22 @@ Well-engineered: journaled mail store with crash repair and a reply reservation 
 | 13 | Keep last good blocks on refresh error | `src/ui.ts`, `test/unit/conversation-ui.test.ts` | done |
 
 Validation after fixes: `tsc --noEmit` clean; 84/84 tests pass (5 new regression tests: reply-subject allowance, paused wait state, `looksLikeReply` narrowing, journal compaction, `modelPolicy` override; plus prompt policy test). `README.md` documents `modelPolicy` and journal compaction. Deferred: `canSpawn` role option (finding 9, new feature).
+
+## Follow-up review — 2026-07-28
+
+A fresh main-thread review plus an independent read-only review found ten additional actionable issues. All are fixed with regressions:
+
+| Finding | Resolution |
+|---|---|
+| Accepted queued mail could outlive its missing recipient record after a crash | Startup reconciles queued non-main recipients into durable records before restoration |
+| Parallel sends could race past per-recipient queue caps | Capacity check, rate reservation, and journal acceptance are serialized per address |
+| Init failure after restoration leaked ghost workers | Failure path disposes committed/provisional workers before becoming closed; extension defensively shuts down |
+| Abort/dispose rejection skipped cleanup and corrupted stop/restart/archive bookkeeping | Worker cleanup is finally-based and idempotent; broker transitions complete consistently and retain diagnostics |
+| One removed/ambiguous historical model bricked all startup | Unroutable records are quarantined/inspectable without leases while valid agents restore |
+| `maxBatchBytes` counted raw payload and high steering bypassed it | Every formatted envelope is capped; batch accounting includes XML expansion and wrapper overhead |
+| Fetch/join tool output could exceed context | `fetch_emails` pages by message/byte limits with total count; joined replies omit excess bodies with re-fetch instructions |
+| Compaction ran only at startup and historical terminal mail grew without bound | Runtime single-flight maintenance compacts excess transitions and prunes old terminal envelopes while preserving all open obligations and request/reply pairs |
+| Role/address config keys silently failed to match | Keys are trimmed, canonicalized, syntax-validated, collision-warned |
+| Abort and inspection status contracts were inconsistent | Abort resolves partial state as documented; failed-delivery mail is not counted as an open obligation |
+
+Validation: `npm run validate` passed with 117/117 tests, including all 13 real scripted-provider RPC scenarios. Full audit remains flagged only inside `@earendil-works/pi-coding-agent@0.81.1`'s published shrinkwrap (one high `brace-expansion`, one moderate `protobufjs`); this package has no production dependency vulnerability (`npm audit --omit=dev` clean), and root overrides cannot replace shrinkwrapped nested versions.

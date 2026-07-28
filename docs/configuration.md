@@ -22,7 +22,8 @@ Project values merge over global values, which merge over the defaults below. In
 | `maxQueuedMessages` | `256` | 1–10000 | Queued inbound per recipient |
 | `maxQueuedBytes` | `4194304` | 1 B–64 MB | Queued inbound bytes per recipient |
 | `maxBatchMessages` | `32` | 1–1024 | Emails per worker prompt batch |
-| `maxBatchBytes` | `524288` | 1 B–16 MB | Bytes per worker prompt batch (also the single-email cap) |
+| `maxBatchBytes` | `524288` | 1 B–512 KB | Formatted bytes per email delivery/fetch batch (also the single-email cap) |
+| `maxRetainedEmails` | `10000` | 1–1000000 | Soft cap for retained envelopes; open obligations are never pruned |
 | `responseReminderLimit` | `2` | 1–10 | Re-prompts before an agent settling with unanswered mail is marked failed |
 
 ## Roles and addresses
@@ -45,7 +46,7 @@ Project values merge over global values, which merge over the defaults below. In
 }
 ```
 
-- A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key.
+- A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
 - Resolution order per field: exact address → role → defaults. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
 - `canSpawn` (default `true`) controls whether an agent may send to an unknown address and thereby create a new identity. Spawn-disabled agents get an actionable error and may still reuse existing addresses, reply, and mail main; their system prompt states the restriction. Main is never spawn-restricted.
 - Unknown tool names are dropped at worker start and noted in the agent's activity log.
@@ -65,5 +66,5 @@ All default roles may spawn; set `canSpawn: false` on read-only roles to prevent
 ## Notes
 
 - `modelPolicy` replaces the entire model-selection policy bullet list in both the main coordinator prompt and every subagent prompt. The available-model list itself always reflects the live catalog.
-- The mail journal compacts into a snapshot automatically once it exceeds 8192 events; this is not configurable.
+- Live-session journal maintenance compacts after more than 8192 excess transition events. It also prunes the oldest terminal mail above `maxRetainedEmails`; queued mail, open obligations, reservations, and retained request/reply pairs remain intact. The cap is soft when protected mail alone exceeds it.
 - Provider, model catalog, and credential changes require an extension reload; worker runtimes snapshot them at session start.
