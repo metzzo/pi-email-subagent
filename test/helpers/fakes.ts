@@ -134,7 +134,7 @@ export class FakeWorker implements WorkerTransport {
 
   fetch(): EmailEnvelope[] {
     if (!this.config) throw new Error("not started");
-    return this.config.fetchEmails();
+    return this.config.fetchEmails().emails;
   }
 }
 

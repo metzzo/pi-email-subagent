@@ -46,7 +46,14 @@ export class ModelCatalog {
   }
 }
 
-export function parseSubagentAddress(input: string, catalog: ModelCatalog): ParsedAddress {
+export interface SubagentAddressShape {
+  address: string;
+  name: string;
+  taskSlug: string;
+  modelId: string;
+}
+
+export function parseSubagentAddressShape(input: string): SubagentAddressShape {
   const address = input.trim().toLowerCase();
   if (Buffer.byteLength(address, "utf8") > 254) throw new AddressError("Email address is too long.");
 
@@ -71,9 +78,14 @@ export function parseSubagentAddress(input: string, catalog: ModelCatalog): Pars
 
   const modelId = domain.slice(0, -4);
   if (!MODEL_DOMAIN.test(modelId)) throw new AddressError(`Invalid model domain \"${modelId}\".`);
-  const model = catalog.resolve(modelId);
-  const canonical = `${name}.${taskSlug}@${model.id.toLowerCase()}.com`;
-  return { address: canonical, name, taskSlug, modelId: model.id, model };
+  return { address, name, taskSlug, modelId };
+}
+
+export function parseSubagentAddress(input: string, catalog: ModelCatalog): ParsedAddress {
+  const shape = parseSubagentAddressShape(input);
+  const model = catalog.resolve(shape.modelId);
+  const canonical = `${shape.name}.${shape.taskSlug}@${model.id.toLowerCase()}.com`;
+  return { address: canonical, name: shape.name, taskSlug: shape.taskSlug, modelId: model.id, model };
 }
 
 export function makeMainAddress(modelId: string): string {

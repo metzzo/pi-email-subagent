@@ -121,6 +121,7 @@ export const MAIL_JOURNAL_COMPACT_THRESHOLD = 8192;
 export class MailStore {
   private readonly emails = new Map<string, EmailEnvelope>();
   private writeChain: Promise<void> = Promise.resolve();
+  private maintenancePromise?: Promise<boolean>;
   private eventCount = 0;
 
   constructor(readonly path: string) {}
@@ -402,31 +403,85 @@ export class MailStore {
     await this.writeChain;
   }
 
-  /**
-   * Rewrite the journal as one `email.created` snapshot per known envelope.
-   * Envelopes carry their full state (delivery, reservations, answers), so
-   * replaying the snapshot reconstructs the same in-memory state.
-   */
+  private retainedSnapshot(maxRetainedEmails: number): EmailEnvelope[] {
+    const all = [...this.emails.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    if (all.length <= maxRetainedEmails) return all.map(clone);
+
+    const keep = new Set<string>();
+    const protectRelations = (email: EmailEnvelope): void => {
+      keep.add(email.id);
+      if (email.inReplyTo && this.emails.has(email.inReplyTo)) keep.add(email.inReplyTo);
+      if (email.answeredBy && this.emails.has(email.answeredBy)) keep.add(email.answeredBy);
+      if (email.replyReservedBy && this.emails.has(email.replyReservedBy)) keep.add(email.replyReservedBy);
+    };
+    for (const email of all) {
+      const open = email.deliveryState === "queued"
+        || (email.requiresResponse && email.deliveryState === "delivered" && !email.answeredAt)
+        || Boolean(email.replyReservedBy);
+      if (open) protectRelations(email);
+    }
+    // Relation expansion preserves answered request/reply pairs selected from
+    // either side and queued reply/original pairs.
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const id of [...keep]) {
+        const before = keep.size;
+        const email = this.emails.get(id);
+        if (email) protectRelations(email);
+        if (keep.size !== before) expanded = true;
+      }
+    }
+    for (let index = all.length - 1; index >= 0 && keep.size < maxRetainedEmails; index -= 1) {
+      protectRelations(all[index]!);
+    }
+    return all.filter((email) => keep.has(email.id)).map(clone);
+  }
+
+  private async rewriteSnapshot(emails: readonly EmailEnvelope[]): Promise<void> {
+    const events: MailEvent[] = emails.map((email) => ({ type: "email.created", email: clone(email) }));
+    const payload = events.length > 0 ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
+    const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(temp, payload, { encoding: "utf8", mode: 0o600 });
+    await rename(temp, this.path);
+    try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+    this.emails.clear();
+    for (const email of emails) this.emails.set(email.id, clone(email));
+    this.eventCount = events.length;
+  }
+
+  /** Rewrite the journal as one full-state `email.created` snapshot per retained envelope. */
   async compact(): Promise<void> {
     const operation = this.writeChain.catch(() => undefined).then(async () => {
-      const events: MailEvent[] = [...this.emails.values()].map((email) => ({
-        type: "email.created" as const,
-        email: clone(email),
-      }));
-      const payload = events.length > 0 ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
-      const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
-      await writeFile(temp, payload, { encoding: "utf8", mode: 0o600 });
-      await rename(temp, this.path);
-      try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
-      this.eventCount = events.length;
+      await this.rewriteSnapshot([...this.emails.values()]);
     });
     this.writeChain = operation;
     await operation;
   }
 
+  async maintainIfNeeded(
+    threshold = MAIL_JOURNAL_COMPACT_THRESHOLD,
+    maxRetainedEmails = Number.MAX_SAFE_INTEGER,
+  ): Promise<boolean> {
+    if (this.maintenancePromise) return this.maintenancePromise;
+    const excessEvents = this.eventCount - this.emails.size;
+    if (excessEvents <= threshold && this.emails.size <= maxRetainedEmails) return false;
+    const operation = this.writeChain.catch(() => undefined).then(async () => {
+      const currentExcess = this.eventCount - this.emails.size;
+      if (currentExcess <= threshold && this.emails.size <= maxRetainedEmails) return false;
+      await this.rewriteSnapshot(this.retainedSnapshot(maxRetainedEmails));
+      return true;
+    });
+    const write = operation.then(() => undefined);
+    this.writeChain = write;
+    const tracked = operation.finally(() => {
+      if (this.maintenancePromise === tracked) this.maintenancePromise = undefined;
+    });
+    this.maintenancePromise = tracked;
+    return tracked;
+  }
+
   async compactIfNeeded(threshold = MAIL_JOURNAL_COMPACT_THRESHOLD): Promise<boolean> {
-    if (this.eventCount <= threshold) return false;
-    await this.compact();
-    return true;
+    return this.maintainIfNeeded(threshold);
   }
 }

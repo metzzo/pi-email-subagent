@@ -56,6 +56,7 @@ export interface SubagentConfig {
   maxQueuedBytes: number;
   maxBatchMessages: number;
   maxBatchBytes: number;
+  maxRetainedEmails: number;
   responseReminderLimit: number;
   roles: Record<string, RoleConfig>;
   addresses: Record<string, AddressConfig>;
@@ -191,7 +192,7 @@ export interface WorkerStartConfig {
   projectTrusted: boolean;
   systemPrompt: string;
   sendEmail: (input: SendEmailInput) => Promise<SendEmailResult>;
-  fetchEmails: () => EmailEnvelope[];
+  fetchEmails: () => { emails: EmailEnvelope[]; total: number };
 }
 
 export interface WorkerTransport {

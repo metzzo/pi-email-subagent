@@ -2,7 +2,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentBroker } from "./broker.ts";
 import type { AgentInspection, WaitForRepliesResult } from "./types.ts";
-import { errorMessage } from "./util.ts";
+import { byteLength, errorMessage } from "./util.ts";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
@@ -95,12 +95,21 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         );
         const lines = [
           `Replies: ${result.complete ? "complete" : result.timedOut ? "timed out with pending work" : "partial"}`,
-          ...result.items.map((item) => {
-            const subject = item.reply?.subject ?? item.request?.subject ?? item.requestId;
-            const suffix = item.error ? ` · ${item.error}` : "";
-            return `- ${item.requestId}: ${item.state} · ${subject}${suffix}${item.reply ? `\n  ${item.reply.message}` : ""}`;
-          }),
         ];
+        const omitted: string[] = [];
+        for (const item of result.items) {
+          const subject = item.reply?.subject ?? item.request?.subject ?? item.requestId;
+          const suffix = item.error ? ` · ${item.error}` : "";
+          const summary = `- ${item.requestId}: ${item.state} · ${subject}${suffix}`;
+          const full = `${summary}${item.reply ? `\n  ${item.reply.message}` : ""}`;
+          if (item.reply && byteLength([...lines, full].join("\n")) > broker.toolResultByteLimit) {
+            lines.push(`${summary}\n  [reply body omitted from this batch; call wait_for_replies again with only ${item.requestId}]`);
+            omitted.push(item.requestId);
+          } else lines.push(full);
+        }
+        if (omitted.length > 0) {
+          lines.push(`Re-fetch omitted reply bodies in smaller groups: ${omitted.join(", ")}`);
+        }
         return textResult(lines.join("\n"), { result } satisfies WaitForRepliesToolDetails);
       } catch (error) {
         const message = errorMessage(error);

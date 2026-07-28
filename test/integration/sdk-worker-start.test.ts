@@ -39,7 +39,7 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
     projectTrusted: false,
     systemPrompt: "MAILBOX_SENTINEL: send_email and fetch_emails are required.",
     sendEmail: async () => { throw new Error("not called"); },
-    fetchEmails: () => [],
+    fetchEmails: () => ({ emails: [], total: 0 }),
   });
   const snapshot = worker.getSnapshot();
   assert.equal(snapshot.record.state, "idle");
