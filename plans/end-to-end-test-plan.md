@@ -226,5 +226,6 @@ Follow-up (same day):
 Post-review hardening (2026-07-28):
 
 - Added regressions for orphan-recipient crash recovery, parallel queue-cap atomicity, post-restore init cleanup, rejecting abort/dispose cleanup, stale-model quarantine, formatted byte enforcement (including high steering), bounded fetch/join output, live journal maintenance and terminal retention, config-key validation, partial abort resolution, and accurate failed-mail inspection counts.
-- `npm run validate`: passed, 117 tests, 117 passed, 0 failed. The 13-scenario real scripted-provider RPC suite remained green.
+- `npm run validate`: passed, 117 tests, 117 passed, 0 failed. The 13-scenario real scripted-provider RPC suite remained green; hardening/lifecycle tests additionally passed 5/5 repeated runs.
+- Paid live acceptance re-verified on the final code with terra main + K3 worker: spawn, `fetch_emails`, exact reply, and `wait_for_replies` collection all succeeded (exit 0).
 - `maxRetainedEmails` defaults to 10000; runtime maintenance never prunes queued mail, open obligations, reservations, or one side of a retained request/reply pair.
