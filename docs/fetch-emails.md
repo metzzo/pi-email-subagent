@@ -12,6 +12,7 @@ None (`{}`).
 - Sorted high priority first, then oldest first.
 - For the main thread, mail to all current and previous `main@<model>.com` aliases is merged and de-duplicated by email ID.
 - Queued (not yet delivered) mail and pure replies are not listed; emails already answered or reserved by an in-flight reply are excluded.
+- Results are paged by `maxBatchMessages` and formatted `maxBatchBytes`. When more remain, answer the current batch and call again.
 
 ## Result
 
@@ -31,7 +32,7 @@ UNANSWERED EMAILS (2)
 <agent-email-batch count="2">
 <agent-email id="mail_…" kind="request" priority="high">
   <from>main@gpt-5.6-sol.com</from>
-  <to>reviewer.audit@gpt-5.6-sol.com</from>
+  <to>reviewer.audit@gpt-5.6-sol.com</to>
   <subject>Audit token handling</subject>
   <reply-subject>Re: [mail_…] Audit token handling</reply-subject>
   <body>…</body>
@@ -40,7 +41,7 @@ UNANSWERED EMAILS (2)
 </agent-email-batch>
 ```
 
-`details.emails` contains the raw `EmailEnvelope[]` for renderers. All user-controlled text is XML-escaped; the `<reply-subject>` element is the exact string to pass as `subject` in [`send_email`](send-email.md) when answering.
+`details.emails` contains the current raw `EmailEnvelope[]` batch and `details.total` contains the pre-batch obligation count. All user-controlled text is XML-escaped; the `<reply-subject>` element is the exact string to pass as `subject` in [`send_email`](send-email.md) when answering.
 
 ## Usage guidance
 
