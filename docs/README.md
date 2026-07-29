@@ -25,7 +25,7 @@ Workers always receive exactly `send_email` and `fetch_emails` on top of their c
 
 ### Priority and delivery
 
-- `low` (default): queued and delivered in batches when the recipient settles. At most `maxBatchMessages` (32) or `maxBatchBytes` (512 KB) per batch, high priority first, FIFO within a priority. At most `maxConcurrent` (4) agents run at once; the rest wait in a fair queue that prioritizes aged (≥30 s) and high-priority mail.
+- `low` (default): queued and delivered in batches when the recipient settles. At most `maxBatchMessages` (32) or `maxBatchBytes` (512 KB) per delivery batch, high priority first, FIFO within a priority. Individual envelopes and mail-tool results remain within Pi's context-safe 50 KB / 2000-line output recommendation; `fetch_emails` pages independently when a delivery batch is larger. At most `maxConcurrent` (4) agents run at once; the rest wait in a fair queue that prioritizes aged (≥30 s) and high-priority mail.
 - `high`: if the recipient is mid-run, the email **steers** it at the next safe agent boundary and is marked delivered immediately. Otherwise it is queued ahead of low mail.
 
 ### Reply protocol

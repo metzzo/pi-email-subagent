@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import type { AgentBroker } from "../../src/broker.ts";
 import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import type { EmailEnvelope, WaitForRepliesResult } from "../../src/types.ts";
@@ -9,15 +10,18 @@ it("exposes inspection, reply joining, and lifecycle control without a spawn too
   assert.deepEqual(tools.map((tool) => tool.name), ["inspect_agent", "wait_for_replies", "manage_agent"]);
   assert.equal(tools.some((tool) => tool.name.includes("spawn")), false);
 
-  const result = await tools[0].execute(
-    "inspect-unready",
-    { address: "worker.task@gpt-5.4.com" },
-    undefined,
-    undefined,
-    {} as never,
+  await assert.rejects(
+    tools[0].execute(
+      "inspect-unready",
+      { address: "worker.task@gpt-5.4.com" },
+      undefined,
+      undefined,
+      {} as never,
+    ),
+    /Could not inspect agent: Email broker is not ready/,
   );
-  assert.equal((result as { isError?: boolean }).isError, true);
-  assert.match((result.content[0] as { text: string }).text, /broker is not ready/i);
+  const action = (tools[2].parameters as { properties: { action: unknown } }).properties.action;
+  assert.deepEqual(action, { type: "string", enum: ["stop", "restart", "archive", "clear_failure"] });
 });
 
 it("bounds joined reply bodies and directs callers to re-fetch omitted IDs", async () => {
@@ -68,4 +72,9 @@ it("bounds joined reply bodies and directs callers to re-fetch omitted IDs", asy
   assert.match(text, /reply body omitted/);
   assert.match(text, /call wait_for_replies again with only mail_/);
   assert.ok(Buffer.byteLength(text) < 1_000, "summary remains bounded even when reply bodies are omitted");
+  assert.ok(Buffer.byteLength(text) <= DEFAULT_MAX_BYTES);
+  assert.ok(text.split("\n").length <= DEFAULT_MAX_LINES);
+  const details = rendered.details as { result: WaitForRepliesResult };
+  assert.equal(details.result.items[0]?.request?.message, "[body omitted from structured tool details; see tool text]");
+  assert.equal(details.result.items[0]?.reply?.message, "[body omitted from structured tool details; see tool text]");
 });

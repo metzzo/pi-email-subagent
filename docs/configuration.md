@@ -22,7 +22,7 @@ Project values merge over global values, which merge over the defaults below. In
 | `maxQueuedMessages` | `256` | 1–10000 | Queued inbound per recipient |
 | `maxQueuedBytes` | `4194304` | 1 B–64 MB | Queued inbound bytes per recipient |
 | `maxBatchMessages` | `32` | 1–1024 | Emails per worker prompt batch |
-| `maxBatchBytes` | `524288` | 1 B–512 KB | Formatted bytes per email delivery/fetch batch (also the single-email cap) |
+| `maxBatchBytes` | `524288` | 1 B–512 KB | Formatted bytes per worker delivery batch; fetch/tool output is independently capped by Pi's 50 KB / 2000-line recommendation |
 | `maxRetainedEmails` | `10000` | 1–1000000 | Soft cap for retained envelopes; open obligations are never pruned |
 | `responseReminderLimit` | `2` | 1–10 | Re-prompts before an agent settling with unanswered mail is marked failed |
 
@@ -65,6 +65,7 @@ All default roles may spawn; set `canSpawn: false` on read-only roles to prevent
 
 ## Notes
 
+- A single formatted envelope must fit the smaller of `maxBatchBytes` and the context-safe tool payload budget (currently 48 KB with reserved result overhead), and at most 1952 lines. This ensures the same mail remains retrievable through `fetch_emails`; XML escaping counts toward the byte limit.
 - `modelPolicy` replaces the entire model-selection policy bullet list in both the main coordinator prompt and every subagent prompt. The available-model list itself always reflects the live catalog.
 - Live-session journal maintenance compacts after more than 8192 excess transition events. It also prunes the oldest terminal mail above `maxRetainedEmails`; queued mail, open obligations, reservations, and retained request/reply pairs remain intact. The cap is soft when protected mail alone exceeds it.
 - Provider, model catalog, and credential changes require an extension reload; worker runtimes snapshot them at session start.

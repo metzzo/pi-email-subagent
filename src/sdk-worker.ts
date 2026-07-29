@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import { StringEnum, type Model } from "@earendil-works/pi-ai";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
@@ -23,26 +23,18 @@ import type {
   WorkerTransport,
 } from "./types.ts";
 import { formatUnanswered } from "./prompts.ts";
+import { textResult } from "./tool-result.ts";
 import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
 
-const PrioritySchema = Type.Union([Type.Literal("high"), Type.Literal("low")]);
+const PrioritySchema = StringEnum(["high", "low"] as const);
 
 export interface SendToolDetails {
   result?: SendEmailResult;
-  error?: string;
 }
 
 export interface FetchToolDetails {
   emails: EmailEnvelope[];
   total: number;
-}
-
-function textResult(text: string, details?: unknown, isError = false) {
-  return {
-    content: [{ type: "text" as const, text }],
-    details,
-    ...(isError ? { isError: true } : {}),
-  };
 }
 
 export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail" | "fetchEmails">) {
@@ -64,7 +56,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
       priority: PrioritySchema,
     }),
     async execute(_id, params, signal) {
-      if (signal?.aborted) return textResult("Email send aborted before acceptance.", { error: "aborted" }, true);
+      if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
       try {
         const result = await config.sendEmail(params as SendEmailInput);
         const lines = [
@@ -86,8 +78,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientState) lines.push(`Recipient state: ${result.recipientState}`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
-        const message = errorMessage(error);
-        return textResult(`Email was not accepted: ${message}`, { error: message } satisfies SendToolDetails, true);
+        throw new Error(`Email was not accepted: ${errorMessage(error)}`);
       }
     },
   });

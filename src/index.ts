@@ -96,10 +96,10 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
         0,
       );
     },
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, { expanded }, theme, context) {
       const details = result.details as SendToolDetails | undefined;
       if (!details?.result) {
-        return new Text(theme.fg(details?.error ? "error" : "toolOutput", sanitizeConversationBody(resultText(result))), 0, 0);
+        return new Text(theme.fg(context.isError ? "error" : "toolOutput", sanitizeConversationBody(resultText(result))), 0, 0);
       }
       const sent = details.result;
       const icon = theme.fg("success", "✓");

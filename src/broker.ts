@@ -8,6 +8,7 @@ import { enforcementPrompt, formatEmail, formatEmailBatch, subagentPrompt } from
 import { RegistryStore } from "./registry-store.ts";
 import { looksLikeReply, makeReplySubject, parseReplySubject } from "./reply.ts";
 import { SlidingWindowRateLimiter } from "./rate-limit.ts";
+import { MAIL_TOOL_BATCH_BYTES, MAIL_TOOL_BATCH_LINES } from "./tool-result.ts";
 import type {
   AgentInspection,
   AgentRecord,
@@ -313,7 +314,7 @@ export class AgentBroker {
   }
 
   get toolResultByteLimit(): number {
-    return this.options.config.maxBatchBytes;
+    return Math.min(this.options.config.maxBatchBytes, MAIL_TOOL_BATCH_BYTES);
   }
 
   private isMainIdentity(address: string): boolean {
@@ -361,9 +362,14 @@ export class AgentBroker {
   }
 
   private validateDeliverySize(envelope: EmailEnvelope): void {
-    const formattedBytes = byteLength(formatEmail(envelope));
-    if (formattedBytes > this.options.config.maxBatchBytes) {
-      throw new Error(`Formatted email exceeds the ${this.options.config.maxBatchBytes}-byte delivery limit.`);
+    const formatted = formatEmail(envelope);
+    const byteLimit = this.toolResultByteLimit;
+    if (byteLength(formatted) > byteLimit) {
+      throw new Error(`Formatted email exceeds the ${byteLimit}-byte context-safe envelope limit.`);
+    }
+    const lines = formatted.split("\n").length;
+    if (lines > MAIL_TOOL_BATCH_LINES) {
+      throw new Error(`Formatted email exceeds the ${MAIL_TOOL_BATCH_LINES}-line context-safe envelope limit.`);
     }
   }
 
@@ -774,32 +780,28 @@ export class AgentBroker {
     if (record && !["stopped", "failed", "archived"].includes(record.state)) record.state = "queued";
   }
 
-  private formattedBatchBytes(payloadBytes: number, count: number): number {
-    if (count === 0) return 0;
-    if (count === 1) return payloadBytes;
-    return byteLength(`<agent-email-batch count="${count}">\n`)
-      + payloadBytes
-      + (count - 1)
-      + byteLength("\n</agent-email-batch>");
-  }
-
-  private selectBatch(queued: readonly EmailEnvelope[]): EmailEnvelope[] {
+  private selectBatch(
+    queued: readonly EmailEnvelope[],
+    maxBytes = this.options.config.maxBatchBytes,
+    maxLines = Number.MAX_SAFE_INTEGER,
+  ): EmailEnvelope[] {
     const selected: EmailEnvelope[] = [];
-    let payloadBytes = 0;
     for (const email of queued) {
-      const size = byteLength(formatEmail(email));
       if (selected.length >= this.options.config.maxBatchMessages) break;
-      const nextCount = selected.length + 1;
-      if (this.formattedBatchBytes(payloadBytes + size, nextCount) > this.options.config.maxBatchBytes) break;
+      const candidate = [...selected, email];
+      const formatted = formatEmailBatch(candidate);
+      if (byteLength(formatted) > maxBytes || formatted.split("\n").length > maxLines) break;
       selected.push(email);
-      payloadBytes += size;
     }
     return selected;
   }
 
   fetchUnansweredBatch(addressInput: string): { emails: EmailEnvelope[]; total: number } {
     const all = this.fetchUnanswered(addressInput);
-    return { emails: this.selectBatch(all), total: all.length };
+    return {
+      emails: this.selectBatch(all, this.toolResultByteLimit, MAIL_TOOL_BATCH_LINES),
+      total: all.length,
+    };
   }
 
   private pendingRank(address: string, now = Date.now()): [number, string, string] {

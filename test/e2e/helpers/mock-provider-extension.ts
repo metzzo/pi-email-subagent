@@ -16,6 +16,7 @@
  *   user "E2E DELEGATE REVIEWER ..."                → send_email to the reviewer
  *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
+ *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
  *   user "E2E INSPECT"                              → inspect_agent on the scout
  *   user "E2E STOP" / "E2E ARCHIVE"                 → manage_agent
@@ -151,6 +152,15 @@ function planMain(messages: readonly Message[]): Plan {
   }
   if (lastText.includes("E2E INSPECT")) {
     return { toolCalls: [{ name: "inspect_agent", arguments: { address: MOCK_WORKER_ADDRESS } }] };
+  }
+  if (lastText.includes("E2E TOOL ERRORS")) {
+    return {
+      toolCalls: [
+        { name: "inspect_agent", arguments: { address: "invalid-address" } },
+        { name: "wait_for_replies", arguments: { request_ids: ["mail_0000_missing"], timeout_seconds: 0, collect: true } },
+        { name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "stop" } },
+      ],
+    };
   }
   if (lastText.includes("E2E SEND INVALID")) {
     return {
