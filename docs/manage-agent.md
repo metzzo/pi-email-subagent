@@ -38,7 +38,7 @@ Deletes the stored `failure` diagnostic. Only valid while the agent is `idle`, `
 restart completed for reviewer.audit@gpt-5.6-sol.com. State: idle.
 ```
 
-`details` carries `address`, `action`, and the resulting `state` (read back via inspection). Failure text is `Could not manage agent: <reason>` with `isError: true` — unknown address, invalid transition, capacity limit, or unmet archival preconditions.
+`details` carries `address`, `action`, and the resulting `state` (read back via inspection). Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true` — unknown address, invalid transition, capacity limit, or unmet archival preconditions.
 
 ## Equivalents
 

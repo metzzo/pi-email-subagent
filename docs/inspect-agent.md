@@ -44,7 +44,7 @@ Last failure: …            (only when present)
 | `failure` | Last failure diagnostic, when present |
 | `providerReady` | `available` when a live worker exists, else `unknown` |
 
-Failure text is `Could not inspect agent: <reason>` with `isError: true` — typically an invalid address shape or an unroutable/ambiguous model ID.
+Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true` — typically an invalid address shape or an unroutable/ambiguous model ID.
 
 ## Usage guidance
 

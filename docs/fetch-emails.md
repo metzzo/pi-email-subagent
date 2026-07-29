@@ -12,7 +12,7 @@ None (`{}`).
 - Sorted high priority first, then oldest first.
 - For the main thread, mail to all current and previous `main@<model>.com` aliases is merged and de-duplicated by email ID.
 - Queued (not yet delivered) mail and pure replies are not listed; emails already answered or reserved by an in-flight reply are excluded.
-- Results are paged by `maxBatchMessages` and formatted `maxBatchBytes`. When more remain, answer the current batch and call again.
+- Results are paged by `maxBatchMessages` and Pi's context-safe tool-output budget (50 KB / 2000 lines, with reserved framing overhead). `maxBatchBytes` may lower the byte limit but cannot raise the tool-output ceiling. When more remain, answer the current batch and call again.
 
 ## Result
 
@@ -41,7 +41,7 @@ UNANSWERED EMAILS (2)
 </agent-email-batch>
 ```
 
-`details.emails` contains the current raw `EmailEnvelope[]` batch and `details.total` contains the pre-batch obligation count. All user-controlled text is XML-escaped; the `<reply-subject>` element is the exact string to pass as `subject` in [`send_email`](send-email.md) when answering.
+`details.emails` contains the current bounded raw `EmailEnvelope[]` batch and `details.total` contains the pre-batch obligation count. All user-controlled text is XML-escaped; the `<reply-subject>` element is the exact string to pass as `subject` in [`send_email`](send-email.md) when answering.
 
 ## Usage guidance
 

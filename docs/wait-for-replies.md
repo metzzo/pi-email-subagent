@@ -37,11 +37,11 @@ Replies: complete
 - mail_…: failed · Refactor config loader · Agent failed: provider timeout
 ```
 
-The first line is `complete` (all terminal), `timed out with pending work` (timeout with pending items), or `partial` (ended early with pending items, e.g. abort/shutdown). `details.result` (`WaitForRepliesResult`) carries `complete`, `timedOut`, and `items[]` with `requestId`, `state`, `request`, optional `reply`, and optional `error`.
+The first line is `complete` (all terminal), `timed out with pending work` (timeout with pending items), or `partial` (ended early with pending items, e.g. abort/shutdown). `details.result` carries the same terminal metadata, but request/reply bodies are deliberately replaced with a marker instead of duplicating potentially large content already represented in the tool text.
 
-Reply text is bounded by `maxBatchBytes`. If joined reply bodies do not fit, the result keeps their terminal states and IDs but omits excess bodies with instructions to call `wait_for_replies` again using smaller ID groups (a single ID retrieves its body).
+Reply text is bounded by Pi's 50 KB / 2000-line tool-output recommendation and a smaller internal payload budget that reserves framing overhead. If joined reply bodies do not fit, the result keeps their terminal states and IDs but omits excess bodies with instructions to call `wait_for_replies` again using smaller ID groups. The context-safe single-envelope limit ensures a one-ID call can retrieve its body.
 
-Failure text is `Could not wait for replies: <reason>` with `isError: true` — unknown IDs, replies instead of requests, requests not sent by main, too many IDs, or an out-of-range timeout.
+Failures throw `Could not wait for replies: <reason>`, so Pi records a native failed tool execution (`isError: true`) for unknown IDs, replies instead of requests, requests not sent by main, too many IDs, or invalid parameters.
 
 ## Usage guidance
 

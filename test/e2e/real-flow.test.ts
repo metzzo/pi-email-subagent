@@ -100,7 +100,9 @@ async function readJournal(agentDir: string, sessionId: string): Promise<any[]> 
 }
 
 function isErrorResult(line: RpcLine): boolean {
-  return line.isError === true || (line.result as { isError?: boolean } | undefined)?.isError === true;
+  // Pi marks thrown tool failures on the lifecycle event itself. A custom
+  // `result.isError` property is ignored by the native execution contract.
+  return line.isError === true;
 }
 
 function toolText(line: RpcLine): string {
@@ -277,6 +279,21 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.match(errors, /unknown email mail_0000_fake|has not been delivered|does not require an answer/);
       await client.waitFor(assistantText("E2E SENT"), "turn completion", 90_000, mark);
       await client.waitForSettlement(mark);
+
+      const coordinationMark = client.mark();
+      await client.prompt("E2E TOOL ERRORS");
+      const coordinationErrors = await client.collect(
+        (line) => line.type === "tool_execution_end"
+          && ["inspect_agent", "wait_for_replies", "manage_agent"].includes(String(line.toolName)),
+        3,
+        "three native coordination-tool errors",
+        90_000,
+        coordinationMark,
+      );
+      for (const result of coordinationErrors) {
+        assert.equal(result.isError, true, `${result.toolName}: ${toolText(result)}`);
+      }
+      await client.waitForSettlement(coordinationMark);
       assert.equal(await client.close(), 0, client.stderr);
 
       const registry = await readRegistry(agentDir, sessionId);

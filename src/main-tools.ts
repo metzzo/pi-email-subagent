@@ -1,31 +1,37 @@
+import { StringEnum } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentBroker } from "./broker.ts";
-import type { AgentInspection, WaitForRepliesResult } from "./types.ts";
+import { textResult } from "./tool-result.ts";
+import type { AgentInspection, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
 import { byteLength, errorMessage } from "./util.ts";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
-  error?: string;
 }
 
 export interface WaitForRepliesToolDetails {
   result?: WaitForRepliesResult;
-  error?: string;
 }
 
 export interface ManageAgentToolDetails {
   address?: string;
   action?: "stop" | "restart" | "archive" | "clear_failure";
   state?: string;
-  error?: string;
 }
 
-function textResult(text: string, details?: unknown, isError = false) {
+function compactEnvelopeDetails(envelope: EmailEnvelope | undefined): EmailEnvelope | undefined {
+  return envelope ? { ...envelope, message: "[body omitted from structured tool details; see tool text]" } : undefined;
+}
+
+function compactWaitDetails(result: WaitForRepliesResult): WaitForRepliesResult {
   return {
-    content: [{ type: "text" as const, text }],
-    details,
-    ...(isError ? { isError: true } : {}),
+    ...result,
+    items: result.items.map((item) => ({
+      ...item,
+      request: compactEnvelopeDetails(item.request),
+      reply: compactEnvelopeDetails(item.reply),
+    })),
   };
 }
 
@@ -61,8 +67,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         if (inspection.failure) lines.push(`Last failure: ${inspection.failure}`);
         return textResult(lines.join("\n"), { inspection } satisfies InspectAgentToolDetails);
       } catch (error) {
-        const message = errorMessage(error);
-        return textResult(`Could not inspect agent: ${message}`, { error: message } satisfies InspectAgentToolDetails, true);
+        throw new Error(`Could not inspect agent: ${errorMessage(error)}`);
       }
     },
   });
@@ -110,10 +115,9 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         if (omitted.length > 0) {
           lines.push(`Re-fetch omitted reply bodies in smaller groups: ${omitted.join(", ")}`);
         }
-        return textResult(lines.join("\n"), { result } satisfies WaitForRepliesToolDetails);
+        return textResult(lines.join("\n"), { result: compactWaitDetails(result) } satisfies WaitForRepliesToolDetails);
       } catch (error) {
-        const message = errorMessage(error);
-        return textResult(`Could not wait for replies: ${message}`, { error: message } satisfies WaitForRepliesToolDetails, true);
+        throw new Error(`Could not wait for replies: ${errorMessage(error)}`);
       }
     },
   });
@@ -128,12 +132,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     executionMode: "sequential" as const,
     parameters: Type.Object({
       address: Type.String({ description: "Existing subagent address" }),
-      action: Type.Union([
-        Type.Literal("stop"),
-        Type.Literal("restart"),
-        Type.Literal("archive"),
-        Type.Literal("clear_failure"),
-      ]),
+      action: StringEnum(["stop", "restart", "archive", "clear_failure"] as const),
     }, { additionalProperties: false }),
     async execute(_id, params) {
       try {
@@ -149,8 +148,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           { address: params.address, action: params.action, state } satisfies ManageAgentToolDetails,
         );
       } catch (error) {
-        const message = errorMessage(error);
-        return textResult(`Could not manage agent: ${message}`, { error: message } satisfies ManageAgentToolDetails, true);
+        throw new Error(`Could not manage agent: ${errorMessage(error)}`);
       }
     },
   });

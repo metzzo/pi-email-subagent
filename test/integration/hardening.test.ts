@@ -265,6 +265,13 @@ describe("broker hardening", () => {
         to: "worker.formatted@gpt-5.4.com", subject: "Expanded", message: "&".repeat(100), priority: "low",
       }), /formatted email exceeds/i);
       assert.equal(workers.length, 0);
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.formatted@gpt-5.4.com",
+        subject: "Too many lines",
+        message: Array.from({ length: 2_000 }, () => "x").join("\n"),
+        priority: "low",
+      }), /context-safe envelope limit/);
+      assert.equal(workers.length, 0);
 
       await broker.send(broker.mainAddress, {
         to: "worker.formatted@gpt-5.4.com", subject: "Small", message: "small", priority: "low",
@@ -274,6 +281,21 @@ describe("broker hardening", () => {
         to: "worker.formatted@gpt-5.4.com", subject: "High expanded", message: "&".repeat(100), priority: "high",
       }), /formatted email exceeds/i);
       assert.equal(workers[0]?.steers.length, 0);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("caps a single envelope independently from a larger delivery-batch budget", async () => {
+    const { broker, workers } = await setup({ maxBatchBytes: 512 * 1024 });
+    try {
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.context-safe@gpt-5.4.com",
+        subject: "Escaped expansion",
+        message: "&".repeat(10_000),
+        priority: "low",
+      }), /context-safe envelope limit/);
+      assert.equal(workers.length, 0);
     } finally {
       await broker.shutdown();
     }

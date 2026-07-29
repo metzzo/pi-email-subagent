@@ -28,7 +28,7 @@ Reply subjects are checked strictly, in order: the referenced email must exist, 
 ### Limits (defaults; see [configuration.md](configuration.md))
 
 - Subject: 512 bytes (+64 allowance for the reply prefix); no line breaks or control characters.
-- Message: 32 KB; a single email may not exceed the 512 KB worker batch limit.
+- Message: 32 KB. After XML escaping, a single envelope must fit the context-safe tool payload budget (currently 48 KB and 1968 lines, or a lower configured `maxBatchBytes`) so it remains retrievable without truncating the task.
 - Rate: 60 mails/minute global, 30 mails/minute per sender (sliding window). Validation failures are not charged; quota is consumed before journaling.
 - Queue per recipient: 256 messages / 4 MB.
 
@@ -66,7 +66,7 @@ Recipient state: running
 | `answeredEmailId` | Present when this send answered an earlier request |
 | `recipientModel/Effort/Role/Tools/State` | Effective recipient profile (agents only) |
 
-Failure text is `Email was not accepted: <reason>` with `isError: true` and `details.error`. Notable reasons: rate limit exceeded, agent limit reached, mailbox queue full, subject/message or formatted delivery too large, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
+Failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, agent limit reached, mailbox queue full, subject/message or formatted delivery too large, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
 
 If the tool call is aborted before acceptance, the result is `Email send aborted before acceptance.` and nothing is journaled.
 
