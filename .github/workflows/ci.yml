@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Node 22 · ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npm run validate
+      - run: npm audit --omit=dev
+      - run: git diff --check
+
+  package-allowlist:
+    name: Package allowlist
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - name: Inspect packed artifact
+        run: |
+          npm pack --ignore-scripts --json > "$RUNNER_TEMP/pack.json"
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const [pack] = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/pack.json', 'utf8'));
+          if (!pack || pack.entryCount > 50 || pack.size > 200000) {
+            throw new Error(`Unexpected package surface: ${JSON.stringify(pack)}`);
+          }
+          const forbidden = pack.files.filter(({ path }) => /^(test|scripts|\.github)\//.test(path));
+          if (forbidden.length) throw new Error(`Forbidden packed files: ${forbidden.map(x => x.path).join(', ')}`);
+          console.log(`${pack.entryCount} files, ${pack.size} bytes`);
+          NODE

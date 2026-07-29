@@ -1,0 +1,28 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Persistent model-addressed Pi workers coordinated through virtual email.
+- Durable at-least-once mail journal with reply reservation/commit/release semantics and crash reconciliation.
+- Main coordination tools: `send_email`, `fetch_emails`, `inspect_agent`, `wait_for_replies`, and `manage_agent`.
+- Live `/agents` dashboard, conversation viewer, usage/cost display, and lifecycle controls.
+- Role/address profiles, tool enforcement, spawn control, capacity/rate/queue limits, retention, and configurable model policy.
+- Real scripted-provider Pi RPC E2E suite plus optional paid live-provider acceptance.
+
+### Changed
+
+- Tool string enums now use Google-compatible schemas.
+- Tool failures use Pi's native thrown-error contract.
+- Mail and joined-reply tool output is bounded to Pi's context-safe byte/line recommendations.
+
+### Security
+
+- XML framing escapes peer-controlled content; TUI rendering strips terminal controls.
+- State directories/files use restrictive permissions.
+- Workers remain trusted collaborators sharing the host Pi process and project workspace; see `SECURITY.md`.
+
+[Unreleased]: https://github.com/metzzo/pi-email-subagent/compare/HEAD...HEAD
