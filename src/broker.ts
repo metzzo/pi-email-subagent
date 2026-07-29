@@ -4,6 +4,7 @@ import { ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from ".
 import { resolveAgentProfile } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
+import { NamespaceLock } from "./namespace-lock.ts";
 import { enforcementPrompt, formatEmail, formatEmailBatch, subagentPrompt } from "./prompts.ts";
 import { RegistryStore } from "./registry-store.ts";
 import { looksLikeReply, makeReplySubject, parseReplySubject } from "./reply.ts";
@@ -72,6 +73,7 @@ export class AgentBroker {
   private lifecycleGeneration = 0;
   private initPromise?: Promise<void>;
   private closePromise?: Promise<void>;
+  private namespaceLock?: NamespaceLock;
   private disposed = false;
 
   constructor(private readonly options: BrokerOptions) {
@@ -101,6 +103,11 @@ export class AgentBroker {
 
   private async initialize(generation: number): Promise<void> {
     try {
+      this.namespaceLock = await NamespaceLock.acquire(this.options.namespaceDir, (error) => {
+        this.options.mainAdapter.notifyFailure(`Subagent namespace lock was compromised: ${errorMessage(error)}`);
+        swallow(this.shutdown());
+      });
+      this.checkpoint(generation);
       await this.mailStore.init();
       this.checkpoint(generation);
       await this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails);
@@ -224,7 +231,14 @@ export class AgentBroker {
         this.lifecycleGeneration += 1;
       }
       await this.disposeOwnedWorkers();
-      if (!cancelled) this.lifecycle = "closed";
+      let releaseError: unknown;
+      if (!cancelled) {
+        try { await this.releaseNamespaceLock(); } catch (cleanupError) { releaseError = cleanupError; }
+        this.lifecycle = "closed";
+      }
+      if (releaseError) {
+        throw new AggregateError([error, releaseError], `Broker initialization and namespace-lock cleanup both failed.`);
+      }
       throw error;
     }
   }
@@ -1343,6 +1357,12 @@ export class AgentBroker {
     for (const worker of allWorkers) this.provisionalWorkers.delete(worker);
   }
 
+  private async releaseNamespaceLock(): Promise<void> {
+    const current = this.namespaceLock;
+    this.namespaceLock = undefined;
+    await current?.release();
+  }
+
   private async close(): Promise<void> {
     if (this.lifecycle === "closed") return;
     this.lifecycle = "closing";
@@ -1350,19 +1370,32 @@ export class AgentBroker {
     this.lifecycleGeneration += 1;
     this.emitChange();
 
-    // Dispose first so prompt preflight and provider operations owned by active
-    // sessions are cancelled before waiting for their address/send barriers.
-    await this.disposeOwnedWorkers();
-    await this.initPromise?.catch(() => undefined);
-    await this.disposeOwnedWorkers();
-    while (this.addressTails.size > 0 || this.inFlightOperations.size > 0) {
-      await Promise.allSettled([...this.addressTails.values(), ...this.inFlightOperations]);
-    }
+    let failure: unknown;
+    try {
+      // Dispose first so prompt preflight and provider operations owned by active
+      // sessions are cancelled before waiting for their address/send barriers.
+      await this.disposeOwnedWorkers();
+      await this.initPromise?.catch(() => undefined);
+      await this.disposeOwnedWorkers();
+      while (this.addressTails.size > 0 || this.inFlightOperations.size > 0) {
+        await Promise.allSettled([...this.addressTails.values(), ...this.inFlightOperations]);
+      }
 
-    this.pendingStarts.splice(0);
-    await this.persistRegistry(true);
-    await Promise.all([this.mailStore.flush(), this.registryStore.flush()]);
+      this.pendingStarts.splice(0);
+      await this.persistRegistry(true);
+      await Promise.all([this.mailStore.flush(), this.registryStore.flush()]);
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await this.releaseNamespaceLock();
+    } catch (error) {
+      failure = failure
+        ? new AggregateError([failure, error], "Broker shutdown and namespace-lock cleanup both failed.")
+        : error;
+    }
     this.lifecycle = "closed";
     this.emitChange();
+    if (failure) throw failure;
   }
 }

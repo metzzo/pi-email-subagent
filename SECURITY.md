@@ -28,7 +28,7 @@ Extensions execute with the Pi user's permissions. In the current release:
 - Read-only role defaults reduce accidental mutation but are not an OS security boundary.
 - Parallel writable workers can create semantic conflicts even though Pi serializes direct mutations to one file.
 - Durability covers ordinary process crashes with at-least-once delivery; it does not promise sudden-power-loss durability or exactly-once external side effects.
-- Persistence assumes one live broker process owns a parent-session namespace. A cross-process namespace lock is planned but not yet implemented.
+- Persistence enforces one live broker per parent-session namespace through a filesystem lease. An abrupt exit can delay reacquisition for the 10-second stale threshold; this ownership lease prevents accidental concurrent brokers but is not protection from a malicious same-user process.
 
 Only delegate to models/providers you trust with the project and credentials accessible to Pi. Use external sandboxing for untrusted tasks. Do not market the current `trusted` execution mode as isolation.
 

@@ -39,6 +39,17 @@ async function answerAndSettle(broker: AgentBroker, worker: FakeWorker, request:
 }
 
 describe("broker hardening", () => {
+  it("enforces one live broker per persistent namespace", async () => {
+    const first = await setup();
+    try {
+      await assert.rejects(setup({}, first.root), /namespace is already owned.*pid/i);
+    } finally {
+      await first.broker.shutdown();
+    }
+    const replacement = await setup({}, first.root);
+    await replacement.broker.shutdown();
+  });
+
   it("redelivers queued main mail during crash recovery", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-main-restore-"));
     const store = new MailStore(join(root, "state", "mail.jsonl"));
