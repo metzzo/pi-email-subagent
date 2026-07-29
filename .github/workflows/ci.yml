@@ -23,14 +23,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
       - run: npm run validate
-      - run: npm audit --omit=dev
+      # Pi core packages are host-provided peers; audit only dependencies this package installs.
+      - run: npm audit --omit=dev --omit=peer
       - run: git diff --check
 
   package-allowlist:
@@ -38,8 +39,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22.19.0
           cache: npm
