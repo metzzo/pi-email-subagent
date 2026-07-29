@@ -31,6 +31,7 @@ Implementation status (2026-07-28):
 - **Milestone 0 complete:** Google-compatible schemas, native thrown tool failures, 50 KB / 2000-line result bounds, independent 48 KB / 1952-line envelope/fetch budget, compact wait details, direct regressions, and real RPC error-event coverage. Validation: 121/121 tests.
 - **Milestone 1 foundation in progress:** package metadata, wildcard host peers, Node engine, `prepublishOnly`, clean packed-artifact install/load smoke, Linux/macOS CI, package allowlist, Dependabot, changelog, security policy, contributing guide, and GitHub templates are implemented. Remaining manual gates: enable private vulnerability reporting/branch protection, record gallery media, make the repository public when approved, and explicitly authorize npm publication.
 - **Milestone 2.1 implementation complete:** a proper-lockfile filesystem lease enforces one live broker per namespace, records PID/acquisition metadata, releases on init failure and shutdown, diagnoses contention, and recovers stale leases. Direct stale-lock and live-broker contention regressions pass; a real SIGKILL process E2E remains to complete the full milestone acceptance matrix.
+- **Current validation:** 124/124 deterministic tests, clean 37-file packed-artifact install/load smoke, production-owned dependency audit clean, focused lock/lifecycle tests green in 5 repeated runs, uncollected-reply race scenario green in 8 repeated runs, GitHub CI green on Linux and macOS, and final Terra-main/K3-worker paid live acceptance successful.
 
 Target outcomes:
 
