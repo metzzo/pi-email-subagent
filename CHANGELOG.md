@@ -12,6 +12,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Live `/agents` dashboard, conversation viewer, usage/cost display, and lifecycle controls.
 - Role/address profiles, tool enforcement, spawn control, capacity/rate/queue limits, retention, and configurable model policy.
 - Real scripted-provider Pi RPC E2E suite plus optional paid live-provider acceptance.
+- Single-writer filesystem lease per persistent parent-session namespace with owner diagnostics and stale-lock recovery.
 
 ### Changed
 
