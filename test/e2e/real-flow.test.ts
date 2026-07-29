@@ -363,9 +363,10 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.equal(envelope.kind, "reply");
       assert.equal(envelope.from, WORKER_ADDRESS);
       assert.equal(envelope.inReplyTo, sent.correlationId);
-      const replyTurnMark = client.mark();
-      await client.waitFor(assistantText("E2E REPLY SEEN"), "reply turn", 90_000, replyTurnMark);
-      await client.waitForSettlement(replyTurnMark);
+      // The reply turn can begin immediately after message_start; search from
+      // the scenario mark rather than taking a new mark after that boundary.
+      await client.waitFor(assistantText("E2E REPLY SEEN"), "reply turn", 90_000, mark);
+      await client.waitForSettlement(mark);
       assert.equal(await client.close(), 0, client.stderr);
 
       const journal = await readJournal(agentDir, sessionId);
