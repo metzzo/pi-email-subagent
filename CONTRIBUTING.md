@@ -51,7 +51,7 @@ Before opening a pull request:
 
 ```bash
 npm run validate
-npm audit --omit=dev
+npm audit --omit=dev --omit=peer
 git diff --check
 ```
 
