@@ -542,12 +542,13 @@ export class UIController {
       const failed = agents.filter((agent) => agent.state === "failed").length;
       const other = agents.length - running - queued - idle - failed;
       const line = `Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${failed ? ` · ${failed} failed` : ""}${other ? ` · ${other} paused/stopped/archived` : ""}`;
+      // The below-editor widget is the canonical agents bar. Clear the legacy
+      // footer status instead of rendering a redundant, unaligned `agents:0/1`.
+      this.ctx.ui.setStatus("pi-email-subagent", undefined);
       if (agents.length > 0 || this.snapshot.unanswered > 0 || this.snapshot.queuedMail > 0) {
         this.ctx.ui.setWidget("pi-email-subagent", [line], { placement: "belowEditor" });
-        this.ctx.ui.setStatus("pi-email-subagent", `agents:${running}/${agents.length}`);
       } else {
         this.ctx.ui.setWidget("pi-email-subagent", undefined);
-        this.ctx.ui.setStatus("pi-email-subagent", undefined);
       }
     } catch { /* context may have been replaced */ }
   }

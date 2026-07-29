@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript } from "../../src/ui.ts";
+import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript, UIController } from "../../src/ui.ts";
 import type { AgentRecord, BrokerSnapshot } from "../../src/types.ts";
 
 const fakeTheme = {
@@ -53,6 +53,33 @@ describe("dashboard rendering", () => {
       assert.equal(lines.every((line) => visibleWidth(line) <= width), true, `overflow at width ${width}`);
       component.invalidate();
     }
+  });
+
+  it("renders the canonical agents bar without the redundant footer counter", () => {
+    const statuses: Array<string | undefined> = [];
+    const widgets: Array<{ lines: string[] | undefined; placement?: string }> = [];
+    const ctx = {
+      ui: {
+        setStatus: (_key: string, value: string | undefined) => { statuses.push(value); },
+        setWidget: (_key: string, lines: string[] | undefined, options?: { placement?: string }) => {
+          widgets.push({ lines, placement: options?.placement });
+        },
+      },
+    } as unknown as ExtensionContext;
+    const controller = new UIController();
+    controller.bind(ctx);
+    controller.update({
+      mainAddress: "main@gpt-5.4-mini.com",
+      agents: [record()],
+      unanswered: 0,
+      queuedMail: 0,
+    });
+
+    assert.deepEqual(statuses, [undefined]);
+    assert.deepEqual(widgets, [{
+      lines: ["Agents: 1 running · 0 queued · 0 idle · 0 unanswered"],
+      placement: "belowEditor",
+    }]);
   });
 
   it("opens running, stopped, and archived agent conversations with ctrl+o", () => {
