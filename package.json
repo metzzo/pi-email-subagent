@@ -3,27 +3,44 @@
   "version": "0.1.0",
   "description": "Persistent parallel Pi subagents coordinated through virtual email",
   "type": "module",
-  "keywords": ["pi-package", "pi", "subagent", "agents"],
+  "keywords": ["pi-package", "pi", "pi-extension", "subagent", "agents", "multi-agent"],
   "license": "MIT",
-  "files": ["src", "docs", "plans", "README.md", "LICENSE"],
+  "author": "pi-email-subagent contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/metzzo/pi-email-subagent.git"
+  },
+  "homepage": "https://github.com/metzzo/pi-email-subagent#readme",
+  "bugs": {
+    "url": "https://github.com/metzzo/pi-email-subagent/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": ["src", "docs", "plans", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md"],
   "scripts": {
     "check": "tsc --noEmit",
     "test": "tsx --test test/**/*.test.ts",
     "test:unit": "tsx --test test/unit/**/*.test.ts",
     "test:integration": "tsx --test test/integration/**/*.test.ts",
     "test:e2e": "tsx --test test/e2e/**/*.test.ts",
+    "test:package": "tsx scripts/package-smoke.ts",
     "test:live": "tsx scripts/live-e2e.ts",
-    "validate": "npm run check && npm test"
+    "validate": "npm run check && npm test && npm run test:package",
+    "prepublishOnly": "npm run validate"
   },
   "pi": {
     "extensions": ["./src/index.ts"]
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": ">=0.81.1 <0.82.0",
-    "@earendil-works/pi-ai": ">=0.81.1 <0.82.0",
-    "@earendil-works/pi-coding-agent": ">=0.81.1 <0.82.0",
-    "@earendil-works/pi-tui": ">=0.81.1 <0.82.0",
-    "typebox": "^1.1.38"
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.81.1",

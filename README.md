@@ -4,8 +4,16 @@ Persistent parallel Pi subagents coordinated through virtual email.
 
 ## Install
 
+The package is currently an unpublished `0.1.0` release candidate. Install a trusted checkout by absolute path:
+
 ```bash
-pi install /absolute/path/to/pi-subagent
+pi install /absolute/path/to/pi-email-subagent
+```
+
+After the first npm release, the canonical command will be:
+
+```bash
+pi install npm:pi-email-subagent
 ```
 
 For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads the source directly. On Pi 0.81.1, run `/reload-runtime` manually after changes; extension-originated slash messages cannot safely defer that command.
@@ -99,6 +107,14 @@ Reply obligations use durable reservation, delivery, commit, and release transit
 
 Workers are trusted collaborators and may delegate. They share the project working directory in this version; host sandboxing, credential isolation, path restrictions, network policy, and protection from malicious same-user processes are external responsibilities. Prefer effectively read-only roles when running several agents; parallel writable agents can make semantic conflicts even though Pi serializes direct file mutations.
 
-Provider/catalog changes require extension reload. Compatibility is limited to the tested Pi `>=0.81.1 <0.82.0` line.
+Provider/catalog changes require extension reload. The current deterministic and live acceptance evidence targets Pi 0.81.1 on Node 22.19.0. Pi core packages are host-provided wildcard peers as required by Pi package guidance; that avoids duplicate runtimes but is not a claim that untested Pi versions are compatible. CI compatibility coverage will expand before 1.0.
+
+## Development and support
+
+- `npm run validate`: TypeScript, all deterministic tests, real scripted-provider Pi RPC E2E, and a clean packed-artifact install/load smoke.
+- `CONTRIBUTING.md`: development and pull-request expectations.
+- `SECURITY.md`: vulnerability reporting, sensitive data, and the current trusted-worker threat boundary.
+- `CHANGELOG.md`: release changes.
+- `plans/top-1-percent-plan.md`: prioritized release, safety, isolation, product, and scale roadmap.
 
 See `plans/pi-email-subagent-extension.md` for the design and `plans/end-to-end-test-plan.md` for validation.

@@ -26,6 +26,11 @@ Current baseline:
 - Private GitHub repository, not yet published to npm.
 - Tested against Pi 0.81.1 and Node 22.19.0.
 
+Implementation status (2026-07-28):
+
+- **Milestone 0 complete:** Google-compatible schemas, native thrown tool failures, 50 KB / 2000-line result bounds, independent 48 KB / 1952-line envelope/fetch budget, compact wait details, direct regressions, and real RPC error-event coverage. Validation: 121/121 tests.
+- **Milestone 1 foundation in progress:** package metadata, wildcard host peers, Node engine, `prepublishOnly`, clean packed-artifact install/load smoke, Linux/macOS CI, package allowlist, Dependabot, changelog, security policy, contributing guide, and GitHub templates are implemented. Remaining manual gates: enable private vulnerability reporting/branch protection, record gallery media, make the repository public when approved, and explicitly authorize npm publication.
+
 Target outcomes:
 
 - Fresh install to first successful reply in under 5 minutes.
