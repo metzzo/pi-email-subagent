@@ -48,7 +48,7 @@ Your email identity is:
 
 You can communicate with other agents using:
 
-- \`send_email(to, subject, message, priority)\`
+- \`send_email(to, subject, message, priority, lifecycle?)\`
 - \`fetch_emails()\`
 
 ### Valid addresses
@@ -163,6 +163,7 @@ You are a persistent Pi subagent.
 - Your address: \`${record.address}\`
 - Your task slug: \`${record.taskSlug}\`
 - Main thread: \`${mainAddress}\`
+- Lifecycle: spawn ${record.lifecycle.spawnTimeoutMs}ms; prompt acceptance ${record.lifecycle.promptAcceptanceTimeoutMs}ms; run ${record.lifecycle.runTimeoutMs}ms; idle/stall ${record.lifecycle.idleTimeoutMs}ms; abort ${record.lifecycle.abortTimeoutMs}ms; dispose ${record.lifecycle.disposeTimeoutMs}ms
 ${role}${spawnRule}
 Your transcript is private to your session. The requester cannot be assumed to see assistant output or tool results.
 

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from "./address.ts";
-import { resolveAgentProfile } from "./config.ts";
+import { resolveAgentProfile, resolveLifecycle } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
 import { NamespaceLock } from "./namespace-lock.ts";
@@ -21,6 +21,7 @@ import type {
   ReplyWaitItem,
   SendEmailInput,
   SendEmailResult,
+  LifecyclePolicy,
   WaitForRepliesResult,
   WorkerEvent,
   WorkerTransport,
@@ -36,6 +37,31 @@ const REPLY_PREFIX_ALLOWANCE_BYTES = 64;
 
 function swallow(promise: Promise<unknown>): void {
   promise.catch(() => undefined);
+}
+
+class LifecycleTimeoutError extends Error {
+  constructor(readonly code: string, readonly timeoutMs: number, detail?: string) {
+    super(`${code}: lifecycle deadline exceeded after ${timeoutMs}ms${detail ? ` (${detail})` : ""}`);
+    this.name = "LifecycleTimeoutError";
+  }
+}
+
+async function bounded<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new LifecycleTimeoutError(code, timeoutMs)), timeoutMs); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    promise.catch(() => undefined);
+  }
+}
+
+function containsLifecycleTimeout(error: unknown): boolean {
+  if (error instanceof LifecycleTimeoutError) return true;
+  return error instanceof AggregateError && error.errors.some(containsLifecycleTimeout);
 }
 
 function sortMail(emails: EmailEnvelope[]): EmailEnvelope[] {
@@ -58,6 +84,7 @@ export class AgentBroker {
   private readonly provisionalWorkers = new Set<WorkerTransport>();
   private readonly addressTails = new Map<string, Promise<void>>();
   private readonly inFlightOperations = new Set<Promise<unknown>>();
+  private readonly operationLabels = new WeakMap<Promise<unknown>, string>();
   private readonly activationLeases = new Set<string>();
   private readonly active = new Set<string>();
   private readonly pendingStarts: string[] = [];
@@ -69,6 +96,8 @@ export class AgentBroker {
   private readonly changeListeners = new Set<() => void>();
   private readonly collectingRequestIds = new Map<string, number>();
   private readonly collectionClaims = new Map<string, number>();
+  private readonly watchdogs = new Map<string, { generation: number; run?: ReturnType<typeof setTimeout>; idle?: ReturnType<typeof setTimeout> }>();
+  private watchdogGeneration = 0;
   private lifecycle: "new" | "initializing" | "active" | "closing" | "closed" = "new";
   private lifecycleGeneration = 0;
   private initPromise?: Promise<void>;
@@ -162,7 +191,7 @@ export class AgentBroker {
         const shape = parseSubagentAddressShape(email.to);
         try {
           const parsed = parseSubagentAddress(shape.address, this.catalog);
-          const record = this.makeRecord(parsed);
+          const record = this.makeRecord(parsed, email.lifecycleIntent ?? resolveLifecycle(this.options.config, parsed.address, parsed.name));
           record.createdAt = email.createdAt;
           record.updatedAt = nowIso();
           record.state = "paused";
@@ -421,6 +450,7 @@ export class AgentBroker {
       },
     );
     this.inFlightOperations.add(tracked);
+    this.operationLabels.set(tracked, `send:${senderInput.trim().toLowerCase()}->${input.to.trim().toLowerCase()}`);
     return tracked;
   }
 
@@ -428,6 +458,9 @@ export class AgentBroker {
     this.assertActive();
     const reply = parseReplySubject(input.subject);
     this.validateInput(input, Boolean(reply));
+    if (input.lifecycle?.brokerShutdownTimeoutMs !== undefined) {
+      throw new Error("lifecycle.brokerShutdownTimeoutMs is administrator-controlled global configuration and cannot be overridden by a delegation.");
+    }
     const sender = this.validateSender(senderInput);
     const requestedTo = input.to.trim().toLowerCase();
     if (this.sameIdentity(sender, requestedTo)) throw new Error("Sending email to yourself is not supported.");
@@ -435,10 +468,16 @@ export class AgentBroker {
     const toMain = this.isMainIdentity(requestedTo);
     let parsed: ParsedAddress | undefined;
     let to = requestedTo;
+    let initialLifecycle: LifecyclePolicy | undefined;
     if (!toMain) {
       parsed = parseSubagentAddress(requestedTo, this.catalog);
       to = parsed.address;
       if (this.sameIdentity(sender, to)) throw new Error("Sending email to yourself is not supported.");
+      const existingRecord = this.records.get(to);
+      if (input.lifecycle !== undefined && existingRecord) {
+        throw new Error(`Lifecycle overrides are accepted only on the first delegation to an unknown address. ${to} already exists (${existingRecord.state}); omit lifecycle and use its persisted policy. Archived restoration also preserves its original policy.`);
+      }
+      initialLifecycle = existingRecord?.lifecycle ?? resolveLifecycle(this.options.config, to, parsed.name, input.lifecycle);
       const senderRecord = this.records.get(sender);
       if (senderRecord && !senderRecord.canSpawn && !this.records.has(to)) {
         throw new Error(`Agent ${sender} is not permitted to spawn new agents; reuse an existing address.`);
@@ -446,6 +485,8 @@ export class AgentBroker {
       if (!this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
         throw new Error(`Agent limit reached (${this.options.config.maxAgents}); archive or reuse an existing address.`);
       }
+    } else if (input.lifecycle !== undefined) {
+      throw new Error("Lifecycle overrides apply only when creating an unknown subagent, not when mailing the main identity.");
     }
 
     if (!reply && looksLikeReply(input.subject)) {
@@ -490,6 +531,7 @@ export class AgentBroker {
       requiresResponse: !reply,
       createdAt: nowIso(),
       deliveryState: "queued",
+      ...(parsed && !this.records.has(to) ? { lifecycleIntent: { ...initialLifecycle! } } : {}),
     };
     try {
       this.validateDeliverySize(envelope);
@@ -527,7 +569,8 @@ export class AgentBroker {
         recipientRecord = this.records.get(to);
       }
     } catch (error) {
-      await this.failEnvelope(envelope, errorMessage(error));
+      // Lifecycle failures retain accepted queued/open mail for restart and diagnosis.
+      if (!(error instanceof LifecycleTimeoutError)) await this.failEnvelope(envelope, errorMessage(error));
       this.scheduleMailMaintenance();
       this.publish();
       throw new Error(`Email ${envelope.id} was persisted but delivery failed: ${errorMessage(error)}`);
@@ -549,6 +592,7 @@ export class AgentBroker {
         recipientRole: recipientRecord.name,
         recipientTools: [...recipientRecord.tools],
         recipientState: recipientRecord.state,
+        recipientLifecycle: { ...recipientRecord.lifecycle },
       } : {}),
       ...(answeredEmailId ? { answeredEmailId } : {}),
     };
@@ -593,7 +637,7 @@ export class AgentBroker {
         }
         this.activationLeases.add(parsed.address);
       }
-      const worker = await this.createWorker(parsed, record, this.lifecycleGeneration);
+      const worker = await this.createWorker(parsed, record, this.lifecycleGeneration, envelope.lifecycleIntent);
       await this.routeToWorker(envelope, worker);
       return {
         worker,
@@ -603,7 +647,7 @@ export class AgentBroker {
     });
   }
 
-  private makeRecord(parsed: ParsedAddress): AgentRecord {
+  private makeRecord(parsed: ParsedAddress, lifecycle = resolveLifecycle(this.options.config, parsed.address, parsed.name)): AgentRecord {
     const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
     const now = nowIso();
     return {
@@ -620,6 +664,7 @@ export class AgentBroker {
       createdAt: now,
       updatedAt: now,
       enforcementAttempts: 0,
+      lifecycle: { ...lifecycle },
       usage: emptyUsage(),
       activity: [],
     };
@@ -646,21 +691,34 @@ export class AgentBroker {
       currentActivity: failure,
       failure,
       enforcementAttempts: 0,
+      lifecycle: resolveLifecycle(this.options.config, shape.address, shape.name),
       usage: emptyUsage(),
       activity: [{ at: nowIso(), kind: "error", summary: failure }],
     };
   }
 
-  private async createWorker(parsed: ParsedAddress, restored?: AgentRecord, generation = this.lifecycleGeneration): Promise<WorkerTransport> {
-    const record = restored ?? this.makeRecord(parsed);
+  private async createWorker(
+    parsed: ParsedAddress,
+    restored?: AgentRecord,
+    generation = this.lifecycleGeneration,
+    lifecycleIntent?: LifecyclePolicy,
+  ): Promise<WorkerTransport> {
+    const record = restored ?? this.makeRecord(parsed, lifecycleIntent);
     record.state = "spawning";
     delete record.failure;
     record.updatedAt = nowIso();
     this.records.set(record.address, record);
+    // A newly accepted identity (and its lifecycle) is durable before provider startup.
+    // Restored records were already loaded from durable registry state.
+    if (!restored) await this.persistRegistry(true);
+    const spawnStartedAt = Date.now();
     let worker: WorkerTransport;
+    const factoryPromise = Promise.resolve(this.options.workerFactory(parsed.model));
     try {
-      worker = await this.options.workerFactory(parsed.model);
+      worker = await bounded(factoryPromise, record.lifecycle.spawnTimeoutMs, "LIFECYCLE_SPAWN_TIMEOUT");
     } catch (error) {
+      // If a timed-out factory eventually returns a worker, dispose it without reopening capacity.
+      swallow(factoryPromise.then((late) => bounded(late.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT")));
       if (!this.cancelled(generation)) {
         record.state = "failed";
         record.failure = errorMessage(error);
@@ -671,14 +729,15 @@ export class AgentBroker {
       throw error;
     }
     if (this.cancelled(generation)) {
-      await worker.dispose().catch(() => undefined);
+      await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT").catch(() => undefined);
       throw new Error("Worker creation was cancelled by broker shutdown.");
     }
     this.provisionalWorkers.add(worker);
     const unsubscribe = worker.subscribe((event) => this.onWorkerEvent(record.address, worker, event));
 
     try {
-      await worker.start({
+      const remainingSpawnMs = Math.max(1, record.lifecycle.spawnTimeoutMs - (Date.now() - spawnStartedAt));
+      await bounded(worker.start({
         record,
         model: parsed.model,
         cwd: this.options.cwd,
@@ -688,7 +747,7 @@ export class AgentBroker {
         systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, this.options.config.modelPolicy),
         sendEmail: (input) => this.send(record.address, input),
         fetchEmails: () => this.fetchUnansweredBatch(record.address),
-      });
+      }), remainingSpawnMs, "LIFECYCLE_SPAWN_TIMEOUT");
       if (this.cancelled(generation)) throw new Error("Worker creation was cancelled by broker shutdown.");
       const previous = this.workers.get(record.address);
       if (previous && previous !== worker) throw new Error(`Agent ${record.address} already has a live worker.`);
@@ -711,13 +770,66 @@ export class AgentBroker {
         record.failure = errorMessage(error);
         record.updatedAt = nowIso();
       }
-      await worker.dispose().catch(() => undefined);
+      await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT").catch(() => undefined);
       if (!this.cancelled(generation)) {
         await this.persistRegistry();
         this.publish();
       }
       throw error;
     }
+  }
+
+  private clearWatchdog(address: string): void {
+    const current = this.watchdogs.get(address);
+    if (current?.run) clearTimeout(current.run);
+    if (current?.idle) clearTimeout(current.idle);
+    this.watchdogs.delete(address);
+  }
+
+  private startWatchdog(address: string): void {
+    const record = this.records.get(address);
+    if (!record) return;
+    this.clearWatchdog(address);
+    const generation = ++this.watchdogGeneration;
+    const entry: { generation: number; run?: ReturnType<typeof setTimeout>; idle?: ReturnType<typeof setTimeout> } = { generation };
+    entry.run = setTimeout(() => swallow(this.expireWorker(address, generation, "LIFECYCLE_RUN_TIMEOUT")), record.lifecycle.runTimeoutMs);
+    entry.idle = setTimeout(() => swallow(this.expireWorker(address, generation, "LIFECYCLE_IDLE_TIMEOUT")), record.lifecycle.idleTimeoutMs);
+    this.watchdogs.set(address, entry);
+  }
+
+  private touchWatchdog(address: string): void {
+    const entry = this.watchdogs.get(address);
+    const record = this.records.get(address);
+    if (!entry || !record) return;
+    if (entry.idle) clearTimeout(entry.idle);
+    entry.idle = setTimeout(() => swallow(this.expireWorker(address, entry.generation, "LIFECYCLE_IDLE_TIMEOUT")), record.lifecycle.idleTimeoutMs);
+  }
+
+  private async expireWorker(address: string, generation: number, code: string): Promise<void> {
+    const entry = this.watchdogs.get(address);
+    if (!entry || entry.generation !== generation || this.disposed) return;
+    this.clearWatchdog(address);
+    const worker = this.workers.get(address);
+    const record = this.records.get(address);
+    if (!worker || !record) return;
+    this.workerUnsubscribers.get(address)?.();
+    this.workerUnsubscribers.delete(address);
+    this.workers.delete(address);
+    this.active.delete(address);
+    record.state = "failed";
+    record.failure = `${code}: lifecycle watchdog expired`;
+    record.currentActivity = record.failure;
+    record.updatedAt = nowIso();
+    let cleanup = "";
+    try { await bounded(worker.abort(), record.lifecycle.abortTimeoutMs, "LIFECYCLE_ABORT_TIMEOUT"); }
+    catch (error) { cleanup = `; abort cleanup: ${errorMessage(error)}`; }
+    try { await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT"); }
+    catch (error) { cleanup += `; dispose cleanup: ${errorMessage(error)}`; }
+    if (cleanup) record.failure += cleanup;
+    await this.persistRegistry();
+    this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
+    this.pump();
+    this.publish();
   }
 
   private syncWorker(address: string, worker: WorkerTransport): void {
@@ -742,10 +854,12 @@ export class AgentBroker {
     const record = this.records.get(address);
     if (!record) return;
     this.syncWorker(address, worker);
+    if (event.type === "activity") this.touchWatchdog(address);
     if (event.type === "state" && event.state && record.state !== "failed" && record.state !== "stopped") {
       record.state = event.state;
     }
     if (event.type === "failure" && event.error) {
+      this.clearWatchdog(address);
       const shouldNotify = record.state !== "failed" || record.failure !== event.error;
       record.state = "failed";
       record.failure = event.error;
@@ -766,6 +880,7 @@ export class AgentBroker {
     if (event.type === "state" || event.type === "settled") swallow(this.persistRegistry());
     this.publish();
     if (event.type === "settled") {
+      this.clearWatchdog(address);
       if (this.settling.has(address)) this.pendingSettlements.add(address);
       else swallow(this.onWorkerSettled(address, worker));
     }
@@ -780,7 +895,17 @@ export class AgentBroker {
         // fetch_emails sees them immediately; replies commit their answer only
         // after steer acceptance so a rejection still releases the reservation.
         if (envelope.kind === "request") await this.mailStore.markDelivered([envelope.id]);
-        await worker.steer(formatEmail(envelope));
+        const record = this.records.get(envelope.to);
+        try {
+          await bounded(worker.steer(formatEmail(envelope)), record?.lifecycle.promptAcceptanceTimeoutMs ?? this.options.config.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
+          this.touchWatchdog(envelope.to);
+        } catch (error) {
+          if (error instanceof LifecycleTimeoutError) {
+            if (!this.watchdogs.has(envelope.to)) this.startWatchdog(envelope.to);
+            await this.expireWorker(envelope.to, this.watchdogs.get(envelope.to)!.generation, error.code);
+          }
+          throw error;
+        }
         if (envelope.kind !== "request") await this.mailStore.markDelivered([envelope.id]);
       }
       return;
@@ -877,13 +1002,23 @@ export class AgentBroker {
     const replyIds = queued.filter((email) => email.kind !== "request").map((email) => email.id);
     try {
       if (requestIds.length > 0) await this.mailStore.markDelivered(requestIds);
-      await worker.prompt(formatEmailBatch(queued));
+      await bounded(worker.prompt(formatEmailBatch(queued)), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
       if (this.disposed || this.workers.get(address) !== worker) return;
+      this.startWatchdog(address);
       if (replyIds.length > 0) await this.mailStore.markDelivered(replyIds);
       this.syncWorker(address, worker);
       await this.persistRegistry();
     } catch (error) {
       if (this.disposed || this.workers.get(address) !== worker) return;
+      if (error instanceof LifecycleTimeoutError) {
+        // Requests already delivered remain open; replies remain queued/reserved for recovery.
+        await this.expireWorker(address, this.watchdogs.get(address)?.generation ?? -1, error.code);
+        if (this.workers.get(address) === worker) {
+          this.startWatchdog(address);
+          await this.expireWorker(address, this.watchdogs.get(address)!.generation, error.code);
+        }
+        return;
+      }
       for (const email of queued) await this.failEnvelope(email, errorMessage(error));
       this.active.delete(address);
       record.state = "failed";
@@ -915,11 +1050,17 @@ export class AgentBroker {
     record.state = "running";
     record.enforcementAttempts += 1;
     try {
-      await worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1));
+      await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1)), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
       if (this.disposed || this.workers.get(address) !== worker) return;
+      this.startWatchdog(address);
       await this.persistRegistry();
     } catch (error) {
       if (this.disposed || this.workers.get(address) !== worker) return;
+      if (error instanceof LifecycleTimeoutError) {
+        this.startWatchdog(address);
+        await this.expireWorker(address, this.watchdogs.get(address)!.generation, error.code);
+        return;
+      }
       this.active.delete(address);
       record.state = "failed";
       record.failure = errorMessage(error);
@@ -944,8 +1085,9 @@ export class AgentBroker {
           record.enforcementAttempts += 1;
           record.state = "running";
           record.currentActivity = `Answering ${outstanding.length} required email${outstanding.length === 1 ? "" : "s"}`;
-          await worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1));
+          await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1)), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
           if (this.disposed || this.workers.get(address) !== worker) return;
+          this.startWatchdog(address);
           await this.persistRegistry();
           return;
         }
@@ -969,6 +1111,11 @@ export class AgentBroker {
       this.pump();
     } catch (error) {
       if (this.disposed || this.workers.get(address) !== worker) return;
+      if (error instanceof LifecycleTimeoutError) {
+        this.startWatchdog(address);
+        await this.expireWorker(address, this.watchdogs.get(address)!.generation, error.code);
+        return;
+      }
       if (record) {
         record.state = "failed";
         record.failure = errorMessage(error);
@@ -1006,10 +1153,11 @@ export class AgentBroker {
       if (!record) throw new Error(`Unknown agent ${address}.`);
       if (record.state === "archived") throw new Error(`Agent ${address} is archived.`);
       let cleanupError: unknown;
+      this.clearWatchdog(address);
       if (worker) {
         this.syncWorker(address, worker);
         try {
-          await worker.abort();
+          await bounded(worker.abort(), record.lifecycle.abortTimeoutMs, "LIFECYCLE_ABORT_TIMEOUT");
         } catch (error) {
           cleanupError = error;
         } finally {
@@ -1017,7 +1165,7 @@ export class AgentBroker {
           this.workerUnsubscribers.delete(address);
           this.workers.delete(address);
           try {
-            await worker.dispose();
+            await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT");
           } catch (error) {
             cleanupError ??= error;
           }
@@ -1049,12 +1197,13 @@ export class AgentBroker {
         this.activationLeases.add(address);
       }
       const old = this.workers.get(address);
+      this.clearWatchdog(address);
       this.workerUnsubscribers.get(address)?.();
       this.workerUnsubscribers.delete(address);
       this.workers.delete(address);
       let cleanupError: unknown;
       if (old) {
-        try { await old.dispose(); } catch (error) { cleanupError = error; }
+        try { await bounded(old.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT"); } catch (error) { cleanupError = error; }
       }
       this.assertActive();
       this.active.delete(address);
@@ -1092,12 +1241,13 @@ export class AgentBroker {
           || Boolean(email.replyReservedBy))),
       );
       if (obligated) throw new Error("Agent has queued mail or unanswered obligations and cannot be archived.");
+      this.clearWatchdog(address);
       this.workerUnsubscribers.get(address)?.();
       this.workerUnsubscribers.delete(address);
       this.workers.delete(address);
       let cleanupError: unknown;
       if (worker) {
-        try { await worker.dispose(); } catch (error) { cleanupError = error; }
+        try { await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT"); } catch (error) { cleanupError = error; }
       }
       this.assertActive();
       this.active.delete(address);
@@ -1177,6 +1327,7 @@ export class AgentBroker {
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
       providerReady: this.workers.has(address) ? "available" : "unknown",
+      lifecycle: clone(record?.lifecycle ?? resolveLifecycle(this.options.config, address, name)),
     };
   }
 
@@ -1314,9 +1465,20 @@ export class AgentBroker {
   }
 
   private scheduleMailMaintenance(): void {
-    swallow(this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails).catch((error) => {
+    if (this.disposed) return;
+    const operation = this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails).catch((error) => {
       this.options.mainAdapter.notifyFailure(`Mail journal maintenance failed: ${errorMessage(error)}`);
-    }));
+    });
+    // Track the mutation itself, not a wrapper whose settlement runs the
+    // removal finalizer. Shutdown may snapshot this set while it settles;
+    // the barrier must never wait on its own bookkeeping promise.
+    this.inFlightOperations.add(operation);
+    this.operationLabels.set(operation, "mail-maintenance");
+    void operation.then(
+      () => { this.inFlightOperations.delete(operation); },
+      () => { this.inFlightOperations.delete(operation); },
+    );
+    swallow(operation);
   }
 
   private publish(): void {
@@ -1338,10 +1500,11 @@ export class AgentBroker {
     return operation;
   }
 
-  private async disposeOwnedWorkers(): Promise<void> {
+  private async disposeOwnedWorkers(maximumTimeoutMs = Number.MAX_SAFE_INTEGER): Promise<void> {
     const committed = new Map(this.workers);
     const allWorkers = new Set<WorkerTransport>([...committed.values(), ...this.provisionalWorkers]);
     for (const [address, worker] of committed) {
+      this.clearWatchdog(address);
       const record = this.records.get(address);
       if (record && !["stopped", "failed", "archived"].includes(record.state)) {
         this.syncWorker(address, worker);
@@ -1353,8 +1516,15 @@ export class AgentBroker {
     this.workers.clear();
     this.workerUnsubscribers.clear();
     this.active.clear();
-    await Promise.allSettled([...allWorkers].map((worker) => worker.dispose()));
+    const results = await Promise.allSettled([...allWorkers].map((worker) => {
+      const address = [...committed].find(([, candidate]) => candidate === worker)?.[0];
+      const timeout = Math.min(maximumTimeoutMs, (address ? this.records.get(address)?.lifecycle.disposeTimeoutMs : undefined)
+        ?? this.options.config.lifecycle.disposeTimeoutMs);
+      return bounded(worker.dispose(), timeout, "LIFECYCLE_DISPOSE_TIMEOUT");
+    }));
     for (const worker of allWorkers) this.provisionalWorkers.delete(worker);
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
+    if (failures.length > 0) throw new AggregateError(failures, failures.map(errorMessage).join("; "));
   }
 
   private async releaseNamespaceLock(): Promise<void> {
@@ -1369,33 +1539,89 @@ export class AgentBroker {
     this.disposed = true;
     this.lifecycleGeneration += 1;
     this.emitChange();
+    // Operations can reject as soon as `disposed` is visible; observe them
+    // before any cleanup await so delayed callers do not trigger unhandled rejections.
+    for (const operation of [...this.addressTails.values(), ...this.inFlightOperations]) operation.catch(() => undefined);
 
-    let failure: unknown;
-    try {
-      // Dispose first so prompt preflight and provider operations owned by active
-      // sessions are cancelled before waiting for their address/send barriers.
-      await this.disposeOwnedWorkers();
-      await this.initPromise?.catch(() => undefined);
-      await this.disposeOwnedWorkers();
-      while (this.addressTails.size > 0 || this.inFlightOperations.size > 0) {
-        await Promise.allSettled([...this.addressTails.values(), ...this.inFlightOperations]);
+    const failures: unknown[] = [];
+    let quiescenceKnown = true;
+    const shutdownMs = this.options.config.lifecycle.brokerShutdownTimeoutMs;
+    const deadline = Date.now() + shutdownMs;
+    const lockReleaseReserveMs = Math.min(50, Math.max(1, Math.floor(shutdownMs / 5)));
+    const workRemaining = () => deadline - Date.now() - lockReleaseReserveMs;
+    const runPhase = async (code: string, start: () => Promise<unknown>, detail?: string): Promise<void> => {
+      let operation: Promise<unknown>;
+      try { operation = start(); } catch (error) { failures.push(error); return; }
+      // Observe late completion/rejection even when the global deadline wins.
+      operation.catch(() => undefined);
+      const available = workRemaining();
+      if (available <= 0) {
+        failures.push(new LifecycleTimeoutError(code, shutdownMs));
+        quiescenceKnown = false;
+        return;
       }
+      try {
+        await bounded(operation, available, code);
+      } catch (error) {
+        if (error instanceof LifecycleTimeoutError && error.code === code && detail) {
+          failures.push(new LifecycleTimeoutError(code, error.timeoutMs, detail));
+        } else failures.push(error);
+        if (containsLifecycleTimeout(error)) {
+          if (!(error instanceof LifecycleTimeoutError && error.code === code)) {
+            failures.push(new LifecycleTimeoutError(code, Math.max(1, available), detail));
+          }
+          quiescenceKnown = false;
+        }
+      }
+    };
 
-      this.pendingStarts.splice(0);
-      await this.persistRegistry(true);
-      await Promise.all([this.mailStore.flush(), this.registryStore.flush()]);
-    } catch (error) {
-      failure = error;
+    // Do not short-circuit: every phase is attempted or explicitly marked
+    // non-quiescent under the one global deadline.
+    await runPhase("LIFECYCLE_BROKER_SHUTDOWN_DISPOSE_TIMEOUT", () => this.disposeOwnedWorkers(Math.max(1, workRemaining())));
+    if (this.initPromise) {
+      // Initialization reports its own failure to its caller; shutdown only
+      // needs to prove the operation has settled.
+      await runPhase("LIFECYCLE_BROKER_SHUTDOWN_INIT_TIMEOUT", () => this.initPromise!.catch(() => undefined));
     }
-    try {
-      await this.releaseNamespaceLock();
-    } catch (error) {
-      failure = failure
-        ? new AggregateError([failure, error], "Broker shutdown and namespace-lock cleanup both failed.")
-        : error;
+    await runPhase("LIFECYCLE_BROKER_SHUTDOWN_DISPOSE_TIMEOUT", () => this.disposeOwnedWorkers(Math.max(1, workRemaining())));
+    // Drain snapshots until removal callbacks have emptied both sets. New
+    // maintenance cannot start after `disposed`; address/send operations that
+    // were already queued may remove themselves while a prior snapshot waits.
+    while (this.addressTails.size > 0 || this.inFlightOperations.size > 0) {
+      const addressEntries = [...this.addressTails.entries()];
+      const operationEntries = [...this.inFlightOperations];
+      const barriers = [...addressEntries.map(([, promise]) => promise), ...operationEntries];
+      const labels = [
+        ...addressEntries.map(([address]) => `address:${address}`),
+        ...operationEntries.map((operation) => this.operationLabels.get(operation) ?? "operation:unknown"),
+      ];
+      await runPhase(
+        "LIFECYCLE_BROKER_SHUTDOWN_BARRIER_TIMEOUT",
+        () => Promise.allSettled(barriers),
+        `barriers: ${labels.join(", ")}`,
+      );
+      if (workRemaining() <= 0) break;
+    }
+
+    this.pendingStarts.splice(0);
+    await runPhase("LIFECYCLE_BROKER_SHUTDOWN_PERSIST_TIMEOUT", () => this.persistRegistry(true));
+    await runPhase("LIFECYCLE_BROKER_SHUTDOWN_FLUSH_TIMEOUT", () =>
+      Promise.all([this.mailStore.flush(), this.registryStore.flush()]));
+
+    // Namespace ownership is a safety lease, not merely cleanup. A timed-out
+    // mutator may still write later, so retain ownership until process death.
+    if (quiescenceKnown) {
+      const releaseMs = Math.max(1, deadline - Date.now());
+      try {
+        await bounded(this.releaseNamespaceLock(), releaseMs, "LIFECYCLE_BROKER_SHUTDOWN_LOCK_TIMEOUT");
+      } catch (error) {
+        failures.push(error);
+      }
     }
     this.lifecycle = "closed";
     this.emitChange();
-    if (failure) throw failure;
+    if (failures.length > 0) {
+      throw new AggregateError(failures, failures.map(errorMessage).join("; "));
+    }
   }
 }

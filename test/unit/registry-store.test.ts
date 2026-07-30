@@ -3,6 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { RegistryStore, parseRegistry } from "../../src/registry-store.ts";
 import type { AgentRecord, BrokerRegistry } from "../../src/types.ts";
 
@@ -21,6 +22,7 @@ function record(address = "worker.registry@gpt-5.4.com"): AgentRecord {
     createdAt: now,
     updatedAt: now,
     enforcementAttempts: 0,
+    lifecycle: { ...DEFAULT_LIFECYCLE },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     activity: [],
   };
@@ -51,6 +53,9 @@ describe("registry schema", () => {
     delete legacy.agents[0]!.canSpawn;
     const parsed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
     assert.equal(parsed.agents[0]?.canSpawn, true);
+    delete legacy.agents[0]!.lifecycle;
+    const lifecycleLegacy = parseRegistry(JSON.parse(JSON.stringify(legacy)));
+    assert.deepEqual(lifecycleLegacy.agents[0]?.lifecycle, DEFAULT_LIFECYCLE);
 
     legacy.agents[0]!.canSpawn = "yes";
     assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);

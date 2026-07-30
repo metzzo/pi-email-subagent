@@ -10,12 +10,15 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 | `subject` | string | ✓ | New subject, or the exact reply subject `Re: [mail-id] original subject` from `fetch_emails` |
 | `message` | string | ✓ | Self-contained request or substantive response |
 | `priority` | `"high" \| "low"` | ✓ | Use `low` by default; `high` only for blockers that should change ongoing work |
+| `lifecycle` | object |  | Partial finite lifecycle policy, accepted only for the first send to an unknown address |
 
 ## Behavior
 
 ### New mail
 
 - An unknown valid recipient **spawns** a persistent agent (subject to `maxAgents`, default 8). An existing address reuses its persistent session.
+- The first send may provide any of `spawnTimeoutMs`, `promptAcceptanceTimeoutMs`, `runTimeoutMs`, `idleTimeoutMs`, `abortTimeoutMs`, and `disposeTimeoutMs` under `lifecycle`. Missing fields resolve from exact address → role → global finite defaults; configured administrative maxima reject oversized values. Broker shutdown is administrator-controlled global configuration and cannot be delegated.
+- Later mail, including mail that restores an archived identity, must omit `lifecycle` and preserves the identity's durable original policy. This prevents silent mutation. There is currently no lifecycle mutation action.
 - Sending to a `stopped` agent is accepted but stays queued (disposition `stopped`) until the agent is restarted. Sending to an `archived` agent restores it.
 - Sending to yourself (including main → main aliases) is rejected.
 - `low` mail is queued; `high` mail steers a streaming recipient immediately (and bypasses the per-recipient queue cap), otherwise it queues ahead of low mail.
@@ -52,6 +55,7 @@ Recipient effort: high
 Recipient role: reviewer
 Recipient tools: read, grep, find, ls, send_email, fetch_emails
 Recipient state: running
+Recipient lifecycle: {"spawnTimeoutMs":30000,...}
 ```
 
 `details.result` (`SendEmailResult`) fields:
@@ -65,6 +69,7 @@ Recipient state: running
 | `expectedReplySubject` | Present for requests; the exact subject the recipient must answer with |
 | `answeredEmailId` | Present when this send answered an earlier request |
 | `recipientModel/Effort/Role/Tools/State` | Effective recipient profile (agents only) |
+| `recipientLifecycle` | Exact persisted and enforced lifecycle policy (agents only) |
 
 Failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, agent limit reached, mailbox queue full, subject/message or formatted delivery too large, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
 

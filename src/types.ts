@@ -24,6 +24,8 @@ export interface EmailEnvelope {
   replyReservedBy?: string;
   deliveryState: DeliveryState;
   error?: string;
+  /** Durable spawn intent, present only on the first accepted request for a new identity. */
+  lifecycleIntent?: LifecyclePolicy;
 }
 
 export interface ParsedAddress {
@@ -34,11 +36,24 @@ export interface ParsedAddress {
   model: Model<any>;
 }
 
+export interface LifecyclePolicy {
+  spawnTimeoutMs: number;
+  promptAcceptanceTimeoutMs: number;
+  runTimeoutMs: number;
+  idleTimeoutMs: number;
+  abortTimeoutMs: number;
+  disposeTimeoutMs: number;
+  brokerShutdownTimeoutMs: number;
+}
+
+export type LifecycleOverride = Partial<LifecyclePolicy>;
+
 export interface RoleConfig {
   effort?: ThinkingLevel;
   tools?: string[];
   instructions?: string;
   canSpawn?: boolean;
+  lifecycle?: LifecycleOverride;
 }
 
 export interface AddressConfig extends RoleConfig {}
@@ -58,6 +73,8 @@ export interface SubagentConfig {
   maxBatchBytes: number;
   maxRetainedEmails: number;
   responseReminderLimit: number;
+  lifecycle: LifecyclePolicy;
+  lifecycleMaxima: LifecyclePolicy;
   roles: Record<string, RoleConfig>;
   addresses: Record<string, AddressConfig>;
 }
@@ -96,6 +113,7 @@ export interface AgentRecord {
   currentActivity?: string;
   failure?: string;
   enforcementAttempts: number;
+  lifecycle: LifecyclePolicy;
   usage: UsageSnapshot;
   activity: ActivityItem[];
 }
@@ -113,6 +131,7 @@ export interface SendEmailInput {
   subject: string;
   message: string;
   priority: EmailPriority;
+  lifecycle?: LifecycleOverride;
 }
 
 export type RecipientDisposition = "main" | "spawned" | "reused" | "restored" | "stopped";
@@ -125,6 +144,7 @@ export interface SendEmailResult {
   recipientRole?: string;
   recipientTools?: string[];
   recipientState?: AgentStatus;
+  recipientLifecycle?: LifecyclePolicy;
   recipientDisposition: RecipientDisposition;
   expectedReplySubject?: string;
   correlationId: string;
@@ -152,6 +172,7 @@ export interface AgentInspection {
   usage: UsageSnapshot;
   failure?: string;
   providerReady: "available" | "unknown";
+  lifecycle: LifecyclePolicy;
 }
 
 export type ReplyWaitState = "answered" | "failed" | "stopped" | "archived" | "paused" | "pending";

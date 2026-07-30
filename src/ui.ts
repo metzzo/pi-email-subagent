@@ -437,6 +437,7 @@ export class DashboardComponent {
         lines.push(this.theme.fg("accent", `${statusIcon(agent.state)} ${address}`));
         lines.push(this.theme.fg("muted", `${agent.state} · ${provider}/${modelId} · effort ${agent.effort}`));
         lines.push(this.theme.fg("dim", `tools: ${agent.tools.map(sanitizeConversationLabel).join(", ")}`));
+        lines.push(this.theme.fg("dim", `lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms · prompt ${agent.lifecycle.promptAcceptanceTimeoutMs}ms · run ${agent.lifecycle.runTimeoutMs}ms · idle ${agent.lifecycle.idleTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
         if (agent.failure) lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
         lines.push("");
         if (this.inbox) {
