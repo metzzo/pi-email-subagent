@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import {
   enforcementPrompt,
   formatAlert,
@@ -120,6 +121,7 @@ describe("mail prompts", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       enforcementAttempts: 0,
+      lifecycle: { ...DEFAULT_LIFECYCLE },
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
       activity: [],
     };

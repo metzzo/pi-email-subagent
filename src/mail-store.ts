@@ -1,7 +1,8 @@
 import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import type { EmailEnvelope } from "./types.ts";
+import { LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
+import type { EmailEnvelope, LifecyclePolicy } from "./types.ts";
 import { byteLength, clone, nowIso } from "./util.ts";
 
 type MailEvent =
@@ -25,6 +26,20 @@ function string(value: unknown, label: string): string {
 function optionalString(value: unknown, label: string): string | undefined {
   if (value === undefined) return undefined;
   return string(value, label);
+}
+
+function parseLifecycle(value: unknown, label: string): LifecyclePolicy | undefined {
+  if (value === undefined) return undefined;
+  const raw = object(value, label);
+  const result = {} as LifecyclePolicy;
+  for (const key of LIFECYCLE_FIELDS) {
+    const candidate = raw[key];
+    if (!Number.isInteger(candidate) || (candidate as number) < 1 || (candidate as number) > MAX_TIMER_DELAY_MS) {
+      throw new Error(`${label}.${key} must be an integer from 1 to ${MAX_TIMER_DELAY_MS} (the runtime-safe timer maximum).`);
+    }
+    result[key] = candidate as number;
+  }
+  return result;
 }
 
 function parseEmail(value: unknown): EmailEnvelope {
@@ -62,6 +77,8 @@ function parseEmail(value: unknown): EmailEnvelope {
     const parsed = optionalString(raw[key], label);
     if (parsed !== undefined) (email as unknown as Record<string, unknown>)[key] = parsed;
   }
+  const lifecycleIntent = parseLifecycle(raw.lifecycleIntent, "email.lifecycleIntent");
+  if (lifecycleIntent) email.lifecycleIntent = lifecycleIntent;
   if (email.kind === "reply" && !email.inReplyTo) throw new Error("reply email is missing inReplyTo.");
   if (email.kind === "reply" && email.requiresResponse) throw new Error("reply email cannot require a response.");
   return email;
@@ -112,7 +129,8 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && left.kind === right.kind
     && left.inReplyTo === right.inReplyTo
     && left.requiresResponse === right.requiresResponse
-    && left.createdAt === right.createdAt;
+    && left.createdAt === right.createdAt
+    && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent);
 }
 
 // Rewrite the journal as a snapshot once it grows past this many events.

@@ -26,6 +26,35 @@ Project values merge over global values, which merge over the defaults below. In
 | `maxRetainedEmails` | `10000` | 1–1000000 | Soft cap for retained envelopes; open obligations are never pruned |
 | `responseReminderLimit` | `2` | 1–10 | Re-prompts before an agent settling with unanswered mail is marked failed |
 
+## Lifecycle watchdogs
+
+Every identity receives finite deadlines. Global defaults (milliseconds) are:
+
+```json
+{
+  "lifecycle": {
+    "spawnTimeoutMs": 30000,
+    "promptAcceptanceTimeoutMs": 30000,
+    "runTimeoutMs": 14400000,
+    "idleTimeoutMs": 900000,
+    "abortTimeoutMs": 10000,
+    "disposeTimeoutMs": 10000,
+    "brokerShutdownTimeoutMs": 60000
+  },
+  "lifecycleMaxima": {
+    "spawnTimeoutMs": 300000,
+    "promptAcceptanceTimeoutMs": 300000,
+    "runTimeoutMs": 86400000,
+    "idleTimeoutMs": 14400000,
+    "abortTimeoutMs": 60000,
+    "disposeTimeoutMs": 60000,
+    "brokerShutdownTimeoutMs": 120000
+  }
+}
+```
+
+All values are integer milliseconds from 1 through `2147483647` (Node's runtime-safe `setTimeout` maximum); zero, negative/fractional values, larger delays, `null`, infinity, and omitted mandatory defaults never mean unbounded. Oversized configured values are ignored with an actionable startup warning rather than overflowing into an almost-immediate timer. For the six worker fields, `lifecycleMaxima` is the administrative ceiling for initial delegation overrides and resolution is field-by-field: initial request → exact address → role → global `lifecycle`. Role and address objects accept those six worker lifecycle fields. `brokerShutdownTimeoutMs` and its maximum are global administrator-only configuration; broker shutdown is never delegated or resolved per worker. See [lifecycle.md](lifecycle.md).
+
 ## Roles and addresses
 
 ```json
@@ -35,7 +64,8 @@ Project values merge over global values, which merge over the defaults below. In
       "effort": "high",
       "tools": ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
       "instructions": "Review for correctness; do not modify files.",
-      "canSpawn": false
+      "canSpawn": false,
+      "lifecycle": { "runTimeoutMs": 7200000 }
     }
   },
   "addresses": {

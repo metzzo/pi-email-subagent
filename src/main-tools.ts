@@ -63,6 +63,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           `Tools: ${inspection.tools.join(", ")}`,
           `Capacity available: ${inspection.capacityAvailable ? "yes" : "no"}`,
           `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} unanswered · ${inspection.pendingReplies} pending replies`,
+          `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
         ];
         if (inspection.failure) lines.push(`Last failure: ${inspection.failure}`);
         return textResult(lines.join("\n"), { inspection } satisfies InspectAgentToolDetails);

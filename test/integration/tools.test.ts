@@ -46,8 +46,15 @@ describe("worker mail tools", () => {
     assert.match(text, /Correlation ID: mail_tool/);
     assert.match(text, /Expected reply subject: Re: \[mail_tool\] Result/);
     assert.equal(Object.hasOwn(input as object, "from"), false);
-    const priority = (send.parameters as { properties: { priority: unknown } }).properties.priority;
-    assert.deepEqual(priority, { type: "string", enum: ["high", "low"] });
+    const properties = (send.parameters as { properties: { priority: unknown; lifecycle: { anyOf?: unknown[]; type?: string; properties?: Record<string, unknown> } } }).properties;
+    assert.deepEqual(properties.priority, { type: "string", enum: ["high", "low"] });
+    assert.ok(properties.lifecycle, "initial send schema exposes lifecycle");
+    const lifecycleObject = (properties.lifecycle.anyOf?.find((item) => (item as { type?: string }).type === "object")
+      ?? properties.lifecycle) as { properties?: Record<string, unknown> } | undefined;
+    assert.deepEqual(lifecycleObject?.properties?.runTimeoutMs, {
+      type: "integer", minimum: 1, maximum: 2_147_483_647,
+    });
+    assert.equal(lifecycleObject?.properties?.brokerShutdownTimeoutMs, undefined, "global shutdown is not delegable");
   });
 
   it("throws failed sends so Pi records a native tool error", async () => {

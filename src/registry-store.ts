@@ -2,7 +2,8 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ActivityItem, AgentRecord, AgentStatus, BrokerRegistry, UsageSnapshot } from "./types.ts";
+import { DEFAULT_LIFECYCLE, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
+import type { ActivityItem, AgentRecord, AgentStatus, BrokerRegistry, LifecyclePolicy, UsageSnapshot } from "./types.ts";
 import { clone, nowIso } from "./util.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -32,6 +33,20 @@ function number(value: unknown, label: string): number {
 function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new Error(`${label} must be an array of strings.`);
   return [...value];
+}
+
+function parseLifecycle(value: unknown, label: string): LifecyclePolicy {
+  if (value === undefined) return { ...DEFAULT_LIFECYCLE };
+  const raw = object(value, label);
+  const lifecycle = {} as LifecyclePolicy;
+  for (const key of LIFECYCLE_FIELDS) {
+    const candidate = raw[key];
+    if (!Number.isInteger(candidate) || (candidate as number) < 1 || (candidate as number) > MAX_TIMER_DELAY_MS) {
+      throw new Error(`${label}.${key} must be an integer from 1 to ${MAX_TIMER_DELAY_MS} (the runtime-safe timer maximum).`);
+    }
+    lifecycle[key] = candidate as number;
+  }
+  return lifecycle;
 }
 
 function parseUsage(value: unknown, label: string): UsageSnapshot {
@@ -88,6 +103,8 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     createdAt: string(raw.createdAt, `${label}.createdAt`),
     updatedAt: string(raw.updatedAt, `${label}.updatedAt`),
     enforcementAttempts: raw.enforcementAttempts as number,
+    // Registries from before lifecycle watchdogs receive the finite shipped defaults.
+    lifecycle: parseLifecycle(raw.lifecycle, `${label}.lifecycle`),
     usage: parseUsage(raw.usage, `${label}.usage`),
     activity: parseActivity(raw.activity, `${label}.activity`),
   };

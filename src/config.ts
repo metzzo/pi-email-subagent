@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { parseSubagentAddressShape } from "./address.ts";
-import type { AddressConfig, RoleConfig, SubagentConfig } from "./types.ts";
+import type { AddressConfig, LifecycleOverride, LifecyclePolicy, RoleConfig, SubagentConfig } from "./types.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -13,6 +13,31 @@ export const DEFAULT_MODEL_POLICY = `- Use model ID \`k3\` (email-domain suffix 
 - Never use any other model unless the user explicitly requests that specific model.
 - For ambiguous tasks, never choose \`gpt-5.6-terra\` if interpretation is needed; use \`k3\` unless the \`gpt-5.6-sol\` threshold is clearly met.
 - If a preferred model is not currently routable, report that limitation instead of silently substituting another model.`;
+
+/** Maximum delay Node setTimeout can represent without overflow/clamping. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+export const DEFAULT_LIFECYCLE: LifecyclePolicy = {
+  spawnTimeoutMs: 30_000,
+  promptAcceptanceTimeoutMs: 30_000,
+  runTimeoutMs: 4 * 60 * 60_000,
+  idleTimeoutMs: 15 * 60_000,
+  abortTimeoutMs: 10_000,
+  disposeTimeoutMs: 10_000,
+  brokerShutdownTimeoutMs: 60_000,
+};
+
+export const DEFAULT_LIFECYCLE_MAXIMA: LifecyclePolicy = {
+  spawnTimeoutMs: 5 * 60_000,
+  promptAcceptanceTimeoutMs: 5 * 60_000,
+  runTimeoutMs: 24 * 60 * 60_000,
+  idleTimeoutMs: 4 * 60 * 60_000,
+  abortTimeoutMs: 60_000,
+  disposeTimeoutMs: 60_000,
+  brokerShutdownTimeoutMs: 2 * 60_000,
+};
+
+export const LIFECYCLE_FIELDS = Object.keys(DEFAULT_LIFECYCLE) as (keyof LifecyclePolicy)[];
 
 export const DEFAULT_CONFIG: SubagentConfig = {
   defaultEffort: "medium",
@@ -29,6 +54,8 @@ export const DEFAULT_CONFIG: SubagentConfig = {
   maxBatchBytes: 512 * 1024,
   maxRetainedEmails: 10_000,
   responseReminderLimit: 2,
+  lifecycle: { ...DEFAULT_LIFECYCLE },
+  lifecycleMaxima: { ...DEFAULT_LIFECYCLE_MAXIMA },
   roles: {
     scout: {
       effort: "low",
@@ -64,6 +91,8 @@ interface RawConfig {
   maxBatchBytes?: unknown;
   maxRetainedEmails?: unknown;
   responseReminderLimit?: unknown;
+  lifecycle?: unknown;
+  lifecycleMaxima?: unknown;
   roles?: unknown;
   addresses?: unknown;
 }
@@ -148,6 +177,14 @@ function profileRecord(
       if (typeof entry.canSpawn === "boolean") next.canSpawn = entry.canSpawn;
       else warnings.push(`${label}.${sourceKey}.canSpawn must be a boolean; ignoring it.`);
     }
+    if (entry.lifecycle !== undefined) {
+      const parsedLifecycle = lifecycleOverride(entry.lifecycle, `${label}.${sourceKey}.lifecycle`, warnings);
+      if (parsedLifecycle.brokerShutdownTimeoutMs !== undefined) {
+        warnings.push(`${label}.${sourceKey}.lifecycle.brokerShutdownTimeoutMs is global administrator-only configuration; ignoring it.`);
+        delete parsedLifecycle.brokerShutdownTimeoutMs;
+      }
+      next.lifecycle = parsedLifecycle;
+    }
     result[key] = { ...(result[key] ?? {}), ...next };
   }
   return result;
@@ -163,8 +200,40 @@ function addressRecord(value: unknown, label: string, warnings: string[]): Recor
 
 function mergeProfiles<T extends RoleConfig>(base: Record<string, T>, overlay: Record<string, T>): Record<string, T> {
   const result = { ...base };
-  for (const [key, value] of Object.entries(overlay)) result[key] = { ...(base[key] ?? {}), ...value } as T;
+  for (const [key, value] of Object.entries(overlay)) {
+    const prior = base[key] ?? {} as T;
+    result[key] = {
+      ...prior,
+      ...value,
+      ...(prior.lifecycle || value.lifecycle ? { lifecycle: { ...prior.lifecycle, ...value.lifecycle } } : {}),
+    } as T;
+  }
   return result;
+}
+
+function lifecycleOverride(value: unknown, label: string, warnings: string[]): LifecycleOverride {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    warnings.push(`${label} must be an object; ignoring it.`);
+    return {};
+  }
+  const raw = value as Record<string, unknown>;
+  const result: LifecycleOverride = {};
+  for (const key of LIFECYCLE_FIELDS) {
+    const candidate = raw[key];
+    if (candidate === undefined) continue;
+    if (!Number.isInteger(candidate) || (candidate as number) < 1 || (candidate as number) > MAX_TIMER_DELAY_MS) {
+      warnings.push(`${label}.${key} must be an integer from 1 to ${MAX_TIMER_DELAY_MS} (the runtime-safe timer maximum); ignoring it.`);
+    } else result[key] = candidate as number;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!LIFECYCLE_FIELDS.includes(key as keyof LifecyclePolicy)) warnings.push(`${label}.${key} is unknown; ignoring it.`);
+  }
+  return result;
+}
+
+function mergeLifecycle(base: LifecyclePolicy, override: LifecycleOverride): LifecyclePolicy {
+  return { ...base, ...override };
 }
 
 function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: string, warnings: string[]): SubagentConfig {
@@ -180,6 +249,15 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
     maxAgents,
     positiveInt(raw.maxConcurrent, base.maxConcurrent, `${label}.maxConcurrent`, warnings, 32),
   );
+  const lifecycleMaxima = mergeLifecycle(base.lifecycleMaxima, lifecycleOverride(raw.lifecycleMaxima, `${label}.lifecycleMaxima`, warnings));
+  const requestedLifecycle = mergeLifecycle(base.lifecycle, lifecycleOverride(raw.lifecycle, `${label}.lifecycle`, warnings));
+  const lifecycle = { ...requestedLifecycle };
+  for (const key of LIFECYCLE_FIELDS) {
+    if (lifecycle[key] > lifecycleMaxima[key]) {
+      warnings.push(`${label}.lifecycle.${key} exceeds administrative maximum ${lifecycleMaxima[key]}; using the maximum.`);
+      lifecycle[key] = lifecycleMaxima[key];
+    }
+  }
   return {
     defaultEffort,
     modelPolicy,
@@ -237,6 +315,8 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
       warnings,
       10,
     ),
+    lifecycle,
+    lifecycleMaxima,
     roles: mergeProfiles(base.roles, roleRecord(raw.roles, `${label}.roles`, warnings)),
     addresses: mergeProfiles(base.addresses, addressRecord(raw.addresses, `${label}.addresses`, warnings)),
   };
@@ -273,6 +353,32 @@ export function resolveAgentProfile(
   const instructions = exact.instructions ?? role.instructions;
   if (instructions !== undefined) merged.instructions = instructions;
   return merged;
+}
+
+export function resolveLifecycle(
+  config: SubagentConfig,
+  address: string,
+  name: string,
+  initialOverride?: LifecycleOverride,
+): LifecyclePolicy {
+  const role = config.roles[name]?.lifecycle ?? {};
+  const exact = config.addresses[address]?.lifecycle ?? {};
+  const override = initialOverride ?? {};
+  const result = {} as LifecyclePolicy;
+  for (const key of LIFECYCLE_FIELDS) {
+    // Broker shutdown coordinates all identities and cannot be delegated.
+    const value = key === "brokerShutdownTimeoutMs"
+      ? config.lifecycle[key]
+      : override[key] ?? exact[key] ?? role[key] ?? config.lifecycle[key];
+    if (!Number.isInteger(value) || value < 1 || value > MAX_TIMER_DELAY_MS) {
+      throw new Error(`lifecycle.${key} must be an integer from 1 to ${MAX_TIMER_DELAY_MS} (the runtime-safe timer maximum).`);
+    }
+    if (value > config.lifecycleMaxima[key]) {
+      throw new Error(`lifecycle.${key} (${value}) exceeds the administrative maximum ${config.lifecycleMaxima[key]}. Choose a smaller finite value.`);
+    }
+    result[key] = value;
+  }
+  return result;
 }
 
 export function isThinkingLevel(value: string): value is ThinkingLevel {

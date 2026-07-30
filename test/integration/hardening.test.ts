@@ -470,7 +470,9 @@ describe("broker hardening", () => {
   });
 
   it("holds a timing-out collector through an in-flight reply commit", async () => {
-    const { broker, workers, main } = await setup();
+    const { broker, workers, main } = await setup({
+      lifecycle: { ...structuredClone(DEFAULT_CONFIG.lifecycle), brokerShutdownTimeoutMs: 400 },
+    });
     try {
       const request = await broker.send(broker.mainAddress, {
         to: "worker.timeout-race@gpt-5.4.com", subject: "Timeout race", message: "Reply during slow journal I/O.", priority: "low",
@@ -506,12 +508,17 @@ describe("broker hardening", () => {
       releaseCommit.resolve();
       await replying;
       const result = await waiting;
+      broker.mailStore.markDelivered = realMarkDelivered;
       assert.equal(result.complete, true);
       assert.equal(result.timedOut, false);
       assert.equal(result.items[0]?.reply?.message, "Captured across timeout boundary.");
       assert.equal(main.deliveries.length, 0);
+      assert.equal((broker as unknown as { addressTails: Map<string, unknown> }).addressTails.size, 0, "collector leaves no address tail");
+      assert.equal((broker as unknown as { inFlightOperations: Set<unknown> }).inFlightOperations.size, 0, "collector leaves no tracked mutation");
     } finally {
+      const shutdownStarted = Date.now();
       await broker.shutdown();
+      assert.ok(Date.now() - shutdownStarted < 1_000, "collector race leaves no stale shutdown barrier");
     }
   });
 
@@ -651,6 +658,27 @@ describe("broker hardening", () => {
     } finally {
       await broker.shutdown();
     }
+  });
+
+  it("drains maintenance added immediately before shutdown without bookkeeping cycles", async () => {
+    const { broker } = await setup({
+      lifecycle: { ...structuredClone(DEFAULT_CONFIG.lifecycle), brokerShutdownTimeoutMs: 400 },
+    });
+    let release!: () => void;
+    const held = new Promise<boolean>((resolve) => { release = () => resolve(false); });
+    broker.mailStore.maintainIfNeeded = async () => held;
+    await broker.send(broker.mainAddress, {
+      to: "worker.maintenance-shutdown@gpt-5.4.com",
+      subject: "Maintain at shutdown",
+      message: "Create a tracked maintenance mutation.",
+      priority: "low",
+    });
+    let closed = false;
+    const closing = broker.shutdown().then(() => { closed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(closed, false, "shutdown waits for the real maintenance mutation");
+    release();
+    await closing;
   });
 
   it("schedules journal maintenance during a live broker session", async () => {

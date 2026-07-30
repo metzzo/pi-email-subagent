@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
 import type { AgentRecord } from "../../src/types.ts";
 
@@ -26,6 +27,7 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
     createdAt: now,
     updatedAt: now,
     enforcementAttempts: 0,
+    lifecycle: { ...DEFAULT_LIFECYCLE },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     activity: [],
   };

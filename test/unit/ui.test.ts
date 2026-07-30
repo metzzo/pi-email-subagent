@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript, UIController } from "../../src/ui.ts";
 import type { AgentRecord, BrokerSnapshot } from "../../src/types.ts";
 
@@ -27,6 +28,7 @@ function record(): AgentRecord {
     updatedAt: now,
     currentActivity: "Inspecting an intentionally very long path and activity description that must be safely truncated",
     enforcementAttempts: 0,
+    lifecycle: { ...DEFAULT_LIFECYCLE },
     usage: { input: 12345, output: 2345, cacheRead: 0, cacheWrite: 0, cost: 0.0123, contextTokens: 20000, turns: 3 },
     activity: [{ at: now, kind: "tool", summary: "read /an/intentionally/long/path/that/should/not/overflow/the/dashboard" }],
   };
@@ -53,6 +55,21 @@ describe("dashboard rendering", () => {
       assert.equal(lines.every((line) => visibleWidth(line) <= width), true, `overflow at width ${width}`);
       component.invalidate();
     }
+  });
+
+  it("discloses the enforced lifecycle in agent detail", () => {
+    const agent = record();
+    const component = new DashboardComponent(
+      () => ({ mainAddress: "main@gpt-5.4-mini.com", agents: [agent], unanswered: 0, queuedMail: 0 }),
+      () => [],
+      () => undefined,
+      () => undefined,
+      fakeTheme,
+    );
+    component.handleInput("\r");
+    const detail = component.render(240).join("\n");
+    assert.match(detail, new RegExp(`lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms`));
+    assert.match(detail, new RegExp(`run ${agent.lifecycle.runTimeoutMs}ms`));
   });
 
   it("renders the canonical agents bar without the redundant footer counter", () => {

@@ -21,7 +21,7 @@ For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads 
 ## Tools
 
 ```text
-send_email(to, subject, message, priority)
+send_email(to, subject, message, priority, lifecycle?)
 fetch_emails()
 inspect_agent(address)
 wait_for_replies(request_ids, timeout_seconds, collect)
@@ -42,7 +42,7 @@ Re: [mail-id] Original subject
 
 High-priority mail steers a running recipient at the next safe boundary. Low-priority mail waits until the recipient settles. A worker that settles with unanswered requests is automatically prompted to respond.
 
-`send_email` returns the allocated request/correlation ID, exact expected reply subject, effective recipient role/tools/model, and delivery state. `inspect_agent` previews the same effective profile without spawning. `wait_for_replies` joins several delegated requests and can collect their replies without separate model turns. `manage_agent` is main-thread-only and supports `stop`, `restart`, `archive`, and `clear_failure`; workers continue to receive only the two email tools.
+`send_email` returns the allocated request/correlation ID, exact expected reply subject, effective recipient role/tools/model, finite persisted lifecycle policy, and delivery state. `inspect_agent` previews the same effective profile without spawning. `wait_for_replies` joins several delegated requests and can collect their replies without separate model turns. `manage_agent` is main-thread-only and supports `stop`, `restart`, `archive`, and `clear_failure`; workers continue to receive only the two email tools.
 
 ## Model selection
 
@@ -82,6 +82,15 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
   "maxBatchMessages": 32,
   "maxBatchBytes": 524288,
   "maxRetainedEmails": 10000,
+  "lifecycle": {
+    "spawnTimeoutMs": 30000,
+    "promptAcceptanceTimeoutMs": 30000,
+    "runTimeoutMs": 14400000,
+    "idleTimeoutMs": 900000,
+    "abortTimeoutMs": 10000,
+    "disposeTimeoutMs": 10000,
+    "brokerShutdownTimeoutMs": 60000
+  },
   "roles": {
     "scout": {
       "effort": "low",
@@ -95,13 +104,13 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
 }
 ```
 
-Resolution order is exact address, role name, then defaults. The address always controls the model. Effective configured tools—not role labels—determine whether a recipient is writable.
+Profile resolution order is exact address, role name, then defaults. Initial lifecycle fields resolve initial request, exact address, role, then finite global defaults, subject to administrator-configured maxima. Later mail cannot mutate a persisted policy; archived restoration preserves it. The address always controls the model. Effective configured tools—not role labels—determine whether a recipient is writable.
 
 Provider definitions, the model catalog, and persistent credentials are snapshotted for workers when the extension starts. Provider/model/auth configuration changes take effect after an extension reload; workers are not continuously synchronized. Runtime-only credentials that are absent from Pi's persistent credential store cannot be transferred to an isolated worker; persist them before delegating worker tasks.
 
 ## Persistence and limits
 
-State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. An OS-visible lease permits only one live broker to own a parent-session namespace; a second process receives the recorded PID/acquisition time, and an abruptly abandoned lease becomes recoverable after 10 seconds. Mail is journaled before acceptance and worker sessions are resumed after reload. Startup reconciles queued mail whose recipient record was not persisted before a crash. The journal is maintained during live sessions: excess transitions are compacted into a snapshot and the oldest terminal envelopes above `maxRetainedEmails` are pruned, while every open obligation and retained request/reply pair is preserved. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
+State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. An OS-visible lease permits only one live broker to own a parent-session namespace; a second process receives the recorded PID/acquisition time, and an abruptly abandoned lease becomes recoverable after 10 seconds. Mail is journaled before acceptance and worker sessions are resumed after reload. The initial mail contains durable lifecycle spawn intent and the registry record is saved before worker/provider startup; startup reconciles queued mail whose recipient record was not persisted before a crash without widening its accepted policy. Run, active-run stall, prompt, spawn, abort, dispose, and global shutdown deadlines are finite. Broker shutdown is bounded, but retains namespace ownership when timed-out late mutation cannot be proven quiescent; see [`docs/lifecycle.md`](docs/lifecycle.md). The journal is maintained during live sessions: excess transitions are compacted into a snapshot and the oldest terminal envelopes above `maxRetainedEmails` are pruned, while every open obligation and retained request/reply pair is preserved. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
 
 Reply obligations use durable reservation, delivery, commit, and release transitions: concurrent replies cannot both claim one request, and a failed reply delivery reopens it. Delivery across process-crash recovery is at least once, not exactly once. Stable email IDs let workers recognize retries and avoid repeating completed side effects. Durability targets ordinary process crashes, not sudden power loss.
 

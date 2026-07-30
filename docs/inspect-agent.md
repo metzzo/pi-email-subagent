@@ -25,6 +25,7 @@ Role: reviewer · read-only · spawn disabled
 Tools: read, grep, find, ls, send_email, fetch_emails
 Capacity available: yes
 Mailbox: 0 queued · 1 unanswered · 0 pending replies
+Lifecycle: {"spawnTimeoutMs":30000,...}
 Last failure: …            (only when present)
 ```
 
@@ -43,6 +44,7 @@ Last failure: …            (only when present)
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
 | `providerReady` | `available` when a live worker exists, else `unknown` |
+| `lifecycle` | Exact persisted policy for an existing identity, or currently resolved configured defaults for a prospective one |
 
 Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true` — typically an invalid address shape or an unroutable/ambiguous model ID.
 

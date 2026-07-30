@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_MODEL_POLICY, loadConfig, resolveAgentProfile } from "../../src/config.ts";
+import { DEFAULT_MODEL_POLICY, loadConfig, MAX_TIMER_DELAY_MS, resolveAgentProfile, resolveLifecycle } from "../../src/config.ts";
 
 describe("configuration", () => {
   it("applies exact address over role over defaults", async () => {
@@ -136,6 +136,71 @@ describe("configuration", () => {
     assert.equal(loaded.warnings.length, 2);
     assert.match(loaded.warnings.join("\n"), /invalid role key/);
     assert.match(loaded.warnings.join("\n"), /invalid address key/);
+  });
+
+  it("resolves lifecycle field-by-field and enforces administrative maxima", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      lifecycle: { runTimeoutMs: 1000, idleTimeoutMs: 900 },
+      lifecycleMaxima: { runTimeoutMs: 5000 },
+      roles: { worker: { lifecycle: { runTimeoutMs: 2000, idleTimeoutMs: 800 } } },
+      addresses: { "worker.a@gpt-5.4.com": { lifecycle: { runTimeoutMs: 3000 } } },
+    }));
+    const { config, warnings } = loadConfig(agentDir, root, false);
+    assert.deepEqual(warnings, []);
+    const resolved = resolveLifecycle(config, "worker.a@gpt-5.4.com", "worker", { idleTimeoutMs: 700 });
+    assert.equal(resolved.runTimeoutMs, 3000);
+    assert.equal(resolved.idleTimeoutMs, 700);
+    assert.ok(Object.values(resolved).every((value) => Number.isInteger(value) && value > 0));
+    assert.throws(() => resolveLifecycle(config, "worker.a@gpt-5.4.com", "worker", { runTimeoutMs: 5001 }), /administrative maximum 5000/);
+  });
+
+  it("keeps broker shutdown global and ignores role attempts to override it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      lifecycle: { brokerShutdownTimeoutMs: 1234 },
+      roles: { worker: { lifecycle: { brokerShutdownTimeoutMs: 2 } } },
+    }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.equal(resolveLifecycle(loaded.config, "worker.a@gpt-5.4.com", "worker").brokerShutdownTimeoutMs, 1234);
+    assert.equal(loaded.config.roles.worker?.lifecycle?.brokerShutdownTimeoutMs, undefined);
+    assert.match(loaded.warnings.join("\n"), /global administrator-only/);
+  });
+
+  it("rejects lifecycle delays above the runtime-safe timer maximum everywhere", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    const oversized = MAX_TIMER_DELAY_MS + 1;
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      lifecycle: { runTimeoutMs: oversized },
+      lifecycleMaxima: { idleTimeoutMs: oversized },
+      roles: { worker: { lifecycle: { abortTimeoutMs: oversized } } },
+    }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.equal(loaded.config.lifecycle.runTimeoutMs, 4 * 60 * 60_000);
+    assert.equal(loaded.config.lifecycleMaxima.idleTimeoutMs, 4 * 60 * 60_000);
+    assert.equal(loaded.config.roles.worker?.lifecycle?.abortTimeoutMs, undefined);
+    assert.equal(loaded.warnings.filter((warning) => warning.includes("runtime-safe timer maximum")).length, 3);
+    assert.throws(
+      () => resolveLifecycle(loaded.config, "worker.a@gpt-5.4.com", "worker", { runTimeoutMs: oversized }),
+      /runtime-safe timer maximum/,
+    );
+  });
+
+  it("warns on invalid lifecycle fields and keeps finite defaults", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ lifecycle: { runTimeoutMs: 0, unknown: 1 } }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.equal(loaded.config.lifecycle.runTimeoutMs > 0, true);
+    assert.match(loaded.warnings.join("\n"), /runTimeoutMs.*integer from 1/);
+    assert.match(loaded.warnings.join("\n"), /unknown/);
   });
 
   it("warns and falls back for invalid values", async () => {

@@ -11,6 +11,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { MAX_TIMER_DELAY_MS } from "./config.ts";
 import type {
   ActivityItem,
   AgentRecord,
@@ -27,6 +28,14 @@ import { textResult } from "./tool-result.ts";
 import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
 
 const PrioritySchema = StringEnum(["high", "low"] as const);
+const LifecycleSchema = Type.Object({
+  spawnTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+  promptAcceptanceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+  runTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+  idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+  abortTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+  disposeTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+}, { additionalProperties: false, description: "Optional finite deadlines for a newly created recipient only; configured administrative maxima apply" });
 
 export interface SendToolDetails {
   result?: SendEmailResult;
@@ -54,7 +63,8 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
       subject: Type.String({ description: "New subject, or exact reply subject from fetch_emails()" }),
       message: Type.String({ description: "Self-contained request or substantive response" }),
       priority: PrioritySchema,
-    }),
+      lifecycle: Type.Optional(LifecycleSchema),
+    }, { additionalProperties: false }),
     async execute(_id, params, signal) {
       if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
       try {
@@ -76,6 +86,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientRole) lines.push(`Recipient role: ${result.recipientRole}`);
         if (result.recipientTools) lines.push(`Recipient tools: ${result.recipientTools.join(", ")}`);
         if (result.recipientState) lines.push(`Recipient state: ${result.recipientState}`);
+        if (result.recipientLifecycle) lines.push(`Recipient lifecycle: ${JSON.stringify(result.recipientLifecycle)}`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
         throw new Error(`Email was not accepted: ${errorMessage(error)}`);
