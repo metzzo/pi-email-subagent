@@ -28,7 +28,7 @@ Reply subjects are checked strictly, in order: the referenced email must exist, 
 ### Limits (defaults; see [configuration.md](configuration.md))
 
 - Subject: 512 bytes (+64 allowance for the reply prefix); no line breaks or control characters.
-- Message: 32 KB. After XML escaping, a single envelope must fit the context-safe tool payload budget (currently 48 KB and 1968 lines, or a lower configured `maxBatchBytes`) so it remains retrievable without truncating the task.
+- Message: 32 KB. After XML escaping, a single envelope must fit the context-safe tool payload budget (currently 48 KB and 1952 lines, or a lower configured `maxBatchBytes`) so it remains retrievable without truncating the task.
 - Rate: 60 mails/minute global, 30 mails/minute per sender (sliding window). Validation failures are not charged; quota is consumed before journaling.
 - Queue per recipient: 256 messages / 4 MB.
 
