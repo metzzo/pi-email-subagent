@@ -136,48 +136,52 @@ Acceptance:
 - Two-process contention and SIGKILL recovery tests pass.
 - No concurrent append/rewrite can occur for one namespace.
 
-### M2.2 Lifecycle watchdogs with per-agent overrides
+### M2.2 Lifecycle watchdogs declared by the initial delegation
 
-Add a `lifecycle` policy whose fields resolve independently in this order:
+Every agent has a finite lifecycle policy from its first moment. The `send_email` request that targets an unknown address accepts an optional `lifecycle` override alongside `to`, `subject`, `message`, and `priority`. If omitted, finite configured defaults apply; omission never means unbounded execution.
 
-1. Exact address (`addresses[agent].lifecycle`).
-2. Role (`roles[name].lifecycle`).
-3. Global lifecycle defaults (`lifecycle`).
+Resolution is field-by-field:
 
-Example:
+1. Initial `send_email.lifecycle` override for the new recipient.
+2. Exact-address configured policy (`addresses[agent].lifecycle`).
+3. Role policy (`roles[name].lifecycle`).
+4. Global lifecycle defaults (`lifecycle`).
+
+Conceptual initial delegation:
 
 ```json
 {
+  "to": "worker.long-migration@gpt-5.6-sol.com",
+  "subject": "Run the migration",
+  "message": "Implement and validate the migration.",
+  "priority": "low",
   "lifecycle": {
     "spawnTimeoutMs": 30000,
     "promptAcceptanceTimeoutMs": 30000,
-    "runTimeoutMs": 1800000,
-    "idleTimeoutMs": 300000,
+    "runTimeoutMs": 14400000,
+    "idleTimeoutMs": 900000,
     "abortTimeoutMs": 10000,
     "disposeTimeoutMs": 10000
-  },
-  "roles": {
-    "worker": {
-      "lifecycle": { "runTimeoutMs": 3600000 }
-    }
-  },
-  "addresses": {
-    "worker.long-migration@gpt-5.6-sol.com": {
-      "lifecycle": { "runTimeoutMs": 14400000, "idleTimeoutMs": 900000 }
-    }
   }
 }
 ```
 
-Broker shutdown remains a global deadline because it coordinates every worker; all worker-specific phases use the resolved agent policy. `inspect_agent` and `/agents` must disclose the effective lifecycle policy before spawn. A documented disable value may be allowed for run/idle timeouts, while spawn, abort, dispose, and shutdown remain bounded.
+The resolved lifecycle policy is validated, durably associated with the recipient before its worker starts, returned by `send_email`, persisted in the agent record, restored after crashes/reloads, and disclosed by `inspect_agent` and `/agents`. A crash between mail acceptance and record persistence must recover the requested lifecycle from durable spawn intent rather than silently reverting to defaults.
+
+An initial lifecycle override is accepted only when creating/restoring the intended recipient under an explicit contract; a normal later email must not silently mutate a live identity's lifecycle. A future explicit `manage_agent` lifecycle action may change it safely. The sending agent cannot alter its own deadline, and mandatory spawn, abort, dispose, and broker-shutdown bounds cannot be disabled. Configured administrative maxima prevent a delegating child from granting an unbounded lifetime.
+
+Broker shutdown remains a global deadline because it coordinates every worker. All worker-specific phases use the lifecycle resolved from the initial delegation.
 
 Acceptance:
 
-- Exact-address values override role values, which override global defaults, field by field.
+- The first delegation either supplies lifecycle values or receives finite defaults before any worker/provider operation begins.
+- Initial-request values override exact-address, role, and global defaults field by field, subject to configured safety bounds.
+- The accepted send result, durable state, inspection, prompt/runtime enforcement, and dashboard all agree on the same policy.
+- Crash recovery cannot lose or widen the accepted lifecycle policy.
 - Hung providers/workers cannot hold capacity or block shutdown indefinitely.
 - Timeout transitions preserve queued/open mail, release resources, and expose stable error codes.
-- Restarting or reconfiguring an agent installs a fresh lifecycle policy without inheriting stale timers.
-- Config, inspection, timeout, shutdown, and race regressions cover every deadline.
+- Restarting or explicitly reconfiguring an agent installs fresh timers without inheriting stale timers.
+- Config, initial-send validation, persistence/recovery, inspection, timeout, shutdown, and race regressions cover every deadline.
 
 ### M2.3 Doctor and support bundle
 
