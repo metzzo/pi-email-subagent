@@ -38,4 +38,4 @@ Mail bodies, subjects, agent activity, usage, and worker session transcripts are
 
 ## Security roadmap
 
-The tracked hardening roadmap is in `plans/top-1-percent-plan.md`. Priority work includes single-writer namespace locking, lifecycle deadlines, versioned migrations/repair, cost budgets, workspace scopes, subprocess transport, and fail-closed isolation policies.
+The tracked hardening roadmap is in `plans/top-1-percent-plan.md`. Priority work includes single-writer namespace locking, per-agent lifecycle deadlines, versioned migrations/repair, workspace scopes, subprocess transport, and fail-closed isolation policies.

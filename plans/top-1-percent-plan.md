@@ -10,7 +10,7 @@ The broker core is already unusually strong: durable at-least-once mail, stable 
 
 ## Product principles
 
-1. **Safe to leave running:** explicit budgets, deadlines, isolation policy, and bounded resources.
+1. **Safe to leave running:** explicit lifecycle deadlines, isolation policy, and bounded resources.
 2. **Useful in five minutes:** one-command install, one copy-paste delegation, visible reply and cost.
 3. **Honest contracts:** at-least-once delivery, explicit trust/isolation modes, tested compatibility claims.
 4. **Recoverable by operators:** versioned state, diagnostics, backups, repair/export paths, stable errors.
@@ -37,7 +37,6 @@ Target outcomes:
 
 - Fresh install to first successful reply in under 5 minutes.
 - More than 80% completion without intervention for documented recipe-shaped tasks.
-- No session exceeds a configured hard budget by more than 10%.
 - No accepted email disappears under tested storage/process killpoints.
 - Zero overlapping writable scopes without an explicit warning or isolation boundary.
 - Median recovery from a diagnosed worker failure takes at most two dashboard actions.
@@ -137,38 +136,50 @@ Acceptance:
 - Two-process contention and SIGKILL recovery tests pass.
 - No concurrent append/rewrite can occur for one namespace.
 
-### M2.2 Lifecycle watchdogs
+### M2.2 Lifecycle watchdogs with per-agent overrides
 
-Add configurable deadlines for:
+Add a `lifecycle` policy whose fields resolve independently in this order:
 
-- Worker creation.
-- Prompt acceptance.
-- Maximum run wall time and idle time.
-- Abort/dispose grace.
-- Broker shutdown.
+1. Exact address (`addresses[agent].lifecycle`).
+2. Role (`roles[name].lifecycle`).
+3. Global lifecycle defaults (`lifecycle`).
+
+Example:
+
+```json
+{
+  "lifecycle": {
+    "spawnTimeoutMs": 30000,
+    "promptAcceptanceTimeoutMs": 30000,
+    "runTimeoutMs": 1800000,
+    "idleTimeoutMs": 300000,
+    "abortTimeoutMs": 10000,
+    "disposeTimeoutMs": 10000
+  },
+  "roles": {
+    "worker": {
+      "lifecycle": { "runTimeoutMs": 3600000 }
+    }
+  },
+  "addresses": {
+    "worker.long-migration@gpt-5.6-sol.com": {
+      "lifecycle": { "runTimeoutMs": 14400000, "idleTimeoutMs": 900000 }
+    }
+  }
+}
+```
+
+Broker shutdown remains a global deadline because it coordinates every worker; all worker-specific phases use the resolved agent policy. `inspect_agent` and `/agents` must disclose the effective lifecycle policy before spawn. A documented disable value may be allowed for run/idle timeouts, while spawn, abort, dispose, and shutdown remain bounded.
 
 Acceptance:
 
+- Exact-address values override role values, which override global defaults, field by field.
 - Hung providers/workers cannot hold capacity or block shutdown indefinitely.
-- Timeout transitions preserve queued/open mail and expose stable error codes.
+- Timeout transitions preserve queued/open mail, release resources, and expose stable error codes.
+- Restarting or reconfiguring an agent installs a fresh lifecycle policy without inheriting stale timers.
+- Config, inspection, timeout, shutdown, and race regressions cover every deadline.
 
-### M2.3 Cost and token budgets
-
-Per-agent/role/session controls:
-
-- `maxCostUsd`.
-- `maxTokens`.
-- Warning threshold (default 80%).
-- Optional effort downgrade at warning.
-- Hard pause/stop at limit with explicit recovery.
-
-Acceptance:
-
-- Dashboard displays aggregate and per-agent budget usage.
-- Main receives one deduplicated warning and one hard-limit alert.
-- Configured sessions cannot exceed the hard budget by more than documented in-flight allowance.
-
-### M2.4 Doctor and support bundle
+### M2.3 Doctor and support bundle
 
 Add `/agents doctor` and a machine-readable health snapshot covering:
 
@@ -322,7 +333,7 @@ Do not replace JSONL with SQLite until benchmarks demonstrate that indexing and 
 ## Delivery sequence
 
 1. **0.1 release candidate:** Milestone 0 + package metadata, CI, clean install, changelog/security/contributing docs.
-2. **0.2 safe unattended:** namespace lock, lifecycle deadlines, budgets, doctor, structured recovery.
+2. **0.2 safe unattended:** namespace lock, per-agent lifecycle deadlines, doctor, structured recovery.
 3. **0.3 conflict-safe:** versioned migrations, fault injection, write scopes, worktrees, orchestration map, recipes.
 4. **1.0 production boundary:** subprocess isolation, tested platform/provider/Pi matrix, recovery guarantees, measured scale.
 
