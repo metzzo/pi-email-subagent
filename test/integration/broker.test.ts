@@ -3,11 +3,13 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { AgentBroker } from "../../src/broker.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { AgentBroker, lightweightWorkItem } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { makeReplySubject } from "../../src/reply.ts";
 import type { SubagentConfig } from "../../src/types.ts";
 import { createWorkerFactory, eventually, FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
+import { activePathConflicts, appendRecent, emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
 
 async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string) {
   const root = namespace ?? await mkdtemp(join(tmpdir(), "pi-email-broker-"));
@@ -29,6 +31,62 @@ async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string
 }
 
 describe("AgentBroker end-to-end routing", () => {
+  it("projects lightweight work without traversing patch preview bytes", () => {
+    const item = startWorkItem("edit", "edit", { path: "a", edits: [] }, 1, "/work")!;
+    Object.defineProperty(item, "patchPreview", { enumerable: true, get() { throw new Error("preview traversed"); } });
+    const projected = lightweightWorkItem(item);
+    assert.equal(projected.patchAvailable, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(projected, "patchPreview"), false);
+  });
+
+  it("publishes deterministic same-path active conflict evidence for two agents", async () => {
+    const { broker, workers, root } = await setup();
+    try {
+      for (const to of ["worker.left@gpt-5.4.com", "worker.right@gpt-5.4.com"]) await broker.send(broker.mainAddress, { to, subject: "edit", message: "edit same", priority: "low" });
+      for (let index = 0; index < workers.length; index++) {
+        const worker = workers[index]!; worker.record!.work = emptyWorkState(); worker.record!.work.currentBatchId = 1;
+        const item = startWorkItem(`edit${index}`, "edit", { path: "same.ts", edits: [] }, 1, root)!;
+        worker.record!.work.active.push(item); worker.emit({ type: "work", workItem: item });
+      }
+      assert.equal(activePathConflicts(broker.getSnapshot().agents).values().next().value?.length, 2);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("debounces parallel completion saves while persisting the final work generation", async () => {
+    const { broker, workers } = await setup();
+    try {
+      await broker.send(broker.mainAddress, { to: "worker.persist-work@gpt-5.4.com", subject: "work", message: "work", priority: "low" });
+      const worker = workers[0]!; worker.record!.work = emptyWorkState(); worker.record!.work.currentBatchId = 1;
+      let saves = 0; const original = broker.registryStore.save.bind(broker.registryStore);
+      broker.registryStore.save = async (registry) => { saves += 1; await original(registry); };
+      for (let index = 0; index < 8; index++) {
+        const item = finishWorkItem(startWorkItem(`w${index}`, "write", { path: `f${index}`, content: "x" }, 1, "/work")!, {}, false);
+        appendRecent(worker.record!.work, item); worker.emit({ type: "work", workItem: item });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      assert.ok(saves <= 2, `expected coalesced saves, got ${saves}`);
+      const stored = await broker.registryStore.load(broker.mainAddress);
+      assert.equal(stored.agents[0]!.work!.recent.length, 8);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("recovers durable mutation results for a stopped identity without worker startup", async () => {
+    const first = await setup();
+    await first.broker.send(first.broker.mainAddress, { to: "worker.offline@gpt-5.4.com", subject: "offline", message: "offline", priority: "low" });
+    await first.broker.stop("worker.offline@gpt-5.4.com"); await first.broker.shutdown();
+    const manager = SessionManager.create(first.root, join(first.root, "state", "sessions"));
+    const at = new Date().toISOString(); manager.appendCustomEntry("pi-email-subagent-work-batch", { batchId: 1, startedAt: at });
+    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "offline-edit", name: "edit", arguments: { path: "a.ts", edits: [{ oldText: "x", newText: "y" }] } }], timestamp: Date.now(), provider: "test", model: "test", api: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse" } as never);
+    manager.appendMessage({ role: "toolResult", toolCallId: "offline-edit", toolName: "edit", content: [{ type: "text", text: "ok" }], details: { patch: "@@ -1 +1 @@\n-x\n+y" }, isError: false, timestamp: Date.now() } as never);
+    const registry = await first.broker.registryStore.load(first.broker.mainAddress); registry.agents[0]!.sessionFile = manager.getSessionFile(); registry.agents[0]!.work = emptyWorkState(); await first.broker.registryStore.save(registry);
+    const second = await setup({}, first.root);
+    try {
+      assert.equal(second.workers.length, 0);
+      const recovered = second.broker.getSnapshot().agents[0]!.work!.recent.find((item) => item.toolCallId === "offline-edit");
+      assert.equal(recovered?.status, "succeeded");
+    } finally { await second.broker.shutdown(); }
+  });
+
   it("spawns once, reuses context, steers high mail, and queues low mail", async () => {
     const { broker, workers } = await setup();
     try {

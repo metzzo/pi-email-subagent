@@ -95,6 +95,49 @@ export interface ActivityItem {
   summary: string;
 }
 
+export type WorkKind = "edit" | "write" | "shell" | "custom";
+export type WorkStatus = "running" | "succeeded" | "failed" | "interrupted";
+export type WorkAttribution = "explicit" | "unverified";
+
+export interface WorkItem {
+  toolCallId: string;
+  batchId: number;
+  toolName: string;
+  kind: WorkKind;
+  attribution: WorkAttribution;
+  status: WorkStatus;
+  startedAt: string;
+  endedAt?: string;
+  durationMs?: number;
+  path?: string;
+  displayPath?: string;
+  editBlocks?: number;
+  commandPreview?: string;
+  error?: string;
+  bytesWritten?: number;
+  linesWritten?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  firstChangedLine?: number;
+  patchPreview?: string;
+  patchTruncated?: boolean;
+  patchSource?: "event" | "session";
+  /** Snapshot-only hint when the heavy preview was omitted. */
+  patchAvailable?: boolean;
+}
+
+export interface WorkCounters { reads: number; searches: number; listings: number }
+export interface AgentWorkState {
+  nextBatchId: number;
+  currentBatchId?: number;
+  batchStartedAt?: string;
+  batchEndedAt?: string;
+  active: WorkItem[];
+  recent: WorkItem[];
+  inspection: WorkCounters;
+  recoveryError?: string;
+}
+
 export interface AgentRecord {
   address: string;
   name: string;
@@ -116,6 +159,8 @@ export interface AgentRecord {
   lifecycle: LifecyclePolicy;
   usage: UsageSnapshot;
   activity: ActivityItem[];
+  /** Bounded derived cache; session JSONL remains durable truth for edit/write results. */
+  work?: AgentWorkState;
 }
 
 export interface BrokerRegistry {
@@ -192,9 +237,10 @@ export interface WaitForRepliesResult {
 }
 
 export interface WorkerEvent {
-  type: "state" | "activity" | "settled" | "failure";
+  type: "state" | "activity" | "work" | "settled" | "failure";
   state?: AgentStatus;
   activity?: ActivityItem;
+  workItem?: WorkItem;
   error?: string;
 }
 
@@ -218,7 +264,7 @@ export interface WorkerStartConfig {
 
 export interface WorkerTransport {
   start(config: WorkerStartConfig): Promise<void>;
-  prompt(message: string): Promise<void>;
+  prompt(message: string, options?: { newBatch?: boolean }): Promise<void>;
   steer(message: string): Promise<void>;
   followUp(message: string): Promise<void>;
   abort(): Promise<void>;

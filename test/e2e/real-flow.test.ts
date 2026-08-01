@@ -168,6 +168,55 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("records scripted edit/write outcomes and keeps bash effects unverified", { timeout: 240_000 }, async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "pi-email-work-ledger-e2e-"));
+    const editPath = join(workspace, "edit.txt");
+    const writePath = join(workspace, "write.txt");
+    await writeFile(editPath, "before\n");
+    const { client, agentDir, sessionId } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt(`E2E DELEGATE WORK PATH ${editPath} WRITE ${writePath}`);
+      await client.waitFor(assistantText("E2E COMPLETE"), "work delegation completion", 120_000, mark);
+      await client.waitForSettlement(mark);
+      const registry = await eventuallyRegistry(
+        agentDir,
+        sessionId,
+        (candidate) => candidate.agents?.some((agent: any) => agent.address === "worker.work-e2e@mock-e2e.com"
+          && agent.work?.recent?.some((item: any) => item.kind === "edit" && item.status === "succeeded")
+          && agent.work?.recent?.some((item: any) => item.kind === "edit" && item.status === "failed")
+          && agent.work?.recent?.some((item: any) => item.kind === "write")),
+        "with persisted edit/write work",
+      );
+      const agent = registry.agents.find((candidate: any) => candidate.address === "worker.work-e2e@mock-e2e.com");
+      const edits = agent.work.recent.filter((item: any) => item.kind === "edit");
+      const edit = edits.find((item: any) => item.status === "succeeded");
+      const failedEdit = edits.find((item: any) => item.status === "failed");
+      const write = agent.work.recent.find((item: any) => item.kind === "write");
+      const shell = agent.work.recent.find((item: any) => item.kind === "shell");
+      assert.equal(edit.status, "succeeded");
+      assert.equal(edit.attribution, "explicit");
+      assert.equal(edit.linesAdded, 1);
+      assert.equal(edit.linesRemoved, 1);
+      assert.equal(failedEdit.status, "failed");
+      assert.equal(JSON.stringify(failedEdit).includes("SENTINEL"), false);
+      assert.equal(write.status, "succeeded");
+      assert.equal(write.attribution, "explicit");
+      assert.equal(shell.status, "succeeded");
+      assert.equal(shell.attribution, "unverified");
+      assert.equal(agent.work.inspection.reads, 1);
+      const confirmed = agent.work.recent.filter((item: any) => item.status === "succeeded" && item.attribution === "explicit");
+      assert.equal(new Set(confirmed.map((item: any) => item.path)).size, 2);
+      assert.equal(JSON.stringify(agent.work).includes("PRIVATE E2E WRITE BODY"), false);
+      assert.equal(await readFile(editPath, "utf8"), "after\n");
+      assert.equal(await readFile(writePath, "utf8"), "PRIVATE E2E WRITE BODY\n");
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("reuses the identity, then stops and archives it", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {

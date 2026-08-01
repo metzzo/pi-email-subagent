@@ -15,6 +15,7 @@
  *   user "E2E DELEGATE [SLOW <ms>] [HIGH] [NOWAIT]" → send_email to the scout
  *   user "E2E DELEGATE REVIEWER ..."                → send_email to the reviewer
  *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
+ *   user "E2E DELEGATE WORK"                        → writable worker performs edit/write/bash
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
  *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
@@ -28,6 +29,7 @@
  * Worker script (system prompt contains "Subagent Role"):
  *   email batch / steer / enforcement prompt → fetch_emails (after optional
  *                                              SLOW delay to simulate work)
+ *   WORK fetch result                        → parallel edit/write/bash, then fetch/reply
  *   fetch_emails result                      → one send_email reply per
  *                                              unanswered email, exact subjects
  *   send_email result                        → "WORKER DONE"
@@ -44,6 +46,7 @@ export const MOCK_PROVIDER_ID = "mock-e2e";
 export const MOCK_MODEL_ID = "mock-e2e";
 export const MOCK_WORKER_ADDRESS = "scout.e2e@mock-e2e.com";
 export const MOCK_REVIEWER_ADDRESS = "reviewer.e2e@mock-e2e.com";
+export const MOCK_WRITER_ADDRESS = "worker.work-e2e@mock-e2e.com";
 export const MOCK_MAIN_ADDRESS = "main@mock-e2e.com";
 const RATE_ADDRESSES = ["scout.e2e", "scout.two", "scout.three", "scout.four"].map((name) => `${name}@mock-e2e.com`);
 
@@ -51,6 +54,7 @@ type ToolCallPlan = { name: string; arguments: Record<string, unknown> };
 type Plan = { toolCalls: ToolCallPlan[] } | { text: string };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+let toolCallSequence = 0;
 
 function messageText(message: Message | undefined): string {
   const content = message?.content as unknown;
@@ -187,14 +191,17 @@ function planMain(messages: readonly Message[]): Plan {
     const priority = lastText.includes("HIGH") ? "high" : "low";
     const crash = lastText.includes("CRASH") ? " CRASH" : "";
     const ignore = lastText.includes("IGNORE") ? " IGNORE" : "";
-    const message = slow
-      ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
-      : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
+    const message = lastText.includes("WORK")
+      ? `WORK: ${lastText}`
+      : slow
+        ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
+        : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
     const send = (to: string): ToolCallPlan => ({
       name: "send_email",
       arguments: { to, subject: "Verify e2e mailbox", message, priority },
     });
     if (lastText.includes("BOTH")) return { toolCalls: [send(MOCK_WORKER_ADDRESS), send(MOCK_REVIEWER_ADDRESS)] };
+    if (lastText.includes("WORK")) return { toolCalls: [send(MOCK_WRITER_ADDRESS)] };
     if (lastText.includes("REVIEWER")) return { toolCalls: [send(MOCK_REVIEWER_ADDRESS)] };
     return { toolCalls: [send(MOCK_WORKER_ADDRESS)] };
   }
@@ -207,6 +214,17 @@ function planWorker(messages: readonly Message[]): Plan {
 
   if (last?.role === "toolResult") {
     if (last.toolName === "fetch_emails") {
+      if (lastText.includes("WORK") && lastToolResultIndex(messages, "bash") < 0) {
+        const paths = /WORK PATH ([^\s<]+) WRITE ([^\s<]+)/.exec(lastText);
+        if (!paths) return { text: "WORKER MISSING PATHS" };
+        return { toolCalls: [
+          { name: "read", arguments: { path: paths[1] } },
+          { name: "edit", arguments: { path: paths[1], edits: [{ oldText: "before\n", newText: "after\n" }] } },
+          { name: "edit", arguments: { path: paths[1], edits: [{ oldText: "SENTINEL_MISSING", newText: "SENTINEL_SECRET_REPLACEMENT" }] } },
+          { name: "write", arguments: { path: paths[2], content: "PRIVATE E2E WRITE BODY\n" } },
+          { name: "bash", arguments: { command: "true" } },
+        ] };
+      }
       const replies = unansweredPairs(lastText).map((pair) => ({
         name: "send_email",
         arguments: {
@@ -225,6 +243,7 @@ function planWorker(messages: readonly Message[]): Plan {
       return { text: "WORKER IDLE" };
     }
     if (last.toolName === "send_email") return { text: "WORKER DONE" };
+    if (last.toolName === "bash") return { toolCalls: [{ name: "fetch_emails", arguments: {} }] };
     return { text: "WORKER PONG" };
   }
 
@@ -286,7 +305,7 @@ function streamMock(model: Model<Api>, context: Context, options?: SimpleStreamO
         output.stopReason = "stop";
       } else {
         for (const call of plan.toolCalls) {
-          const id = `mock_call_${output.timestamp}_${output.content.length}`;
+          const id = `mock_call_${++toolCallSequence}`;
           output.content.push({ type: "toolCall", id, name: call.name, arguments: {} });
           const index = output.content.length - 1;
           stream.push({ type: "toolcall_start", contentIndex: index, partial: output });

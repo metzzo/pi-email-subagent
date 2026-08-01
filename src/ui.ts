@@ -1,15 +1,17 @@
 import { readFile, stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { migrateSessionEntries, parseSessionEntries, type ExtensionContext, type FileEntry, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { migrateSessionEntries, parseSessionEntries, renderDiff, truncateHead, type ExtensionContext, type FileEntry, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
 import { isThinkingLevel } from "./config.ts";
-import type { AgentRecord, BrokerSnapshot, SendEmailInput } from "./types.ts";
+import type { AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
+import { activePathConflicts, aggregateWork, capPatch, countWrite } from "./work-ledger.ts";
 import { errorMessage, truncateText } from "./util.ts";
 
 interface DashboardAction {
-  kind: "close" | "compose" | "conversation" | "stop" | "restart" | "archive" | "clear_failure" | "effort";
+  kind: "close" | "compose" | "conversation" | "diff" | "stop" | "restart" | "archive" | "clear_failure" | "effort";
   address?: string;
+  workItem?: WorkItem;
 }
 
 function statusIcon(state: AgentRecord["state"]): string {
@@ -45,7 +47,7 @@ function stripTerminalSequences(value: string): string {
     .replace(/\x1b[P_X^][\s\S]*?\x1b\\/g, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/\x1b[@-_]/g, "")
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, "");
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "");
 }
 
 export function sanitizeConversationBody(value: string): string {
@@ -56,9 +58,10 @@ export function sanitizeConversationLabel(value: string): string {
   return sanitizeConversationBody(value).replace(/\s+/g, " ").trim();
 }
 
-function stringify(value: unknown): string {
-  if (value === undefined) return "{}";
-  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+function safeActivitySummary(value: string): string {
+  const clean = sanitizeConversationLabel(value);
+  if (/^(?:edit|write)\s+\{/i.test(clean)) return `${clean.split(/\s/, 1)[0]} (legacy mutation arguments hidden)`;
+  return clean;
 }
 
 function visibleMessageContent(content: unknown): string {
@@ -71,7 +74,19 @@ function visibleMessageContent(content: unknown): string {
     if (block.type === "text" && typeof block.text === "string") parts.push(block.text);
     else if (block.type === "image") parts.push(`[image: ${String(block.mimeType ?? block.mediaType ?? "unknown")}]`);
     else if (block.type === "toolCall") {
-      parts.push(`→ ${String(block.name ?? "tool")}\n${stringify(block.arguments)}`);
+      const name = String(block.name ?? "tool");
+      const args = block.arguments && typeof block.arguments === "object" ? block.arguments as Record<string, unknown> : {};
+      if (name === "write") {
+        const size = countWrite(args.content);
+        parts.push(`✎ write ${truncateText(String(args.path ?? "(unknown path)"), 500)} · ${size.bytesWritten ?? "?"} bytes · ${size.linesWritten ?? "?"} lines`);
+      } else if (name === "edit") {
+        const blocks = Array.isArray(args.edits) ? args.edits.length : (typeof args.oldText === "string" ? 1 : 0);
+        parts.push(`✎ edit ${truncateText(String(args.path ?? "(unknown path)"), 500)} · ${blocks} replacement block${blocks === 1 ? "" : "s"}`);
+      } else if (name === "bash") parts.push(`→ bash ${truncateText(String(args.command ?? ""), 240)}`);
+      else if (name === "read" || name === "grep" || name === "find" || name === "ls") parts.push(`→ ${name} ${truncateText(String(args.path ?? args.pattern ?? ""), 500)}`);
+      else if (name === "send_email") parts.push(`→ send_email ${truncateText(String(args.to ?? ""), 200)} · ${truncateText(String(args.subject ?? ""), 200)} · body hidden`);
+      else if (name === "fetch_emails") parts.push("→ fetch_emails");
+      else parts.push(`→ ${truncateText(name, 100)} (arguments hidden)`);
     }
     // Deliberately omit thinking blocks: the dashboard must not expose hidden reasoning.
   }
@@ -93,11 +108,21 @@ export function conversationBlocks(entries: readonly SessionEntry[]): Conversati
         blocks.push({ at, role: "assistant", label: "Assistant", body: sanitizeConversationBody(body || "(no visible response content)") });
       } else if (role === "toolResult") {
         const failed = message.isError === true;
+        const toolName = String(message.toolName ?? "tool");
+        let resultBody = body || "(empty result)";
+        if ((toolName === "write" || toolName === "edit") && failed) resultBody = `${toolName} failed (mutation bodies hidden)`;
+        if (toolName === "write" && !failed) resultBody = "write completed (content hidden)";
+        if (toolName === "edit" && !failed && message.details && typeof message.details === "object") {
+          const details = message.details as Record<string, unknown>;
+          const patch = capPatch(typeof details.patch === "string" ? details.patch : details.diff);
+          resultBody = patch.patchPreview || resultBody;
+          if (patch.patchTruncated) resultBody += "\n[patch preview truncated; persisted tool result may contain more]";
+        }
         blocks.push({
           at,
           role: failed ? "error" : "tool",
-          label: sanitizeConversationLabel(`Tool result · ${String(message.toolName ?? "tool")}`),
-          body: sanitizeConversationBody(body || "(empty result)"),
+          label: sanitizeConversationLabel(`Tool result · ${toolName}`),
+          body: sanitizeConversationBody(resultBody),
         });
       } else if (role === "bashExecution") {
         blocks.push({
@@ -161,6 +186,33 @@ export async function readConversationBlocks(sessionFile: string): Promise<Conve
   const entries = parseSessionEntries(content);
   migrateSessionEntries(entries);
   return conversationBlocks(activeSessionBranch(entries));
+}
+
+const patchIndexCache = new Map<string, { signature: string; patches: Map<string, { patch: string; truncated: boolean }> }>();
+
+export async function readPersistedEditPatch(sessionFile: string, toolCallId: string): Promise<{ patch: string; truncated: boolean } | undefined> {
+  const info = await stat(sessionFile);
+  if (info.size > 20 * 1024 * 1024) throw new Error("session exceeds 20 MB diff lookup bound");
+  const signature = `${info.size}:${info.mtimeMs}`;
+  const cached = patchIndexCache.get(sessionFile);
+  if (cached?.signature === signature) return cached.patches.get(toolCallId);
+  const content = await readFile(sessionFile, "utf8");
+  const entries = parseSessionEntries(content);
+  migrateSessionEntries(entries);
+  const patches = new Map<string, { patch: string; truncated: boolean }>();
+  for (const entry of activeSessionBranch(entries)) {
+    if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "edit") continue;
+    const details = entry.message.details;
+    if (!details || typeof details !== "object") continue;
+    const raw = details as Record<string, unknown>;
+    const patch = typeof raw.patch === "string" ? raw.patch : raw.diff;
+    if (typeof patch !== "string" || !patch) continue;
+    const capped = truncateHead(patch, { maxBytes: 50 * 1024, maxLines: 2_000 });
+    patches.set(entry.message.toolCallId, { patch: capped.content, truncated: capped.truncated });
+  }
+  patchIndexCache.set(sessionFile, { signature, patches });
+  while (patchIndexCache.size > 32) patchIndexCache.delete(patchIndexCache.keys().next().value!);
+  return patches.get(toolCallId);
 }
 
 export class ConversationSource {
@@ -381,10 +433,68 @@ export class ConversationComponent {
   }
 }
 
+export class WorkDiffComponent {
+  private offset = 0;
+  private pageSize = 1;
+  private maxOffset = 0;
+  private cachedWidth?: number;
+  private cachedLines?: string[];
+  constructor(
+    private readonly address: string,
+    private readonly item: WorkItem,
+    private readonly done: () => void,
+    private readonly requestRender: () => void,
+    private readonly theme: ExtensionContext["ui"]["theme"],
+    private readonly viewportRows: number | (() => number),
+  ) {}
+  private rows(): number { return typeof this.viewportRows === "function" ? this.viewportRows() : this.viewportRows; }
+  render(width: number): string[] {
+    const safeWidth = Math.max(1, width);
+    const patch = sanitizeConversationBody(this.item.patchPreview ?? "(patch unavailable; reopen after the session result is persisted)");
+    let rendered = this.cachedWidth === safeWidth ? this.cachedLines : undefined;
+    if (!rendered) {
+      let themedPatch: string;
+      try { themedPatch = renderDiff(patch, { filePath: sanitizeConversationLabel(this.item.displayPath ?? "") }); }
+      catch { themedPatch = patch; }
+      rendered = themedPatch.split("\n").flatMap((line) => wrapTextWithAnsi(line, safeWidth));
+      this.cachedWidth = safeWidth; this.cachedLines = rendered;
+    }
+    this.pageSize = Math.max(1, this.rows() - 5);
+    this.maxOffset = Math.max(0, rendered.length - this.pageSize);
+    this.offset = Math.min(this.offset, this.maxOffset);
+    const stats = this.item.linesAdded === undefined || this.item.linesRemoved === undefined ? "patch stats unknown" : `+${this.item.linesAdded}/-${this.item.linesRemoved}`;
+    const truncated = this.item.patchTruncated
+      ? (this.item.patchSource === "session" ? " · persisted patch capped at 50 KB/2,000 lines" : " · event preview truncated; close/reopen to retry session artifact")
+      : "";
+    return [
+      this.theme.fg("accent", this.theme.bold(`Edit diff · ${sanitizeConversationLabel(this.address)}`)),
+      this.theme.fg("dim", `${this.item.startedAt.slice(11, 19)} · ${sanitizeConversationLabel(this.item.displayPath ?? "unknown path")} · ${stats}${truncated}`),
+      this.theme.fg("borderMuted", "─".repeat(Math.min(80, safeWidth))),
+      ...rendered.slice(this.offset, this.offset + this.pageSize),
+      this.theme.fg("dim", `lines ${this.offset + 1}-${Math.min(rendered.length, this.offset + this.pageSize)}/${rendered.length} · ↑↓ scroll · pgup/pgdn · home/end · d or esc close`),
+    ].map((line) => truncateToWidth(line, safeWidth));
+  }
+  invalidate(): void { this.cachedWidth = undefined; this.cachedLines = undefined; }
+  handleInput(data: string): void {
+    if (data === "d" || matchesKey(data, Key.escape)) { this.done(); return; }
+    if (matchesKey(data, Key.up)) this.offset = Math.max(0, this.offset - 1);
+    else if (matchesKey(data, Key.down)) this.offset = Math.min(this.maxOffset, this.offset + 1);
+    else if (matchesKey(data, Key.pageUp)) this.offset = Math.max(0, this.offset - this.pageSize);
+    else if (matchesKey(data, Key.pageDown)) this.offset = Math.min(this.maxOffset, this.offset + this.pageSize);
+    else if (matchesKey(data, Key.home)) this.offset = 0;
+    else if (matchesKey(data, Key.end)) this.offset = this.maxOffset;
+    this.requestRender();
+  }
+}
+
 export class DashboardComponent {
   private selected = 0;
   private detail = false;
-  private inbox = false;
+  private tab: "work" | "activity" | "inbox" | "profile" = "work";
+  private inboxReturn: "work" | "activity" | "profile" = "work";
+  private workSelected = 0;
+  private feedback?: string;
+  private refreshTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly getSnapshot: () => BrokerSnapshot,
@@ -394,11 +504,43 @@ export class DashboardComponent {
     private readonly theme: ExtensionContext["ui"]["theme"],
     initialAddress?: string,
     private readonly isConversationKey: (data: string) => boolean = (data) => matchesKey(data, Key.ctrl("o")),
+    private readonly viewportRows: number | (() => number) = 24,
   ) {
     if (initialAddress) {
       const index = getSnapshot().agents.findIndex((agent) => agent.address === initialAddress);
       if (index >= 0) this.selected = index;
     }
+    this.refreshTimer = setInterval(() => {
+      if (this.getSnapshot().agents.some((agent) => (agent.work?.active.length ?? 0) > 0)) this.requestRender();
+    }, 1_000);
+    this.refreshTimer.unref?.();
+  }
+
+  dispose(): void {
+    if (this.refreshTimer) clearInterval(this.refreshTimer);
+    this.refreshTimer = undefined;
+  }
+
+  private visualWorkItems(agent: AgentRecord): WorkItem[] {
+    const recent = [...(agent.work?.recent ?? [])].reverse();
+    return [...(agent.work?.active ?? []), ...recent.filter((item) => item.attribution === "explicit"), ...recent.filter((item) => item.attribution === "unverified")];
+  }
+
+  private rows(): number { return typeof this.viewportRows === "function" ? this.viewportRows() : this.viewportRows; }
+
+  private formatWorkLine(item: WorkItem, selected: boolean, conflicts: Map<string, string[]>): string {
+    const marker = selected ? ">" : " ";
+    const icon = item.status === "running" ? (item.attribution === "explicit" ? "✎" : "?") : item.status === "succeeded" ? (item.attribution === "explicit" ? "✓" : "?") : item.status === "failed" ? "✗" : "!";
+    const target = sanitizeConversationLabel(item.displayPath ?? item.commandPreview ?? "(target unknown)");
+    const toolName = sanitizeConversationLabel(item.toolName).slice(0, 100) || "tool";
+    let outcome: string = item.status === "running" ? `running ${Math.max(0, Math.floor((Date.now() - Date.parse(item.startedAt)) / 1_000))}s` : item.status;
+    if (item.status === "succeeded" && item.kind === "edit") outcome = item.linesAdded === undefined || item.linesRemoved === undefined ? "patch stats unknown" : `+${item.linesAdded}/-${item.linesRemoved}`;
+    else if (item.status === "succeeded" && item.kind === "write") outcome = item.bytesWritten === undefined || item.linesWritten === undefined ? "size unknown" : `${item.bytesWritten} bytes · ${item.linesWritten} lines`;
+    else if (item.status === "succeeded" && item.attribution === "unverified") outcome = "ok · file effects unknown";
+    else if (item.status === "failed") outcome = `failed${item.error ? ` · ${item.error}` : ""}`;
+    const warning = item.path && conflicts.has(item.path) ? ` · ⚠ concurrent explicit edit (${conflicts.get(item.path)!.length} agents)` : "";
+    const line = `${marker} ${item.startedAt.slice(11, 19)} ${icon} ${toolName.padEnd(6)} ${target}  ${outcome}${warning}`;
+    return this.theme.fg(item.status === "failed" ? "error" : warning ? "warning" : selected ? "accent" : "text", line);
   }
 
   render(width: number): string[] {
@@ -408,13 +550,16 @@ export class DashboardComponent {
     const lines: string[] = [];
     lines.push(this.theme.fg("accent", this.theme.bold("Pi Email Subagents")));
     const mainAddress = sanitizeConversationLabel(snapshot.mainAddress);
-    lines.push(this.theme.fg("dim", `main: ${mainAddress} · ${agents.length} agents · ${snapshot.unanswered} unanswered · ${snapshot.queuedMail} queued`));
+    const conflicts = activePathConflicts(agents);
+    lines.push(this.theme.fg("dim", `main: ${mainAddress} · ${agents.length} agents · ${snapshot.unanswered} unanswered · ${snapshot.queuedMail} queued${conflicts.size ? ` · ⚠ ${conflicts.size} active path conflict${conflicts.size === 1 ? "" : "s"}` : ""}`));
     lines.push(this.theme.fg("borderMuted", "─".repeat(Math.max(1, Math.min(width, 80)))));
 
     if (agents.length === 0) {
       lines.push(this.theme.fg("muted", "No subagents. send_email() to a valid unknown address to create one."));
-    } else if (!this.detail && !this.inbox) {
-      for (let index = 0; index < agents.length; index += 1) {
+    } else if (!this.detail) {
+      const visibleAgents = Math.max(1, Math.floor((this.rows() - 5) / 3));
+      const agentStart = Math.max(0, Math.min(this.selected - Math.floor(visibleAgents / 2), agents.length - visibleAgents));
+      for (let index = agentStart; index < Math.min(agents.length, agentStart + visibleAgents); index += 1) {
         const agent = agents[index]!;
         const selected = index === this.selected;
         const color = agent.state === "failed" ? "error" : agent.state === "running" ? "success" : selected ? "accent" : "text";
@@ -424,9 +569,18 @@ export class DashboardComponent {
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg(color, `${prefix} ${statusIcon(agent.state)} ${address}`));
         lines.push(this.theme.fg("dim", `    ${agent.state} · ${modelId} · effort ${agent.effort} · ${usage}`));
-        if (agent.currentActivity) {
-          lines.push(this.theme.fg("muted", `    ${truncateText(sanitizeConversationLabel(agent.currentActivity), 120)}`));
-        }
+        const work = agent.work;
+        const active = [...(work?.active ?? [])].sort((a, b) => (a.attribution === "explicit" ? -1 : 1) - (b.attribution === "explicit" ? -1 : 1));
+        const now = active[0];
+        const aggregate = work ? aggregateWork(work) : { files: 0, linesAdded: 0, linesRemoved: 0, writes: 0, unverified: 0, statsUnknown: false };
+        const elapsed = now ? Math.max(0, Math.floor((Date.now() - Date.parse(now.startedAt)) / 1_000)) : 0;
+        const nowText = now ? `${now.status === "running" ? (now.kind === "edit" ? "editing" : now.kind === "write" ? "writing" : `${now.toolName} (unverified effects)`) : now.toolName} ${now.displayPath ?? now.commandPreview ?? ""} (${elapsed}s)${active.length > 1 ? ` +${active.length - 1} more` : ""}` : safeActivitySummary(agent.currentActivity ?? "idle");
+        const aggregateText = aggregate.files || aggregate.unverified
+          ? ` · run: ${aggregate.files} files${aggregate.statsUnknown ? " · patch stats unknown" : ` +${aggregate.linesAdded}/-${aggregate.linesRemoved}`}${aggregate.writes ? ` · ${aggregate.writes} writes` : ""}${aggregate.unverified ? ` · ${aggregate.unverified} unverified attempts` : ""}`
+          : "";
+        const anyConflict = active.find((item) => item.path && conflicts.has(item.path));
+        const participants = anyConflict?.path ? conflicts.get(anyConflict.path) : undefined;
+        lines.push(this.theme.fg(participants ? "warning" : "muted", `    now: ${truncateText(sanitizeConversationLabel(nowText), 100)}${aggregateText}${participants ? ` · ⚠ concurrent explicit edit (${participants.length} agents)` : ""}`));
       }
     } else {
       const agent = agents[this.selected];
@@ -435,41 +589,73 @@ export class DashboardComponent {
         const provider = sanitizeConversationLabel(agent.provider);
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg("accent", `${statusIcon(agent.state)} ${address}`));
-        lines.push(this.theme.fg("muted", `${agent.state} · ${provider}/${modelId} · effort ${agent.effort}`));
-        lines.push(this.theme.fg("dim", `tools: ${agent.tools.map(sanitizeConversationLabel).join(", ")}`));
+        const writable = agent.tools.some((tool) => tool === "edit" || tool === "write" || tool === "bash");
+        lines.push(this.theme.fg("muted", `${agent.state} · ${provider}/${modelId} · effort ${agent.effort} · ${writable ? "writable" : "read-only"}`));
+        lines.push(this.theme.fg("dim", `[${this.tab === "work" ? "Work" : "work"}] [${this.tab === "activity" ? "Activity" : "activity"}] [${this.tab === "inbox" ? "Inbox" : "inbox"}] [${this.tab === "profile" ? "Profile/Lifecycle" : "profile/lifecycle"}]`));
+        // Keep deadline disclosure visible in every detail tab; Profile adds tools/failure context.
         lines.push(this.theme.fg("dim", `lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms · prompt ${agent.lifecycle.promptAcceptanceTimeoutMs}ms · run ${agent.lifecycle.runTimeoutMs}ms · idle ${agent.lifecycle.idleTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
-        if (agent.failure) lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
         lines.push("");
-        if (this.inbox) {
+        if (this.tab === "work") {
+          const active = agent.work?.active ?? [];
+          const recent = [...(agent.work?.recent ?? [])].reverse();
+          const items = this.visualWorkItems(agent);
+          this.workSelected = Math.min(this.workSelected, Math.max(0, items.length - 1));
+          const maxWorkRows = Math.max(1, this.rows() - 13);
+          const workStart = Math.max(0, Math.min(this.workSelected - Math.floor(maxWorkRows / 2), items.length - maxWorkRows));
+          const visibleIds = new Set(items.slice(workStart, workStart + maxWorkRows).map((item) => item.toolCallId));
+          const visibleActive = active.filter((item) => visibleIds.has(item.toolCallId));
+          if (visibleActive.length) lines.push(this.theme.fg("toolTitle", "Now"));
+          for (const item of visibleActive) lines.push(this.formatWorkLine(item, items.indexOf(item) === this.workSelected, conflicts));
+          const mutations = recent.filter((item) => item.attribution === "explicit");
+          const visibleMutations = mutations.filter((item) => visibleIds.has(item.toolCallId));
+          if (visibleMutations.length) lines.push(this.theme.fg("toolTitle", "Confirmed and attempted mutations"));
+          for (const item of visibleMutations) {
+            const index = items.indexOf(item);
+            lines.push(this.formatWorkLine(item, index === this.workSelected, conflicts));
+          }
+          const unverified = recent.filter((item) => item.attribution === "unverified");
+          const visibleUnverified = unverified.filter((item) => visibleIds.has(item.toolCallId));
+          if (visibleUnverified.length) lines.push(this.theme.fg("toolTitle", "Unverified effects"));
+          for (const item of visibleUnverified) {
+            const index = items.indexOf(item);
+            lines.push(this.formatWorkLine(item, index === this.workSelected, conflicts));
+          }
+          const inspection = agent.work?.inspection ?? { reads: 0, searches: 0, listings: 0 };
+          lines.push(this.theme.fg("dim", `Inspection this run: ${inspection.reads} reads · ${inspection.searches} searches · ${inspection.listings} listings`));
+          if (agent.work?.recoveryError) lines.push(this.theme.fg("warning", `recovery diagnostic: ${sanitizeConversationLabel(agent.work.recoveryError)}`));
+        } else if (this.tab === "activity") {
+          lines.push(this.theme.fg("toolTitle", "Recent activity"));
+          for (const item of agent.activity.slice(-15)) {
+            const color = item.kind === "error" ? "error" : item.kind === "tool" ? "accent" : "muted";
+            lines.push(this.theme.fg(color, `${item.at.slice(11, 19)} ${item.kind.padEnd(6)} ${safeActivitySummary(item.summary)}`));
+          }
+          if (agent.activity.length === 0) lines.push(this.theme.fg("muted", "(none)"));
+        } else if (this.tab === "inbox") {
           const emails = this.getInbox(agent.address);
           lines.push(this.theme.fg("toolTitle", `Unanswered email (${emails.length})`));
           if (emails.length === 0) lines.push(this.theme.fg("muted", "(none)"));
           for (const email of emails) {
-            const subject = sanitizeConversationLabel(email.subject);
-            const id = sanitizeConversationLabel(email.id);
-            const from = sanitizeConversationLabel(email.from);
-            const body = sanitizeConversationLabel(email.message);
-            lines.push(this.theme.fg(email.priority === "high" ? "warning" : "accent", `[${email.priority.toUpperCase()}] ${subject}`));
-            lines.push(this.theme.fg("dim", `${id} · from ${from}`));
-            lines.push(this.theme.fg("text", truncateText(body, 180)));
+            lines.push(this.theme.fg(email.priority === "high" ? "warning" : "accent", `[${email.priority.toUpperCase()}] ${sanitizeConversationLabel(email.subject)}`));
+            lines.push(this.theme.fg("dim", `${sanitizeConversationLabel(email.id)} · from ${sanitizeConversationLabel(email.from)}`));
+            const excerpt = sanitizeConversationBody(email.message).slice(0, 500);
+            for (const excerptLine of wrapTextWithAnsi(this.theme.fg("text", excerpt), Math.max(1, width - 2)).slice(0, 3)) lines.push(`  ${excerptLine}`);
           }
         } else {
-          lines.push(this.theme.fg("toolTitle", "Recent activity"));
-          const activity = agent.activity.slice(-15);
-          if (activity.length === 0) lines.push(this.theme.fg("muted", "(none)"));
-          for (const item of activity) {
-            const time = item.at.slice(11, 19);
-            const color = item.kind === "error" ? "error" : item.kind === "tool" ? "accent" : "muted";
-            const summary = truncateText(sanitizeConversationLabel(item.summary), 180);
-            lines.push(this.theme.fg(color, `${time} ${item.kind.padEnd(6)} ${summary}`));
-          }
+          lines.push(this.theme.fg("dim", `tools: ${agent.tools.map(sanitizeConversationLabel).join(", ")}`));
+          if (agent.failure) lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
         }
       }
     }
 
+    if (this.feedback) lines.push(this.theme.fg("warning", this.feedback));
     lines.push(this.theme.fg("borderMuted", "─".repeat(Math.max(1, Math.min(width, 80)))));
-    lines.push(this.theme.fg("dim", "↑↓ select · enter detail · ctrl+o conversation · i inbox · e email · k stop · r restart · a archive · x clear failure · m effort · esc close/back"));
-    return lines.map((line) => truncateToWidth(line, Math.max(1, width)));
+    const help = this.detail
+      ? (this.tab === "work" ? "↑↓ select work · d diff · tab tabs · i inbox/back · ctrl+o conversation · e email · k stop · r restart · a archive · x clear · m effort · esc back" : "tab tabs · i inbox/back · ctrl+o conversation · e email · k stop · r restart · a archive · x clear · m effort · esc back")
+      : "↑↓ select · enter detail · ctrl+o conversation · i inbox · e email · k stop · r restart · a archive · x clear · m effort · esc close";
+    lines.push(this.theme.fg("dim", help));
+    const rowLimit = Math.max(6, this.rows());
+    const bounded = lines.length <= rowLimit ? lines : [...lines.slice(0, rowLimit - 2), this.theme.fg("dim", "… more rows hidden; navigate to inspect …"), lines.at(-1)!];
+    return bounded.map((line) => truncateToWidth(line, Math.max(1, width)));
   }
 
   invalidate(): void {}
@@ -482,21 +668,33 @@ export class DashboardComponent {
       return;
     }
     if (matchesKey(data, Key.escape)) {
-      if (this.detail || this.inbox) {
+      if (this.detail) {
         this.detail = false;
-        this.inbox = false;
+        this.tab = "work";
         this.requestRender();
       } else this.done({ kind: "close" });
       return;
     }
-    if (matchesKey(data, Key.up) && agents.length > 0) this.selected = (this.selected - 1 + agents.length) % agents.length;
-    else if (matchesKey(data, Key.down) && agents.length > 0) this.selected = (this.selected + 1) % agents.length;
+    const agent = agents[this.selected];
+    const workItems = agent ? this.visualWorkItems(agent) : [];
+    if (this.detail && this.tab === "work" && matchesKey(data, Key.up) && workItems.length > 0) this.workSelected = (this.workSelected - 1 + workItems.length) % workItems.length;
+    else if (this.detail && this.tab === "work" && matchesKey(data, Key.down) && workItems.length > 0) this.workSelected = (this.workSelected + 1) % workItems.length;
+    else if (!this.detail && matchesKey(data, Key.up) && agents.length > 0) this.selected = (this.selected - 1 + agents.length) % agents.length;
+    else if (!this.detail && matchesKey(data, Key.down) && agents.length > 0) this.selected = (this.selected + 1) % agents.length;
     else if (matchesKey(data, Key.enter) && agents.length > 0) {
-      this.detail = !this.detail;
-      this.inbox = false;
+      this.detail = true;
+      this.tab = "work";
+    } else if (matchesKey(data, Key.tab) && this.detail) {
+      const tabs = ["work", "activity", "inbox", "profile"] as const;
+      this.tab = tabs[(tabs.indexOf(this.tab) + 1) % tabs.length]!;
     } else if (data === "i" && agents.length > 0) {
-      this.inbox = !this.inbox;
-      this.detail = false;
+      this.detail = true;
+      if (this.tab === "inbox") this.tab = this.inboxReturn;
+      else { this.inboxReturn = this.tab; this.tab = "inbox"; }
+    } else if (data === "d" && this.detail && this.tab === "work") {
+      const item = workItems[this.workSelected];
+      if (item?.kind === "edit" && item.status === "succeeded" && (item.patchPreview || item.patchAvailable)) this.done({ kind: "diff", address: agent!.address, workItem: item });
+      else this.feedback = "No diff is available for the selected item.";
     } else if (data === "e") this.done({ kind: "compose", address: agents[this.selected]?.address });
     else if (data === "k" && agents[this.selected]) this.done({ kind: "stop", address: agents[this.selected]!.address });
     else if (data === "r" && agents[this.selected]) this.done({ kind: "restart", address: agents[this.selected]!.address });
@@ -542,7 +740,11 @@ export class UIController {
       const idle = agents.filter((agent) => agent.state === "idle").length;
       const failed = agents.filter((agent) => agent.state === "failed").length;
       const other = agents.length - running - queued - idle - failed;
-      const line = `Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${failed ? ` · ${failed} failed` : ""}${other ? ` · ${other} paused/stopped/archived` : ""}`;
+      const activeMutations = agents.flatMap((agent) => (agent.work?.active ?? []).filter((item) => item.attribution === "explicit").map((item) => sanitizeConversationLabel(`${agent.name}: ${item.kind} ${item.displayPath ?? "unknown"}`)));
+      const conflicts = activePathConflicts(agents);
+      const work = activeMutations.length ? ` · now ${activeMutations.slice(0, 2).join("; ")}${activeMutations.length > 2 ? ` +${activeMutations.length - 2}` : ""}` : "";
+      const warning = conflicts.size ? ` · ⚠ ${conflicts.size} path conflict${conflicts.size === 1 ? "" : "s"}` : "";
+      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${failed ? ` · ${failed} failed` : ""}${other ? ` · ${other} paused/stopped/archived` : ""}${work}${warning}`, 240);
       // The below-editor widget is the canonical agents bar. Clear the legacy
       // footer status instead of rendering a redundant, unaligned `agents:0/1`.
       this.ctx.ui.setStatus("pi-email-subagent", undefined);
@@ -567,6 +769,7 @@ export class UIController {
           theme,
           initial,
           (data) => keybindings.matches(data, "app.tools.expand") || matchesKey(data, Key.ctrl("o")),
+          () => Math.max(8, tui.terminal.rows - 2),
         );
       });
       this.requestDashboardRender = undefined;
@@ -575,6 +778,7 @@ export class UIController {
       try {
         if (action.kind === "compose") await this.compose(ctx, broker, action.address);
         else if (action.kind === "conversation" && action.address) await this.showConversation(ctx, broker, action.address);
+        else if (action.kind === "diff" && action.address && action.workItem) await this.showDiff(ctx, broker, action.address, action.workItem);
         else if (action.kind === "stop" && action.address) await broker.stop(action.address);
         else if (action.kind === "restart" && action.address) await broker.restart(action.address);
         else if (action.kind === "archive" && action.address) await broker.archive(action.address);
@@ -584,6 +788,20 @@ export class UIController {
         ctx.ui.notify(errorMessage(error), "error");
       }
     }
+  }
+
+  private async showDiff(ctx: ExtensionContext, broker: AgentBroker, address: string, item: WorkItem): Promise<void> {
+    let displayItem = broker.getWorkItem(address, item.toolCallId) ?? item;
+    const sessionFile = broker.getSnapshot().agents.find((agent) => agent.address === address)?.sessionFile;
+    if (sessionFile) {
+      try {
+        const persisted = await readPersistedEditPatch(sessionFile, item.toolCallId);
+        if (persisted) displayItem = { ...item, patchPreview: persisted.patch, patchTruncated: persisted.truncated, patchSource: "session" };
+      } catch { /* the event/registry preview remains usable while JSONL is being appended */ }
+    }
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => new WorkDiffComponent(
+      address, displayItem, done, () => tui.requestRender(), theme, () => Math.max(6, tui.terminal.rows - 2),
+    ));
   }
 
   private async showConversation(ctx: ExtensionContext, broker: AgentBroker, address: string): Promise<void> {

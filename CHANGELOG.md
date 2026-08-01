@@ -14,12 +14,14 @@ All notable changes to this project are documented here. The format follows [Kee
 - Real scripted-provider Pi RPC E2E suite plus optional paid live-provider acceptance.
 - Single-writer filesystem lease per persistent parent-session namespace with owner diagnostics and stale-lock recovery.
 - Initial-delegation lifecycle policies with finite defaults/maxima, durable crash-safe spawn intent, runtime watchdogs, bounded cleanup/shutdown, and inspection/dashboard disclosure.
+- Work-first `/agents` telemetry and UI: correlated edit/write outcomes, patch statistics and bounded diffs, unverified shell/custom effects, inspection counters, exact-path active warnings, and session-backed crash recovery.
 
 ### Changed
 
 - Tool string enums now use Google-compatible schemas.
 - Tool failures use Pi's native thrown-error contract.
 - Mail and joined-reply tool output is bounded to Pi's context-safe byte/line recommendations.
+- Conversation rendering collapses mutation arguments and never dumps raw write/replacement content; edit results use bounded patch previews.
 
 ### Security
 

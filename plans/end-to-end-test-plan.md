@@ -110,7 +110,7 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 
 1. Open `/agents` while two workers are active.
 2. Navigate with arrows; inspect detail with Enter and inbox with `i`.
-3. Press `Ctrl+O`; confirm the selected agent's complete recorded conversation opens, refreshes as an active worker appends, arrows/Page Up/Page Down scroll it, and `Ctrl+O` or Escape returns to the dashboard.
+3. Press `Ctrl+O`; confirm the selected agent's visible recorded conversation opens (thinking and bounded/hidden mutation bodies remain omitted), refreshes as an active worker appends, arrows/Page Up/Page Down scroll it, and `Ctrl+O` or Escape returns to the dashboard.
 4. Confirm visible assistant text and tool exchanges are present but hidden thinking and terminal control sequences are absent.
 5. Compose with `e`, stop with `k`, restart with `r`, archive with `a`, clear stale failure with `x`, and change idle effort with `m`.
 6. Confirm archive is rejected for live/obligated agents and effort changes are rejected while running.

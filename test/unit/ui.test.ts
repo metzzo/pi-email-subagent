@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
-import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript, UIController } from "../../src/ui.ts";
+import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript, UIController, WorkDiffComponent } from "../../src/ui.ts";
+import { emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
 import type { AgentRecord, BrokerSnapshot } from "../../src/types.ts";
 
 const fakeTheme = {
@@ -123,6 +124,99 @@ describe("dashboard rendering", () => {
     }
   });
 
+  it("renders work-first list/detail, exact-path warnings and bounded diff view", () => {
+    const first = record(); const second = record(); second.address = "writer.same-path@gpt-5.4-mini.com";
+    first.tools.push("edit"); second.tools.push("write");
+    first.work = emptyWorkState(); second.work = emptyWorkState();
+    first.work.currentBatchId = 1; second.work.currentBatchId = 1;
+    const activeEdit = startWorkItem("e", "edit", { path: "src/ui.ts", edits: [{ oldText: "x", newText: "y" }] }, 1, "/work")!;
+    const activeWrite = startWorkItem("w", "write", { path: "src/ui.ts", content: "private body" }, 1, "/work")!;
+    first.work.active.push(activeEdit); second.work.active.push(activeWrite);
+    const completed = finishWorkItem({ ...activeEdit, toolCallId: "done" }, { details: { patch: "--- a/src/ui.ts\n+++ b/src/ui.ts\n-old\n+new" } }, false);
+    first.work.recent.push(completed);
+    const snapshot = { mainAddress: "main@test.com", agents: [first, second], unanswered: 0, queuedMail: 0 };
+    let action: { kind: string; workItem?: unknown } | undefined;
+    const component = new DashboardComponent(() => snapshot, () => [], (next) => { action = next; }, () => undefined, fakeTheme, undefined, undefined, 12);
+    for (const width of [20, 40, 80, 120]) {
+      const lines = component.render(width);
+      assert.ok(lines.length <= 12);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+      if (width >= 80) assert.match(lines.join("\n"), /conflict|concurrent/i);
+      assert.doesNotMatch(lines.join("\n"), /private body/);
+    }
+    first.work.active = [];
+    second.work.active = [];
+    component.handleInput("\r");
+    component.handleInput("d");
+    assert.equal(action?.kind, "diff");
+    const diff = new WorkDiffComponent(first.address, completed, () => undefined, () => undefined, fakeTheme, 8);
+    for (const width of [20, 40, 80, 120]) {
+      const lines = diff.render(width);
+      assert.ok(lines.length <= 8);
+      assert.ok(lines.every((line) => visibleWidth(line) <= width));
+    }
+    let rows = 7;
+    const unknown = { ...completed, linesAdded: undefined, linesRemoved: undefined, patchPreview: Array.from({ length: 30 }, (_, index) => `+line${index}`).join("\n") };
+    const resizing = new WorkDiffComponent(first.address, unknown, () => undefined, () => undefined, fakeTheme, () => rows);
+    const short = resizing.render(80); assert.match(short.join("\n"), /patch stats unknown/);
+    rows = 12; resizing.invalidate(); const tall = resizing.render(80); assert.ok(tall.length > short.length);
+  });
+
+  it("sanitizes unsafe live path metadata in dashboard, widget, and diff", () => {
+    const agent = record(); agent.work = emptyWorkState();
+    const unsafe = startWorkItem("unsafe", "edit", { path: "safe", edits: [] }, 1, "/work")!;
+    unsafe.displayPath = "bad\u001b]0;title\u0007\n\u202efile"; unsafe.toolName = "edit\t\u001b[31m"; agent.work.active.push(unsafe);
+    const snapshot = { mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0 };
+    const component = new DashboardComponent(() => snapshot, () => [], () => undefined, () => undefined, fakeTheme);
+    const rendered = component.render(80).join("\n"); assert.doesNotMatch(rendered, /\u001b\]|\u0007|\u202e/); component.dispose();
+    const widgets: Array<string[] | undefined> = [];
+    const controller = new UIController(); controller.bind({ ui: { setStatus() {}, setWidget: (_key: string, lines: string[] | undefined) => widgets.push(lines) } } as never); controller.update(snapshot);
+    assert.doesNotMatch((widgets.at(-1) ?? []).join("\n"), /\u001b|\u0007|\u202e/); controller.clear();
+    const terminal = finishWorkItem({ ...unsafe, toolName: "edit" }, { details: { patch: "+safe\u001b]0;pwn\u0007" } }, false);
+    const diff = new WorkDiffComponent(agent.address, terminal, () => undefined, () => undefined, fakeTheme, 8);
+    assert.doesNotMatch(diff.render(80).join("\n"), /\u001b\]|\u0007|\u202e/);
+  });
+
+  it("keeps long agent and work selections visible in short viewports", () => {
+    const agents = Array.from({ length: 10 }, (_, index) => { const value = record(); value.address = `worker.task-${index}@gpt-5.4-mini.com`; return value; });
+    let action: { kind: string; address?: string } | undefined;
+    const list = new DashboardComponent(() => ({ mainAddress: "main@test", agents, unanswered: 0, queuedMail: 0 }), () => [], (next) => { action = next; }, () => undefined, fakeTheme, undefined, undefined, 10);
+    for (let index = 0; index < 9; index++) list.handleInput("\x1b[B");
+    assert.match(list.render(80).join("\n"), /task-9/);
+    list.handleInput("k"); assert.equal(action?.address, agents[9]!.address); list.dispose();
+
+    const agent = record(); agent.work = emptyWorkState(); agent.work.currentBatchId = 1;
+    for (let index = 0; index < 30; index++) {
+      const start = startWorkItem(`id${index}`, "edit", { path: `file-${index}.ts`, edits: [] }, 1, "/work")!;
+      agent.work.recent.push(finishWorkItem(start, { details: { patch: `@@ -1 +1 @@\n-${index}\n+${index + 1}` } }, false));
+    }
+    const detail = new DashboardComponent(() => ({ mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0 }), () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 12);
+    detail.handleInput("\r"); for (let index = 0; index < 29; index++) detail.handleInput("\x1b[B");
+    assert.match(detail.render(80).join("\n"), /file-0\.ts/); // recent visual order is newest to oldest
+    detail.dispose();
+  });
+
+  it("bounds a 64-agent by 48-item heavy ledger render", () => {
+    const agents = Array.from({ length: 64 }, (_, agentIndex) => {
+      const agent = record(); agent.address = `worker.stress-${agentIndex}@gpt-5.4-mini.com`; agent.work = emptyWorkState(); agent.work.currentBatchId = 1;
+      for (let itemIndex = 0; itemIndex < 48; itemIndex++) {
+        const item = finishWorkItem(startWorkItem(`a${agentIndex}-${itemIndex}`, "edit", { path: `f${itemIndex}`, edits: [] }, 1, "/work")!, { details: { patch: `@@ -1 +1 @@\n-${"x".repeat(4_000)}\n+${"y".repeat(4_000)}` } }, false);
+        agent.work.recent.push(item);
+      }
+      return agent;
+    });
+    const component = new DashboardComponent(() => ({ mainAddress: "main", agents, unanswered: 0, queuedMail: 0 }), () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 12);
+    const lines = component.render(80); assert.ok(lines.length <= 12); assert.ok(lines.every((line) => visibleWidth(line) <= 80)); component.dispose();
+  });
+
+  it("refreshes active durations and disposes its timer", async () => {
+    const agent = record(); agent.work = emptyWorkState(); agent.work.active.push(startWorkItem("x", "edit", { path: "x", edits: [] }, 1, "/work")!);
+    let renders = 0;
+    const component = new DashboardComponent(() => ({ mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0 }), () => [], () => undefined, () => { renders += 1; }, fakeTheme);
+    await new Promise((resolve) => setTimeout(resolve, 1_050)); assert.ok(renders >= 1);
+    component.dispose(); const stopped = renders; await new Promise((resolve) => setTimeout(resolve, 1_050)); assert.equal(renders, stopped);
+  });
+
   it("renders the full visible conversation without exposing thinking", () => {
     const timestamp = new Date().toISOString();
     const entries = [
@@ -138,6 +232,10 @@ describe("dashboard rendering", () => {
             { type: "thinking", thinking: "hidden chain of thought" },
             { type: "text", text: "Visible answer with enough words to wrap across narrow terminals." },
             { type: "toolCall", id: "call", name: "read", arguments: { path: "/tmp/example.ts" } },
+            { type: "toolCall", id: "write", name: "write", arguments: { path: "/tmp/write.ts", content: "RAW PRIVATE WRITE" } },
+            { type: "toolCall", id: "edit", name: "edit", arguments: { path: "/tmp/edit.ts", edits: [{ oldText: "RAW OLD", newText: "RAW NEW" }] } },
+            { type: "toolCall", id: "mail", name: "send_email", arguments: { to: "worker@test", subject: "safe", message: "MAIL_SENTINEL_SECRET" } },
+            { type: "toolCall", id: "custom", name: "custom_tool", arguments: { payload: "CUSTOM_SENTINEL_SECRET" } },
           ],
           timestamp: Date.now(), provider: "test", model: "test", api: "test",
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
@@ -159,6 +257,9 @@ describe("dashboard rendering", () => {
     assert.match(serialized, /example\.ts/);
     assert.match(serialized, /Full tool result/);
     assert.doesNotMatch(serialized, /hidden chain of thought/);
+    assert.doesNotMatch(serialized, /RAW PRIVATE WRITE|RAW OLD|RAW NEW|MAIL_SENTINEL_SECRET|CUSTOM_SENTINEL_SECRET/);
+    assert.match(serialized, /write\.ts.*bytes/);
+    assert.match(serialized, /edit\.ts.*replacement block/);
     const transcript = formatConversationTranscript(blocks);
     assert.match(transcript, /Complete request body/);
     assert.match(transcript, /Full tool result/);

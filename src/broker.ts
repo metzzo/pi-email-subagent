@@ -1,5 +1,7 @@
 import { join } from "node:path";
+import { stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from "./address.ts";
 import { resolveAgentProfile, resolveLifecycle } from "./config.ts";
 import { createMailId } from "./id.ts";
@@ -25,11 +27,37 @@ import type {
   WaitForRepliesResult,
   WorkerEvent,
   WorkerTransport,
+  WorkItem,
+  AgentWorkState,
 } from "./types.ts";
-import { byteLength, clone, errorMessage, nowIso } from "./util.ts";
+import { byteLength, clone, errorMessage, nowIso, truncateText } from "./util.ts";
+import { emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 
 function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+}
+
+export function lightweightWorkItem(item: WorkItem): WorkItem {
+  const projected: Record<string, unknown> = {};
+  for (const key of Object.keys(item)) {
+    if (key === "patchPreview") continue;
+    projected[key] = clone((item as unknown as Record<string, unknown>)[key]);
+  }
+  if (Object.prototype.hasOwnProperty.call(item, "patchPreview")) projected.patchAvailable = true;
+  return projected as unknown as WorkItem;
+}
+
+function lightweightWork(work: AgentWorkState): AgentWorkState {
+  return {
+    nextBatchId: work.nextBatchId,
+    ...(work.currentBatchId !== undefined ? { currentBatchId: work.currentBatchId } : {}),
+    ...(work.batchStartedAt !== undefined ? { batchStartedAt: work.batchStartedAt } : {}),
+    ...(work.batchEndedAt !== undefined ? { batchEndedAt: work.batchEndedAt } : {}),
+    ...(work.recoveryError !== undefined ? { recoveryError: work.recoveryError } : {}),
+    active: work.active.map(lightweightWorkItem),
+    recent: work.recent.map(lightweightWorkItem),
+    inspection: { ...work.inspection },
+  };
 }
 
 // Generous upper bound for the `Re: [<mail-id>] ` prefix added to reply subjects.
@@ -96,6 +124,7 @@ export class AgentBroker {
   private readonly changeListeners = new Set<() => void>();
   private readonly collectingRequestIds = new Map<string, number>();
   private readonly collectionClaims = new Map<string, number>();
+  private readonly pendingWorkPersists = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly watchdogs = new Map<string, { generation: number; run?: ReturnType<typeof setTimeout>; idle?: ReturnType<typeof setTimeout> }>();
   private watchdogGeneration = 0;
   private lifecycle: "new" | "initializing" | "active" | "closing" | "closed" = "new";
@@ -168,6 +197,7 @@ export class AgentBroker {
           record.canSpawn = profile.canSpawn;
           record.instructions = profile.instructions;
           if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
+          if (record.state !== "running") this.interruptRecordWork(record);
           this.routableRecords.add(record.address);
         } catch (error) {
           const profile = resolveAgentProfile(this.options.config, record.address, record.name);
@@ -208,11 +238,27 @@ export class AgentBroker {
         }
       }
 
+      // Recover durable mutation outcomes before provider startup or capacity filtering.
+      for (const record of this.records.values()) {
+        if (!record.sessionFile) { this.interruptRecordWork(record); continue; }
+        try {
+          const info = await stat(record.sessionFile);
+          if (info.size > 20 * 1024 * 1024) throw new Error("session exceeds 20 MB recovery bound");
+          const manager = SessionManager.open(record.sessionFile, join(this.options.namespaceDir, "sessions"), this.options.cwd);
+          record.work = recoverMutationWork(manager.getBranch(), this.options.cwd, record.work ?? emptyWorkState());
+        } catch (error) {
+          record.work ??= emptyWorkState();
+          this.interruptRecordWork(record);
+          record.work.recoveryError = truncateText(errorMessage(error), 500);
+        }
+      }
+
       const registered = [...this.records.values()].filter((record) =>
         record.state !== "archived" && this.routableRecords.has(record.address));
       for (const record of registered.slice(0, this.options.config.maxAgents)) this.activationLeases.add(record.address);
       for (const record of registered.slice(this.options.config.maxAgents)) {
         record.state = "paused";
+        this.interruptRecordWork(record);
         record.currentActivity = `Paused by maxAgents capacity (${this.options.config.maxAgents})`;
         record.updatedAt = nowIso();
       }
@@ -270,6 +316,10 @@ export class AgentBroker {
       }
       throw error;
     }
+  }
+
+  private interruptRecordWork(record: AgentRecord): void {
+    if (record.work?.active.length) interruptActive(record.work);
   }
 
   private async restoreQueuedMainMail(generation: number): Promise<void> {
@@ -667,6 +717,7 @@ export class AgentBroker {
       lifecycle: { ...lifecycle },
       usage: emptyUsage(),
       activity: [],
+      work: emptyWorkState(),
     };
   }
 
@@ -694,6 +745,7 @@ export class AgentBroker {
       lifecycle: resolveLifecycle(this.options.config, shape.address, shape.name),
       usage: emptyUsage(),
       activity: [{ at: nowIso(), kind: "error", summary: failure }],
+      work: emptyWorkState(),
     };
   }
 
@@ -817,6 +869,7 @@ export class AgentBroker {
     this.workers.delete(address);
     this.active.delete(address);
     record.state = "failed";
+    this.interruptRecordWork(record);
     record.failure = `${code}: lifecycle watchdog expired`;
     record.currentActivity = record.failure;
     record.updatedAt = nowIso();
@@ -843,6 +896,7 @@ export class AgentBroker {
       current.activity = snapshot.activity.slice(-40);
       current.lastActivityAt = snapshot.lastActivityAt;
       current.currentActivity = snapshot.currentActivity;
+      current.work = snapshot.work ? clone(snapshot.work) : current.work;
       current.updatedAt = nowIso();
     } catch {
       // The worker may emit while start is still constructing its session.
@@ -854,7 +908,7 @@ export class AgentBroker {
     const record = this.records.get(address);
     if (!record) return;
     this.syncWorker(address, worker);
-    if (event.type === "activity") this.touchWatchdog(address);
+    if (event.type === "activity" || event.type === "work") this.touchWatchdog(address);
     if (event.type === "state" && event.state && record.state !== "failed" && record.state !== "stopped") {
       record.state = event.state;
     }
@@ -862,6 +916,7 @@ export class AgentBroker {
       this.clearWatchdog(address);
       const shouldNotify = record.state !== "failed" || record.failure !== event.error;
       record.state = "failed";
+      this.interruptRecordWork(record);
       record.failure = event.error;
       record.currentActivity = `Failed: ${event.error}`;
       record.activity.push({ at: nowIso(), kind: "error", summary: event.error });
@@ -874,9 +929,16 @@ export class AgentBroker {
       return;
     }
     record.updatedAt = nowIso();
-    // Activity-only events are frequent; the registry is a cache, so persist
-    // on state transitions only. Usage and activity are still durable via
-    // settlement, stop, archive, and shutdown persists.
+    // Completed work is important derived cache state. Coalesce siblings that
+    // finish together; active starts stay live through snapshots without a write storm.
+    if (event.type === "work" && event.workItem && event.workItem.status !== "running") {
+      const prior = this.pendingWorkPersists.get(address); if (prior) clearTimeout(prior);
+      const timer = setTimeout(() => {
+        this.pendingWorkPersists.delete(address);
+        if (!this.disposed) swallow(this.persistRegistry());
+      }, 25);
+      timer.unref?.(); this.pendingWorkPersists.set(address, timer);
+    }
     if (event.type === "state" || event.type === "settled") swallow(this.persistRegistry());
     this.publish();
     if (event.type === "settled") {
@@ -1050,7 +1112,7 @@ export class AgentBroker {
     record.state = "running";
     record.enforcementAttempts += 1;
     try {
-      await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1)), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
+      await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1), { newBatch: false }), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
       if (this.disposed || this.workers.get(address) !== worker) return;
       this.startWatchdog(address);
       await this.persistRegistry();
@@ -1079,13 +1141,14 @@ export class AgentBroker {
     try {
       if (!record || record.state === "stopped" || record.state === "failed") return;
       this.syncWorker(address, worker);
+      this.interruptRecordWork(record);
       const outstanding = this.fetchUnanswered(address);
       if (outstanding.length > 0) {
         if (record.enforcementAttempts < this.options.config.responseReminderLimit) {
           record.enforcementAttempts += 1;
           record.state = "running";
           record.currentActivity = `Answering ${outstanding.length} required email${outstanding.length === 1 ? "" : "s"}`;
-          await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1)), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
+          await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1), { newBatch: false }), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
           if (this.disposed || this.workers.get(address) !== worker) return;
           this.startWatchdog(address);
           await this.persistRegistry();
@@ -1174,6 +1237,7 @@ export class AgentBroker {
       this.assertActive();
       this.active.delete(address);
       record.state = "stopped";
+      this.interruptRecordWork(record);
       if (cleanupError) record.failure = `Stop cleanup reported: ${errorMessage(cleanupError)}`;
       record.currentActivity = cleanupError ? `Stopped after abort error: ${errorMessage(cleanupError)}` : "Stopped by user";
       record.updatedAt = nowIso();
@@ -1208,6 +1272,7 @@ export class AgentBroker {
       this.assertActive();
       this.active.delete(address);
       record.state = "paused";
+      this.interruptRecordWork(record);
       delete record.failure;
       record.enforcementAttempts = 0;
       await this.createWorker(parsed, record, this.lifecycleGeneration);
@@ -1254,6 +1319,7 @@ export class AgentBroker {
       const pendingIndex = this.pendingStarts.indexOf(address);
       if (pendingIndex >= 0) this.pendingStarts.splice(pendingIndex, 1);
       record.state = "archived";
+      this.interruptRecordWork(record);
       this.activationLeases.delete(address);
       record.currentActivity = "Archived";
       record.updatedAt = nowIso();
@@ -1458,8 +1524,17 @@ export class AgentBroker {
     });
   }
 
+  getWorkItem(address: string, toolCallId: string): WorkItem | undefined {
+    const work = this.records.get(address)?.work;
+    const item = [...(work?.active ?? []), ...(work?.recent ?? [])].find((candidate) => candidate.toolCallId === toolCallId);
+    return item ? clone(item) : undefined;
+  }
+
   getSnapshot(): BrokerSnapshot {
-    const agents = [...this.records.values()].map(clone).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const agents = [...this.records.values()].map((source) => {
+      const { work, ...withoutWork } = source;
+      return { ...clone(withoutWork), ...(work ? { work: lightweightWork(work) } : {}) } as AgentRecord;
+    }).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     const unanswered = this.mailStore.list().filter((email) => email.requiresResponse && !email.answeredAt && email.deliveryState === "delivered").length;
     return { mainAddress: this.mainAddress, agents, unanswered, queuedMail: this.mailStore.countQueued() };
   }
@@ -1509,6 +1584,7 @@ export class AgentBroker {
       if (record && !["stopped", "failed", "archived"].includes(record.state)) {
         this.syncWorker(address, worker);
         record.state = "paused";
+        this.interruptRecordWork(record);
         record.updatedAt = nowIso();
       }
       this.workerUnsubscribers.get(address)?.();
@@ -1537,6 +1613,8 @@ export class AgentBroker {
     if (this.lifecycle === "closed") return;
     this.lifecycle = "closing";
     this.disposed = true;
+    for (const timer of this.pendingWorkPersists.values()) clearTimeout(timer);
+    this.pendingWorkPersists.clear();
     this.lifecycleGeneration += 1;
     this.emitChange();
     // Operations can reject as soon as `disposed` is visible; observe them

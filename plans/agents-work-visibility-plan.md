@@ -1,7 +1,7 @@
 # `/agents` Work Visibility Plan
 
 Date: 2026-07-30
-Status: implementation-ready
+Status: implemented — automated gates complete; manual interactive TUI acceptance pending
 
 ## Objective
 
@@ -149,7 +149,8 @@ A successful edit item with a patch opens a scrollable diff component:
 - use Pi's exported `renderDiff()` for theme-compatible added/removed/context colors;
 - title includes agent, path, time, and `+A/-R`;
 - cap loaded/rendered content at Pi's 50 KB / 2,000-line tool-output guidance;
-- say exactly when the preview is truncated and direct the operator to `Ctrl+O` conversation for the persisted tool result;
+- on open, upgrade the 8 KB/200-line event preview from the persisted session result when available, bounded to 50 KB/2,000 lines;
+- distinguish event-preview truncation from persisted-session truncation without directing the operator to a less complete view;
 - `d` or `Esc` closes.
 
 For a just-completed edit whose session tool-result artifact has not yet been appended, use the bounded event-captured preview.
