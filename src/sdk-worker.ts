@@ -26,6 +26,7 @@ import type {
 import { formatUnanswered } from "./prompts.ts";
 import { textResult } from "./tool-result.ts";
 import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
+import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem } from "./work-ledger.ts";
 
 const PrioritySchema = StringEnum(["high", "low"] as const);
 const LifecycleSchema = Type.Object({
@@ -167,6 +168,7 @@ export function effectiveWorkerModel(configModel: Model<any>, runtimeModel?: Mod
 
 export class SdkWorker implements WorkerTransport {
   private session?: AgentSession;
+  private sessionManager?: SessionManager;
   private record?: AgentRecord;
   private listeners = new Set<(event: WorkerEvent) => void>();
   private unsubscribeSession?: () => void;
@@ -174,6 +176,7 @@ export class SdkWorker implements WorkerTransport {
   private disposePromise?: Promise<void>;
   private startGeneration = 0;
   private runFailure?: string;
+  private cwd = process.cwd();
 
   constructor(private readonly modelRuntime: ModelRuntime, private readonly runtimeModel?: Model<any>) {}
 
@@ -210,6 +213,8 @@ export class SdkWorker implements WorkerTransport {
     if (this.disposed) throw new Error("Disposed workers cannot be restarted.");
     const generation = ++this.startGeneration;
     this.record = clone(config.record);
+    this.record.work ??= emptyWorkState();
+    this.cwd = config.cwd;
     this.setState("spawning");
 
     const settings = SettingsManager.inMemory(
@@ -233,6 +238,14 @@ export class SdkWorker implements WorkerTransport {
     const sessionManager = resumableSessionFile
       ? SessionManager.open(resumableSessionFile, config.sessionDir, config.cwd)
       : SessionManager.create(config.cwd, config.sessionDir);
+
+    this.sessionManager = sessionManager;
+    try {
+      this.record.work = recoverMutationWork(sessionManager.getBranch(), config.cwd, this.record.work);
+    } catch (error) {
+      this.record.work.recoveryError = truncateText(errorMessage(error), 500);
+      interruptActive(this.record.work);
+    }
 
     const requestedTools = [...this.record.tools];
     const { session } = await createAgentSession({
@@ -277,12 +290,40 @@ export class SdkWorker implements WorkerTransport {
         this.setState("running");
         this.activity("status", "Agent run started");
         break;
-      case "tool_execution_start":
-        this.activity("tool", `${event.toolName} ${JSON.stringify(event.args ?? {})}`);
+      case "tool_execution_start": {
+        const work = this.record.work ??= emptyWorkState();
+        const toolClass = classifyTool(event.toolName);
+        if (toolClass === "inspection") {
+          noteInspection(work.inspection, event.toolName);
+          this.emit({ type: "work" });
+        }
+        const item = startWorkItem(event.toolCallId, event.toolName, event.args, work.currentBatchId ?? 0, this.cwd);
+        if (item) {
+          work.active = [...work.active.filter((candidate) => candidate.toolCallId !== item.toolCallId), item];
+          this.record.updatedAt = item.startedAt;
+          this.emit({ type: "work", workItem: clone(item) });
+          const target = item.displayPath ?? item.commandPreview ?? "";
+          this.activity("tool", `${item.toolName}${target ? ` ${target}` : ""} started`);
+        } else if (toolClass === "mailbox") this.activity("tool", `${event.toolName} started`);
         break;
-      case "tool_execution_end":
-        this.activity(event.isError ? "error" : "tool", `${event.toolName} ${event.isError ? "failed" : "completed"}`);
+      }
+      case "tool_execution_end": {
+        const work = this.record.work ??= emptyWorkState();
+        const index = work.active.findIndex((candidate) => candidate.toolCallId === event.toolCallId);
+        let item = index >= 0 ? work.active[index] : startWorkItem(event.toolCallId, event.toolName, undefined, work.currentBatchId ?? 0, this.cwd);
+        if (index >= 0) work.active.splice(index, 1);
+        if (item) {
+          const mismatch = item.toolName !== event.toolName;
+          item = finishWorkItem(item, mismatch ? undefined : event.result, event.isError || mismatch);
+          appendRecent(work, item);
+          this.emit({ type: "work", workItem: clone(item) });
+          const failed = item.status === "failed";
+          this.activity(failed ? "error" : "tool", `${item.toolName} ${failed ? `failed${item.error ? `: ${item.error}` : ""}` : "completed"}`);
+        } else if (classifyTool(event.toolName) === "mailbox") {
+          this.activity(event.isError ? "error" : "tool", `${event.toolName} ${event.isError ? "failed" : "completed"}`);
+        }
         break;
+      }
       case "message_end": {
         if (event.message.role !== "assistant") break;
         const text = event.message.content
@@ -313,6 +354,10 @@ export class SdkWorker implements WorkerTransport {
         break;
       }
       case "agent_settled":
+        if (this.record.work) {
+          interruptActive(this.record.work);
+          this.record.work.batchEndedAt = nowIso();
+        }
         if (this.runFailure) {
           this.setState("failed");
           this.activity("status", "Agent run failed");
@@ -333,21 +378,35 @@ export class SdkWorker implements WorkerTransport {
     return this.session;
   }
 
-  async prompt(message: string): Promise<void> {
+  async prompt(message: string, options: { newBatch?: boolean } = {}): Promise<void> {
     const session = this.requiredSession();
     if (!session.isIdle) throw new Error("Worker is not idle; use steer or follow-up delivery.");
-    await awaitPromptAcceptance(
-      (preflightResult) => session.prompt(message, {
-        source: "extension",
-        expandPromptTemplates: false,
-        preflightResult,
-      }),
-      (error) => {
-        const messageText = errorMessage(error);
-        this.activity("error", messageText);
-        this.emit({ type: "failure", error: messageText });
-      },
-    );
+    const previousWork = clone(this.record!.work ??= emptyWorkState());
+    const startsBatch = options.newBatch !== false;
+    const batchId = startsBatch ? beginBatch(this.record!.work) : (this.record!.work.currentBatchId ?? beginBatch(this.record!.work));
+    try {
+      await awaitPromptAcceptance(
+        (preflightResult) => session.prompt(message, {
+          source: "extension",
+          expandPromptTemplates: false,
+          preflightResult: (success) => {
+            if (success && startsBatch) this.sessionManager?.appendCustomEntry("pi-email-subagent-work-batch", {
+              batchId,
+              startedAt: this.record!.work!.batchStartedAt,
+            });
+            preflightResult(success);
+          },
+        }),
+        (error) => {
+          const messageText = errorMessage(error);
+          this.activity("error", messageText);
+          this.emit({ type: "failure", error: messageText });
+        },
+      );
+    } catch (error) {
+      this.record!.work = previousWork;
+      throw error;
+    }
   }
 
   async steer(message: string): Promise<void> {
@@ -362,6 +421,7 @@ export class SdkWorker implements WorkerTransport {
     try {
       if (this.session?.isStreaming) await this.session.abort();
     } finally {
+      if (this.record?.work) interruptActive(this.record.work);
       this.setState("stopped");
     }
   }
@@ -373,6 +433,7 @@ export class SdkWorker implements WorkerTransport {
     const session = this.session;
     const unsubscribe = this.unsubscribeSession;
     this.session = undefined;
+    this.sessionManager = undefined;
     this.unsubscribeSession = undefined;
     const operation = (async () => {
       let cleanupError: unknown;

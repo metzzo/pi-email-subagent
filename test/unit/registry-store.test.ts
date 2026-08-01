@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { RegistryStore, parseRegistry } from "../../src/registry-store.ts";
 import type { AgentRecord, BrokerRegistry } from "../../src/types.ts";
+import { emptyWorkState, MAX_ACTIVE_WORK, MAX_PATCH_BYTES, MAX_RECENT_WORK } from "../../src/work-ledger.ts";
 
 function record(address = "worker.registry@gpt-5.4.com"): AgentRecord {
   const now = new Date().toISOString();
@@ -53,12 +54,37 @@ describe("registry schema", () => {
     delete legacy.agents[0]!.canSpawn;
     const parsed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
     assert.equal(parsed.agents[0]?.canSpawn, true);
+    assert.deepEqual(parsed.agents[0]?.work, emptyWorkState());
+    legacy.agents[0]!.currentActivity = 'write {"content":"SENTINEL_SECRET"}';
+    legacy.agents[0]!.activity = [{ at: new Date().toISOString(), kind: "tool", summary: 'edit {"newText":"SENTINEL_SECRET"}' }];
+    const scrubbed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
+    assert.doesNotMatch(JSON.stringify(scrubbed), /SENTINEL_SECRET/);
     delete legacy.agents[0]!.lifecycle;
     const lifecycleLegacy = parseRegistry(JSON.parse(JSON.stringify(legacy)));
     assert.deepEqual(lifecycleLegacy.agents[0]?.lifecycle, DEFAULT_LIFECYCLE);
 
     legacy.agents[0]!.canSpawn = "yes";
     assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);
+  });
+
+  it("bounds registry work caches and rejects malformed or duplicate work IDs", () => {
+    const base = record();
+    const item = {
+      toolCallId: "id", batchId: 1, toolName: "edit", kind: "edit", attribution: "explicit", status: "succeeded",
+      startedAt: new Date().toISOString(), endedAt: new Date().toISOString(), path: "/tmp/a", displayPath: "(absolute) /tmp/a", patchPreview: "+🙂".repeat(MAX_PATCH_BYTES),
+    };
+    base.work = { ...emptyWorkState(), recent: Array.from({ length: MAX_RECENT_WORK + 20 }, (_, index) => ({ ...item, toolCallId: `id${index}` })) } as never;
+    const parsed = parseRegistry({ ...registry(), agents: [base] });
+    assert.equal(parsed.agents[0]!.work!.recent.length, MAX_RECENT_WORK);
+    assert.ok(Buffer.byteLength(parsed.agents[0]!.work!.recent[0]!.patchPreview!, "utf8") <= MAX_PATCH_BYTES);
+    base.work = { ...emptyWorkState(), active: Array.from({ length: MAX_ACTIVE_WORK + 1 }, (_, index) => ({ ...item, toolCallId: `active${index}`, status: "running", endedAt: undefined })), recent: [] } as never;
+    assert.throws(() => parseRegistry({ ...registry(), agents: [base] }), /active exceeds the 64-item safety bound/);
+    base.work = { ...emptyWorkState(), active: [{ ...item, status: "running", endedAt: undefined }], recent: [item] } as never;
+    assert.throws(() => parseRegistry({ ...registry(), agents: [base] }), /duplicate toolCallId/);
+    base.work = { ...emptyWorkState(), active: [{ ...item, toolCallId: "unsafe", status: "running", endedAt: undefined, path: "/tmp/bad\u001b]0;pwn\u0007", displayPath: "bad\nname" }], recent: [] } as never;
+    assert.throws(() => parseRegistry({ ...registry(), agents: [base] }), /explicit work requires a path/);
+    base.work = { nope: true } as never;
+    assert.throws(() => parseRegistry({ ...registry(), agents: [base] }), /work.*malformed/);
   });
 
   it("rejects malformed records and duplicate identities", async () => {

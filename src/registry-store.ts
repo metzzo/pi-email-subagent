@@ -3,12 +3,16 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_LIFECYCLE, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
-import type { ActivityItem, AgentRecord, AgentStatus, BrokerRegistry, LifecyclePolicy, UsageSnapshot } from "./types.ts";
+import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, LifecyclePolicy, UsageSnapshot, WorkItem } from "./types.ts";
+import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
 import { clone, nowIso } from "./util.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const STATES = new Set<AgentStatus>(["queued", "spawning", "running", "idle", "failed", "stopped", "paused", "archived"]);
 const ACTIVITY_KINDS = new Set<ActivityItem["kind"]>(["status", "tool", "text", "error"]);
+const WORK_KINDS = new Set<WorkItem["kind"]>(["edit", "write", "shell", "custom"]);
+const WORK_STATUSES = new Set<WorkItem["status"]>(["running", "succeeded", "failed", "interrupted"]);
+const WORK_ATTRIBUTIONS = new Set<WorkItem["attribution"]>(["explicit", "unverified"]);
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -71,9 +75,91 @@ function parseActivity(value: unknown, label: string): ActivityItem[] {
     return {
       at: string(raw.at, `${label}[${index}].at`),
       kind,
-      summary: string(raw.summary, `${label}[${index}].summary`),
+      summary: /^(?:edit|write)\s+\{/i.test(string(raw.summary, `${label}[${index}].summary`))
+        ? `${String(raw.summary).split(/\s/, 1)[0]} (legacy mutation arguments hidden)`
+        : string(raw.summary, `${label}[${index}].summary`),
     };
   });
+}
+
+function timestamp(value: unknown, label: string): string {
+  const parsed = string(value, label);
+  if (!Number.isFinite(Date.parse(parsed))) throw new Error(`${label} must be a valid timestamp.`);
+  return parsed;
+}
+
+function optionalCount(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 0 || (value as number) > 1_000_000_000_000) throw new Error(`${label} must be a bounded non-negative safe integer.`);
+  return value as number;
+}
+
+function parseWorkItem(value: unknown, label: string): WorkItem {
+  const raw = object(value, label);
+  const kind = string(raw.kind, `${label}.kind`) as WorkItem["kind"];
+  const status = string(raw.status, `${label}.status`) as WorkItem["status"];
+  const attribution = string(raw.attribution, `${label}.attribution`) as WorkItem["attribution"];
+  if (!WORK_KINDS.has(kind) || !WORK_STATUSES.has(status) || !WORK_ATTRIBUTIONS.has(attribution)) throw new Error(`${label} has an invalid work enum.`);
+  if ((kind === "edit" || kind === "write") !== (attribution === "explicit")) throw new Error(`${label} has incoherent attribution.`);
+  if ((kind === "edit" || kind === "write") && raw.toolName !== kind) throw new Error(`${label} has incoherent mutation tool name.`);
+  if (kind === "shell" && raw.toolName !== "bash") throw new Error(`${label} has incoherent shell tool name.`);
+  const batchId = optionalCount(raw.batchId, `${label}.batchId`);
+  if (batchId === undefined) throw new Error(`${label}.batchId is required.`);
+  const rawId = string(raw.toolCallId, `${label}.toolCallId`); const rawName = string(raw.toolName, `${label}.toolName`);
+  if (rawId.length > 200 || rawName.length > 100) throw new Error(`${label} identifiers exceed bounds.`);
+  const item: WorkItem = {
+    toolCallId: capText(rawId, 200)!,
+    batchId,
+    toolName: capText(rawName, 100)!, kind, status, attribution,
+    startedAt: timestamp(raw.startedAt, `${label}.startedAt`),
+  };
+  for (const key of ["durationMs", "editBlocks", "bytesWritten", "linesWritten", "linesAdded", "linesRemoved", "firstChangedLine"] as const) {
+    const parsed = optionalCount(raw[key], `${label}.${key}`); if (parsed !== undefined) item[key] = parsed;
+  }
+  const endedAt = raw.endedAt === undefined ? undefined : timestamp(raw.endedAt, `${label}.endedAt`); if (endedAt) item.endedAt = endedAt;
+  for (const key of ["path", "displayPath"] as const) {
+    const parsed = optionalString(raw[key], `${label}.${key}`); if (parsed !== undefined) item[key] = sanitizeWorkPath(parsed);
+  }
+  const command = capText(raw.commandPreview, MAX_COMMAND_CHARS); if (command) item.commandPreview = command;
+  const error = capText(raw.error, MAX_ERROR_CHARS); if (error) item.error = error;
+  if (typeof raw.patchPreview === "string" && Buffer.byteLength(raw.patchPreview, "utf8") > 1024 * 1024) throw new Error(`${label}.patchPreview exceeds parsing bound.`);
+  const patch = capPatch(raw.patchPreview); if (patch.patchPreview) item.patchPreview = patch.patchPreview;
+  if (raw.patchTruncated === true || patch.patchTruncated) item.patchTruncated = true;
+  if (raw.patchSource === "event" || raw.patchSource === "session") item.patchSource = raw.patchSource;
+  return item;
+}
+
+function parseWork(value: unknown, label: string): AgentWorkState {
+  if (value === undefined) return emptyWorkState();
+  const raw = object(value, label);
+  const nextBatchId = optionalCount(raw.nextBatchId, `${label}.nextBatchId`);
+  if (!nextBatchId || !Array.isArray(raw.active) || !Array.isArray(raw.recent)) throw new Error(`${label} is malformed.`);
+  if (raw.active.length > MAX_ACTIVE_WORK) throw new Error(`${label}.active exceeds the ${MAX_ACTIVE_WORK}-item safety bound; running intent is never silently evicted.`);
+  const active = raw.active.map((item, index) => parseWorkItem(item, `${label}.active[${index}]`));
+  const recent = raw.recent.slice(-MAX_RECENT_WORK).map((item, index) => parseWorkItem(item, `${label}.recent[${index}]`));
+  if (active.some((item) => item.status !== "running" || item.endedAt)) throw new Error(`${label}.active must contain running items only.`);
+  if (recent.some((item) => item.status === "running" || !item.endedAt)) throw new Error(`${label}.recent must contain ended terminal items only.`);
+  if ([...active, ...recent].some((item) => item.attribution === "explicit" && !item.path)) throw new Error(`${label} explicit work requires a path.`);
+  const seen = new Set<string>();
+  for (const item of [...active, ...recent]) {
+    if (seen.has(item.toolCallId)) throw new Error(`${label} contains duplicate toolCallId ${item.toolCallId}.`);
+    seen.add(item.toolCallId);
+  }
+  const counters = object(raw.inspection, `${label}.inspection`);
+  const work: AgentWorkState = {
+    nextBatchId,
+    active,
+    recent,
+    inspection: {
+      reads: optionalCount(counters.reads, `${label}.inspection.reads`) ?? 0,
+      searches: optionalCount(counters.searches, `${label}.inspection.searches`) ?? 0,
+      listings: optionalCount(counters.listings, `${label}.inspection.listings`) ?? 0,
+    },
+  };
+  for (const key of ["currentBatchId"] as const) { const parsed = optionalCount(raw[key], `${label}.${key}`); if (parsed !== undefined) work[key] = parsed; }
+  for (const key of ["batchStartedAt", "batchEndedAt"] as const) { if (raw[key] !== undefined) work[key] = timestamp(raw[key], `${label}.${key}`); }
+  const recoveryError = capText(raw.recoveryError, MAX_ERROR_CHARS); if (recoveryError) work.recoveryError = recoveryError;
+  return work;
 }
 
 function parseRecord(value: unknown, index: number): AgentRecord {
@@ -107,6 +193,7 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     lifecycle: parseLifecycle(raw.lifecycle, `${label}.lifecycle`),
     usage: parseUsage(raw.usage, `${label}.usage`),
     activity: parseActivity(raw.activity, `${label}.activity`),
+    work: parseWork(raw.work, `${label}.work`),
   };
   for (const [key, fieldLabel] of [
     ["instructions", `${label}.instructions`],
@@ -115,7 +202,8 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     ["currentActivity", `${label}.currentActivity`],
     ["failure", `${label}.failure`],
   ] as const) {
-    const parsed = optionalString(raw[key], fieldLabel);
+    let parsed = optionalString(raw[key], fieldLabel);
+    if (key === "currentActivity" && parsed && /^(?:edit|write)\s+\{/i.test(parsed)) parsed = `${parsed.split(/\s/, 1)[0]} (legacy mutation arguments hidden)`;
     if (parsed !== undefined) (record as unknown as Record<string, unknown>)[key] = parsed;
   }
   return record;

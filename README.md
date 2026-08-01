@@ -61,7 +61,7 @@ High-priority mail steers a running recipient at the next safe boundary. Low-pri
 - `/agents clear-failure <address>`
 - `/agents effort <address> <off|minimal|low|medium|high|xhigh|max>`
 
-The dashboard shows status, model, effort, recent text/tool activity, usage, failures, and unanswered mail without exposing hidden thinking. Select an agent and press `Ctrl+O` to open its complete recorded conversation; the viewer refreshes while the agent appends, and arrows or Page Up/Page Down scroll it. Press `Ctrl+O` or Escape to close. In main session history, `Ctrl+O` expands `send_email` results and incoming email cards with a bounded recent conversation preview plus directions to the full viewer, avoiding duplicate unbounded transcripts.
+The work-first dashboard distinguishes running edit/write intent, successful and failed built-in mutations, unverified shell/custom effects, and collapsed inspection counters. Successful edits show file/patch statistics; writes show UTF-8 size and line count without retaining raw content. Exact-path simultaneous mutation intent is warned on both agents. `Enter` opens Work/Activity/Inbox/Profile tabs, `d` opens a bounded edit diff, and `Ctrl+O` opens the visible recorded conversation (thinking and bounded/hidden mutation bodies remain omitted). See [the dashboard guide](docs/agents-dashboard.md) for navigation, confidence limits, recovery, and privacy.
 
 ## Configuration
 

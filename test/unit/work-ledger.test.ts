@@ -1,0 +1,152 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  activePathConflicts, aggregateWork, appendRecent, beginBatch, capPatch, capText, classifyTool, countWrite,
+  displayWorkPath, emptyWorkState, finishWorkItem, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_PATCH_BYTES,
+  MAX_PATCH_LINES, MAX_RECENT_WORK, noteInspection, patchStats, recoverMutationWork, startWorkItem,
+} from "../../src/work-ledger.ts";
+
+describe("work ledger", () => {
+  it("classifies tools without promoting shell or custom effects", () => {
+    assert.deepEqual(["edit", "write", "bash", "read", "grep", "find", "ls", "send_email", "other"].map(classifyTool),
+      ["edit", "write", "shell", "inspection", "inspection", "inspection", "inspection", "mailbox", "custom"]);
+    const bash = startWorkItem("b", "bash", { command: "touch secret" }, 1, "/work")!;
+    const custom = startWorkItem("c", "mystery", { path: "x" }, 1, "/work")!;
+    assert.equal(bash.attribution, "unverified");
+    assert.equal(custom.attribution, "unverified");
+  });
+
+  it("counts UTF-8 bytes and logical lines without retaining write content", () => {
+    assert.deepEqual(["", "a", "a\n", "a\n\n", "a\r\nb", "🙂\n"].map((value) => countWrite(value).linesWritten), [0, 1, 1, 2, 2, 1]);
+    const item = startWorkItem("w", "write", { path: "x.ts", content: "é🙂\nnext" }, 1, "/work")!;
+    assert.equal(item.bytesWritten, Buffer.byteLength("é🙂\nnext"));
+    assert.equal(item.linesWritten, 2);
+    assert.equal(JSON.stringify(item).includes("next"), false);
+    assert.deepEqual(countWrite(""), { bytesWritten: 0, linesWritten: 0 });
+  });
+
+  it("normalizes Pi path forms and canonicalizes symlink aliases", async () => {
+    const root = await mkdtemp(join(tmpdir(), "work-path-"));
+    try {
+      await mkdir(join(root, "real")); await writeFile(join(root, "real", "a.ts"), "x"); await symlink(join(root, "real"), join(root, "alias"));
+      assert.equal(displayWorkPath("@alias/a.ts", root).path, join(root, "real", "a.ts"));
+      assert.equal(displayWorkPath(`file://${join(root, "real", "a.ts")}`, root).path, join(root, "real", "a.ts"));
+      assert.equal(displayWorkPath("real\u00a0/a.ts", root).displayPath, "real /a.ts");
+      assert.match(displayWorkPath("~/outside", root).displayPath!, /^\(absolute\)/);
+      for (const unsafe of ["file:///tmp/%1B%5D0%3Bpwn%07x", "bad\nname", "bad\tname", "bad\u202ename"]) assert.deepEqual(displayWorkPath(unsafe, root), {});
+      const unsafeIntent = startWorkItem("unsafe", "edit", { path: "file:///tmp/%1Bbad", edits: [] }, 1, root)!;
+      assert.equal(unsafeIntent.path, undefined);
+      assert.equal(finishWorkItem(unsafeIntent, { details: { patch: "+x" } }, false).status, "failed");
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("parses unified patch stats excluding headers and bounds previews/errors/commands", () => {
+    const patch = "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-old\n+new\n+more";
+    assert.deepEqual(patchStats(patch), { linesAdded: 2, linesRemoved: 1 });
+    assert.deepEqual(patchStats("--- a\r\n+++ b\r\n@@ -1,2 +1,2 @@\r\n---literal\r\n+++literal\r\n@@ -5 +5 @@\r\n-old\r\n+new"), { linesAdded: 2, linesRemoved: 2 });
+    const huge = Array.from({ length: MAX_PATCH_LINES + 20 }, () => "+🙂".repeat(200)).join("\n");
+    const capped = capPatch(huge);
+    assert.ok(Buffer.byteLength(capped.patchPreview!, "utf8") <= MAX_PATCH_BYTES);
+    assert.ok(capped.patchPreview!.split("\n").length <= MAX_PATCH_LINES);
+    assert.equal(capped.patchTruncated, true);
+    assert.ok(capText("x".repeat(1_000), MAX_COMMAND_CHARS)!.length <= MAX_COMMAND_CHARS);
+    assert.ok(capText("x".repeat(1_000), MAX_ERROR_CHARS)!.length <= MAX_ERROR_CHARS);
+  });
+
+  it("handles malformed and overridden result shapes defensively", () => {
+    const start = startWorkItem("e", "edit", { path: "x", edits: [{}] }, 1, "/work")!;
+    const malformed = finishWorkItem(start, { details: { patch: 42, firstChangedLine: "x" } }, false);
+    assert.equal(malformed.status, "succeeded");
+    assert.equal(malformed.linesAdded, undefined);
+    const failed = finishWorkItem(start, { content: [{ type: "image" }, { type: "text", text: "oldText not found\n\u001b[31mbad" }] }, true);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.error, "edit failed");
+    assert.doesNotMatch(JSON.stringify(failed), /oldText not found|bad/);
+  });
+
+  it("tracks batches, inspection, parallel completion order, failures and aggregate invariants", () => {
+    const state = emptyWorkState();
+    const batch = beginBatch(state, "2026-01-01T00:00:00.000Z");
+    noteInspection(state.inspection, "read"); noteInspection(state.inspection, "grep"); noteInspection(state.inspection, "ls");
+    const edit = startWorkItem("e", "edit", { path: "a", edits: [{ oldText: "a", newText: "b" }] }, batch, "/work", "2026-01-01T00:00:01.000Z")!;
+    const write = startWorkItem("w", "write", { path: "b", content: "ok" }, batch, "/work", "2026-01-01T00:00:01.000Z")!;
+    const bash = startWorkItem("b", "bash", { command: "touch c" }, batch, "/work")!;
+    state.active.push(edit, write, bash);
+    // Finish out of source order.
+    appendRecent(state, finishWorkItem(write, {}, false));
+    appendRecent(state, finishWorkItem(edit, { content: [{ type: "text", text: "no" }] }, true));
+    appendRecent(state, finishWorkItem(bash, {}, false));
+    state.active = [];
+    assert.deepEqual(aggregateWork(state), { files: 1, linesAdded: 0, linesRemoved: 0, writes: 1, statsUnknown: false, unverified: 1 });
+    assert.deepEqual(state.inspection, { reads: 1, searches: 1, listings: 1 });
+    const next = beginBatch(state);
+    assert.equal(next, 2);
+    assert.deepEqual(state.inspection, { reads: 0, searches: 0, listings: 0 });
+  });
+
+  it("interrupts stale active entries, caps history and detects exact-path active conflicts", () => {
+    const left = emptyWorkState(); const right = emptyWorkState();
+    beginBatch(left); beginBatch(right);
+    left.active.push(startWorkItem("l", "edit", { path: "same.ts", edits: [] }, 1, "/work")!);
+    right.active.push(startWorkItem("r", "write", { path: "same.ts", content: "" }, 1, "/work")!);
+    assert.equal(activePathConflicts([{ address: "l", work: left }, { address: "r", work: right }]).size, 1);
+    beginBatch(left);
+    assert.equal(left.recent.at(-1)?.status, "interrupted");
+    for (let index = 0; index < MAX_RECENT_WORK + 10; index++) appendRecent(left, { ...left.recent[0]!, toolCallId: `x${index}` });
+    assert.equal(left.recent.length, MAX_RECENT_WORK);
+  });
+
+  it("upserts durable terminal results over cached active/interrupted placeholders", () => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const entries = [
+      { type: "custom", id: "m", parentId: null, timestamp, customType: "pi-email-subagent-work-batch", data: { batchId: 4, startedAt: timestamp } },
+      { type: "message", id: "a", parentId: "m", timestamp, message: { role: "assistant", content: [{ type: "toolCall", id: "x", name: "edit", arguments: { path: "a.ts", edits: [{ oldText: "x", newText: "y" }] } }] } },
+      { type: "message", id: "r", parentId: "a", timestamp, message: { role: "toolResult", toolCallId: "x", toolName: "edit", content: [{ type: "text", text: "ok" }], details: { patch: "--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y" }, isError: false } },
+    ];
+    for (const cachedStatus of ["active", "interrupted"] as const) {
+      const state = emptyWorkState(); state.currentBatchId = 4;
+      const cached = startWorkItem("x", "edit", { path: "a.ts", edits: [] }, 4, "/work", timestamp)!;
+      if (cachedStatus === "active") state.active.push(cached);
+      else appendRecent(state, { ...cached, status: "interrupted", endedAt: timestamp });
+      const recovered = recoverMutationWork(entries, "/work", state);
+      const matches = recovered.recent.filter((item) => item.toolCallId === "x");
+      assert.equal(matches.length, 1); assert.equal(matches[0]!.status, "succeeded"); assert.equal(matches[0]!.batchId, 4);
+    }
+    const failedEntries = structuredClone(entries); (failedEntries[2] as any).message.isError = true;
+    const failed = recoverMutationWork(failedEntries, "/work");
+    assert.equal(failed.recent.find((item) => item.toolCallId === "x")?.status, "failed");
+  });
+
+  it("keeps post-steer mutations in the durable marker batch", () => {
+    const t = "2026-01-01T00:00:00.000Z";
+    const call = (id: string) => ({ type: "message", id: `a${id}`, parentId: null, timestamp: t, message: { role: "assistant", content: [{ type: "toolCall", id, name: "write", arguments: { path: `${id}.ts`, content: id } }] } });
+    const result = (id: string) => ({ type: "message", id: `r${id}`, parentId: null, timestamp: t, message: { role: "toolResult", toolCallId: id, toolName: "write", content: [], isError: false } });
+    const state = recoverMutationWork([
+      { type: "custom", id: "m", parentId: null, timestamp: t, customType: "pi-email-subagent-work-batch", data: { batchId: 7, startedAt: t } },
+      call("a"), result("a"),
+      { type: "message", id: "steer", parentId: null, timestamp: t, message: { role: "user", content: "steer" } },
+      call("b"), result("b"),
+    ], "/work");
+    assert.deepEqual(state.recent.map((item) => item.batchId), [7, 7]);
+  });
+
+  it("recovers durable edit/write results, deduplicates registry cache, and never recovers bash attribution", () => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const entries = [
+      { type: "message", id: "a", parentId: null, timestamp, message: { role: "assistant", content: [
+        { type: "toolCall", id: "e", name: "edit", arguments: { path: "a.ts", edits: [{ oldText: "x", newText: "y" }] } },
+        { type: "toolCall", id: "b", name: "bash", arguments: { command: "touch z" } },
+      ] } },
+      { type: "message", id: "r", parentId: "a", timestamp, message: { role: "toolResult", toolCallId: "e", toolName: "edit", content: [{ type: "text", text: "ok" }], details: { patch: "--- a\n+++ b\n-x\n+y" }, isError: false } },
+      { type: "message", id: "br", parentId: "r", timestamp, message: { role: "toolResult", toolCallId: "b", toolName: "bash", content: [], isError: false } },
+    ];
+    const existing = emptyWorkState();
+    appendRecent(existing, finishWorkItem(startWorkItem("e", "edit", { path: "a.ts", edits: [] }, 0, "/work")!, {}, false));
+    const recovered = recoverMutationWork(entries, "/work", existing);
+    assert.equal(recovered.recent.filter((item) => item.toolCallId === "e").length, 1);
+    assert.equal(recovered.recent.some((item) => item.toolCallId === "b"), false);
+  });
+});
