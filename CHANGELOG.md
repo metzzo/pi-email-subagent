@@ -12,7 +12,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Live `/agents` dashboard, conversation viewer, usage/cost display, and lifecycle controls.
 - Role/address profiles, tool enforcement, spawn control, capacity/rate/queue limits, retention, and configurable model policy.
 - Real scripted-provider Pi RPC E2E suite plus optional paid live-provider acceptance.
-- Single-writer filesystem lease per persistent parent-session namespace with owner diagnostics and stale-lock recovery.
+- Single-writer filesystem lease per persistent parent-session namespace with owner diagnostics and stale-lock recovery, covered by a real child-process `SIGKILL` E2E.
 - Initial-delegation lifecycle policies with finite defaults/maxima, durable crash-safe spawn intent, runtime watchdogs, bounded cleanup/shutdown, and inspection/dashboard disclosure.
 - Work-first `/agents` telemetry and UI: correlated edit/write outcomes, patch statistics and bounded diffs, unverified shell/custom effects, inspection counters, exact-path active warnings, and session-backed crash recovery.
 - Required secret scanning and fail-closed production dependency-license checks with a generated release inventory.

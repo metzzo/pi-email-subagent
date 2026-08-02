@@ -89,6 +89,7 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-111 | Runtime compaction and retention | Live broker schedules maintenance; old terminal mail prunes while open mail and request/reply pairs remain atomic | `test/unit/mail-store.test.ts`, `test/integration/hardening.test.ts` |
 | E2E-112 | Profile-key safety | Config keys canonicalize or warn/reject before capability resolution | `test/unit/config.test.ts`, `test/unit/address.test.ts` |
 | E2E-113 | Abort/status contract | Aborted waits resolve partial structured state and failed deliveries are excluded from open-obligation counts | `test/integration/hardening.test.ts` |
+| E2E-114 | Abrupt namespace-owner death | A real child process acquires the production lease, is killed with `SIGKILL`, remains protected until the stale threshold, and is then recovered with fresh owner metadata | `test/e2e/namespace-lock-sigkill.test.ts`, `test/e2e/helpers/namespace-lock-holder.ts` |
 
 ## Interactive TUI acceptance scenarios
 
