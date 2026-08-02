@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -32,8 +32,11 @@ describe("work ledger", () => {
     const root = await mkdtemp(join(tmpdir(), "work-path-"));
     try {
       await mkdir(join(root, "real")); await writeFile(join(root, "real", "a.ts"), "x"); await symlink(join(root, "real"), join(root, "alias"));
-      assert.equal(displayWorkPath("@alias/a.ts", root).path, join(root, "real", "a.ts"));
-      assert.equal(displayWorkPath(`file://${join(root, "real", "a.ts")}`, root).path, join(root, "real", "a.ts"));
+      const canonicalFile = await realpath(join(root, "real", "a.ts"));
+      assert.deepEqual(displayWorkPath("@alias/a.ts", root), { path: canonicalFile, displayPath: "real/a.ts" });
+      assert.deepEqual(displayWorkPath(`file://${join(root, "real", "a.ts")}`, root), { path: canonicalFile, displayPath: "real/a.ts" });
+      await symlink(root, join(root, "workspace-alias"));
+      assert.deepEqual(displayWorkPath("real/a.ts", join(root, "workspace-alias")), { path: canonicalFile, displayPath: "real/a.ts" });
       assert.equal(displayWorkPath("real\u00a0/a.ts", root).displayPath, "real /a.ts");
       assert.match(displayWorkPath("~/outside", root).displayPath!, /^\(absolute\)/);
       for (const unsafe of ["file:///tmp/%1B%5D0%3Bpwn%07x", "bad\nname", "bad\tname", "bad\u202ename"]) assert.deepEqual(displayWorkPath(unsafe, root), {});
