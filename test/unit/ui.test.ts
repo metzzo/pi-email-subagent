@@ -100,6 +100,44 @@ describe("dashboard rendering", () => {
     }]);
   });
 
+  it("renders paused, stopped, and archived as closed without changing their internal states", () => {
+    const closedStates = ["paused", "stopped", "archived"] as const;
+    for (const state of closedStates) {
+      const agent = record();
+      agent.state = state;
+      const component = new DashboardComponent(
+        () => ({ mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0 }),
+        () => [],
+        () => undefined,
+        () => undefined,
+        fakeTheme,
+      );
+      const list = component.render(120).join("\n");
+      assert.match(list, /■/);
+      assert.match(list, /\bclosed\b/);
+      assert.doesNotMatch(list, new RegExp(`\\b${state}\\b`));
+      component.handleInput("\r");
+      const detail = component.render(120).join("\n");
+      assert.match(detail, /\bclosed\b/);
+      assert.doesNotMatch(detail, new RegExp(`\\b${state}\\b`));
+      assert.equal(agent.state, state);
+      component.dispose();
+    }
+
+    const widgets: Array<string[] | undefined> = [];
+    const controller = new UIController();
+    controller.bind({ ui: { setStatus() {}, setWidget: (_key: string, lines: string[] | undefined) => widgets.push(lines) } } as never);
+    controller.update({
+      mainAddress: "main@test",
+      agents: closedStates.map((state) => { const agent = record(); agent.state = state; return agent; }),
+      unanswered: 0,
+      queuedMail: 0,
+    });
+    assert.match((widgets.at(-1) ?? []).join("\n"), /3 closed/);
+    assert.doesNotMatch((widgets.at(-1) ?? []).join("\n"), /paused|stopped|archived/);
+    controller.clear();
+  });
+
   it("opens running, stopped, and archived agent conversations with ctrl+o", () => {
     for (const state of ["running", "stopped", "archived"] as const) {
       const agent = record();
