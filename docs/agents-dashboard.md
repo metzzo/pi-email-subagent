@@ -2,6 +2,8 @@
 
 `/agents` (or `Ctrl+Shift+A`) is a work-first view of persistent workers. It shows explicit file mutation intent and confirmed built-in edit/write outcomes without exposing hidden reasoning or written/replacement bodies.
 
+For a simpler operator-facing lifecycle, paused, stopped, and archived identities are all labeled **closed** in the dashboard and Agents widget. Their distinct internal states and management behavior remain unchanged in tools, persisted records, and APIs.
+
 ## Confidence model
 
 - **Running edit/write:** explicit mutation intent. It is not confirmed until the built-in tool succeeds.

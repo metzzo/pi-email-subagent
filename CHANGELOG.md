@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Tool failures use Pi's native thrown-error contract.
 - Mail and joined-reply tool output is bounded to Pi's context-safe byte/line recommendations.
 - Conversation rendering collapses mutation arguments and never dumps raw write/replacement content; edit results use bounded patch previews.
+- The dashboard and Agents widget label paused, stopped, and archived identities uniformly as `closed`; internal lifecycle/API states remain distinct.
 
 ### Security
 
