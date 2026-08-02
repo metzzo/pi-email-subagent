@@ -9,7 +9,8 @@
 ## Validation
 
 - [ ] `npm run validate`
-- [ ] `npm audit --omit=dev`
+- [ ] `npm audit --omit=dev --omit=peer`
+- [ ] `npm run check:secrets` (Gitleaks 8.30.1)
 - [ ] `git diff --check`
 - [ ] Regression test added for each defect
 - [ ] Public docs/changelog updated

@@ -45,7 +45,9 @@
     "test:e2e": "tsx --test test/e2e/**/*.test.ts",
     "test:package": "tsx scripts/package-smoke.ts",
     "test:live": "tsx scripts/live-e2e.ts",
-    "validate": "npm run check && npm test && npm run test:package",
+    "check:secrets": "gitleaks git --config=.gitleaks.toml --redact --no-banner .",
+    "check:licenses": "tsx scripts/check-dependency-licenses.ts",
+    "validate": "npm run check && npm run check:licenses && npm test && npm run test:package",
     "prepublishOnly": "npm run validate"
   },
   "pi": {

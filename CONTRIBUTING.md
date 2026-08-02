@@ -17,7 +17,7 @@ npm ci
 npm run validate
 ```
 
-`npm run validate` runs TypeScript checking, all deterministic unit/integration/real-RPC E2E tests, and a clean packed-artifact install/load smoke. Required tests use a scripted mock provider and do not incur model charges.
+`npm run validate` runs TypeScript checking, the production dependency-license policy, all deterministic unit/integration/real-RPC E2E tests, and a clean packed-artifact install/load smoke. Required tests use a scripted mock provider and do not incur model charges.
 
 Useful focused commands:
 
@@ -52,6 +52,7 @@ Before opening a pull request:
 ```bash
 npm run validate
 npm audit --omit=dev --omit=peer
+npm run check:secrets # requires Gitleaks 8.30.1
 git diff --check
 ```
 
@@ -65,7 +66,7 @@ Describe:
 4. Compatibility, security, migration, and documentation effects.
 5. Whether optional live acceptance was run.
 
-Do not include credentials, raw private mailbox state, hidden model reasoning, or paid-provider recordings containing sensitive data.
+Do not include credentials, raw private mailbox state, hidden model reasoning, or paid-provider recordings containing sensitive data. See [`docs/release-security-checks.md`](docs/release-security-checks.md) for the secret and dependency-license policies.
 
 ## Security issues
 
