@@ -30,7 +30,7 @@ Workers always receive exactly `send_email` and `fetch_emails` on top of their c
 
 ### Reply protocol
 
-Every request carries a response obligation. Replies must reuse the exact subject `Re: [mail-id] original subject`, which the broker validates strictly (existence, recipient/sender pair, exact subject text, single answer). Obligations are tracked with a durable reserve → deliver → commit / release protocol, so concurrent replies cannot double-answer and a failed reply delivery reopens the request. An agent that settles with unanswered mail is re-prompted (up to `responseReminderLimit`, default 2) and then marked failed.
+Every request carries a response obligation. Replies must reuse the exact subject `Re: [mail-id] original subject`, which the broker validates strictly (existence, recipient/sender pair, exact subject text, single answer). Obligations are tracked with a durable reserve → deliver → commit / release protocol, so concurrent replies cannot double-answer and a failed reply delivery reopens the request. If a successful worker finishes with visible final text but forgets `send_email`, the broker mechanically sends that text through the same reply protocol; truly silent or failed runs retain the reminder/failure path.
 
 ### Durability
 

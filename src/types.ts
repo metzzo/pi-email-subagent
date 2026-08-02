@@ -241,6 +241,8 @@ export interface WorkerEvent {
   state?: AgentStatus;
   activity?: ActivityItem;
   workItem?: WorkItem;
+  /** Visible final assistant text for mechanical completion-email fallback. */
+  completionText?: string;
   error?: string;
 }
 

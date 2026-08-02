@@ -158,12 +158,59 @@ describe("AgentBroker end-to-end routing", () => {
         }),
         /already answered/,
       );
+      worker.settle("This final text must not create a duplicate reply.");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(main.deliveries.length, 1);
     } finally {
       await broker.shutdown();
     }
   });
 
-  it("automatically follows up twice, then escalates unanswered mail", async () => {
+  it("mechanically emails the visible final answer when the worker omits send_email", async () => {
+    const { broker, workers, main } = await setup({ responseReminderLimit: 2 });
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.completion-fallback@gpt-5.4.com",
+        subject: "Return result",
+        message: "Finish the work and report it.",
+        priority: "low",
+      });
+      const waiting = broker.waitForReplies([request.envelope.id], 2_000, true);
+      const worker = workers[0]!;
+      worker.settle("Implemented parser.ts and all tests pass.");
+      const result = await waiting;
+      assert.equal(result.complete, true);
+      assert.equal(result.items[0]?.state, "answered");
+      assert.equal(result.items[0]?.reply?.message, "Implemented parser.ts and all tests pass.");
+      assert.equal(worker.prompts.length, 1, "mechanical completion avoids a reminder model turn");
+      assert.equal(main.deliveries.length, 0, "the active collector receives the reply directly");
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("UTF-8 safely bounds an automatic completion email", async () => {
+    const { broker, workers } = await setup({ maxMessageBytes: 128 });
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.bounded-completion@gpt-5.4.com",
+        subject: "Bound result",
+        message: "Return a bounded result.",
+        priority: "low",
+      });
+      const waiting = broker.waitForReplies([request.envelope.id], 2_000, true);
+      workers[0]!.settle("🙂".repeat(100));
+      const result = await waiting;
+      const message = result.items[0]?.reply?.message ?? "";
+      assert.ok(Buffer.byteLength(message, "utf8") <= 128);
+      assert.match(message, /Automatic completion email truncated/);
+      assert.doesNotMatch(message, /�/);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("automatically follows up twice, then escalates a truly silent worker", async () => {
     const { broker, workers, main } = await setup({ responseReminderLimit: 2 });
     try {
       await broker.send(broker.mainAddress, {

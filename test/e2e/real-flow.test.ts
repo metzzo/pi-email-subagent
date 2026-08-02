@@ -61,10 +61,10 @@ function sendResult(line: RpcLine): any {
   return (line.result as { details?: { result?: unknown } } | undefined)?.details?.result;
 }
 
-function waitResult(line: RpcLine): { complete: boolean; timedOut: boolean; items: { state: string; requestId: string }[] } {
+function waitResult(line: RpcLine): { complete: boolean; timedOut: boolean; items: { state: string; requestId: string; reply?: { message: string } }[] } {
   const result = (line.result as { details?: { result?: unknown } } | undefined)?.details?.result;
   assert.ok(result, "wait_for_replies returned no result details");
-  return result as { complete: boolean; timedOut: boolean; items: { state: string; requestId: string }[] };
+  return result as { complete: boolean; timedOut: boolean; items: { state: string; requestId: string; reply?: { message: string } }[] };
 }
 
 async function readRegistry(agentDir: string, sessionId: string): Promise<any> {
@@ -501,18 +501,19 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
-  it("enforces an ignored obligation with a real reminder turn", { timeout: 240_000 }, async () => {
+  it("mechanically emails a real worker's final text when it omits send_email", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {
       const mark = client.mark();
       await client.prompt("E2E DELEGATE IGNORE");
       const sent = sendResult(await client.waitFor(toolEnd("send_email"), "ignored send", 90_000, mark));
-      const wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "enforced reply", 120_000, mark));
+      const wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "automatic completion reply", 120_000, mark));
       assert.equal(wait.complete, true);
       assert.equal(wait.items[0]?.state, "answered");
       await client.waitForSettlement(mark);
 
-      // The worker's persisted transcript must show the enforcement reminder.
+      // No extra model turn is needed: the broker converts visible final text
+      // into the exact reply while keeping the worker transcript truthful.
       const registry = await eventuallyRegistry(
         agentDir,
         sessionId,
@@ -520,15 +521,15 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
         "with the idle worker",
       );
       const transcript = await readFile(registry.agents[0].sessionFile, "utf8");
-      assert.match(transcript, /mailbox-enforcement/);
+      assert.doesNotMatch(transcript, /mailbox-enforcement/);
       assert.equal(await client.close(), 0, client.stderr);
 
       const journal = await readJournal(agentDir, sessionId);
-      assert.equal(
-        journal.filter((event) => event.type === "email.answered" && event.id === sent.correlationId).length,
-        1,
-        "exactly one answer despite the initial silence",
-      );
+      const answered = journal.filter((event) => event.type === "email.answered" && event.id === sent.correlationId);
+      assert.equal(answered.length, 1, "exactly one mechanically generated answer despite the omitted tool call");
+      assert.ok(journal.some((event) => event.type === "email.created"
+        && event.email.id === answered[0].replyId
+        && event.email.message === "WORKER SILENT"));
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });

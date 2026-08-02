@@ -37,6 +37,25 @@ function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
+function utf8Prefix(value: string, maxBytes: number): string {
+  let output = "";
+  let bytes = 0;
+  for (const character of value) {
+    const size = byteLength(character);
+    if (bytes + size > maxBytes) break;
+    output += character;
+    bytes += size;
+  }
+  return output;
+}
+
+function boundedCompletionMessage(value: string, maxBytes: number): string {
+  if (byteLength(value) <= maxBytes) return value;
+  const suffix = "\n\n[Automatic completion email truncated to the configured message limit.]";
+  if (byteLength(suffix) >= maxBytes) return utf8Prefix(value, maxBytes);
+  return `${utf8Prefix(value, maxBytes - byteLength(suffix))}${suffix}`;
+}
+
 export function lightweightWorkItem(item: WorkItem): WorkItem {
   const projected: Record<string, unknown> = {};
   for (const key of Object.keys(item)) {
@@ -944,7 +963,7 @@ export class AgentBroker {
     if (event.type === "settled") {
       this.clearWatchdog(address);
       if (this.settling.has(address)) this.pendingSettlements.add(address);
-      else swallow(this.onWorkerSettled(address, worker));
+      else swallow(this.onWorkerSettled(address, worker, event.completionText));
     }
   }
 
@@ -1134,7 +1153,32 @@ export class AgentBroker {
     }
   }
 
-  private async onWorkerSettled(address: string, worker: WorkerTransport): Promise<void> {
+  private async sendCompletionReplies(address: string, requests: EmailEnvelope[], completionText: string): Promise<void> {
+    const distinctSenders = new Set(requests.map((request) => request.from));
+    const sharedBody = distinctSenders.size === 1
+      ? completionText.trim()
+      : `Automatic completion notice: ${address} finished a batch containing requests from multiple senders without sending a dedicated reply to this message. The combined final text was not forwarded to avoid cross-request disclosure. Send a follow-up for a dedicated result.`;
+    const message = boundedCompletionMessage(sharedBody, this.options.config.maxMessageBytes);
+    for (const request of requests) {
+      try {
+        await this.send(address, {
+          to: request.from,
+          subject: makeReplySubject(request.id, request.subject),
+          message,
+          priority: "low",
+        });
+      } catch (error) {
+        const record = this.records.get(address);
+        if (record) {
+          const summary = truncateText(`Automatic completion email for ${request.id} failed: ${errorMessage(error)}`, 500);
+          record.activity.push({ at: nowIso(), kind: "error", summary });
+          record.activity = record.activity.slice(-40);
+        }
+      }
+    }
+  }
+
+  private async onWorkerSettled(address: string, worker: WorkerTransport, completionText?: string): Promise<void> {
     if (this.disposed || this.settling.has(address) || this.workers.get(address) !== worker) return;
     this.settling.add(address);
     const record = this.records.get(address);
@@ -1142,7 +1186,11 @@ export class AgentBroker {
       if (!record || record.state === "stopped" || record.state === "failed") return;
       this.syncWorker(address, worker);
       this.interruptRecordWork(record);
-      const outstanding = this.fetchUnanswered(address);
+      let outstanding = this.fetchUnanswered(address);
+      if (outstanding.length > 0 && completionText?.trim()) {
+        await this.sendCompletionReplies(address, outstanding, completionText);
+        outstanding = this.fetchUnanswered(address);
+      }
       if (outstanding.length > 0) {
         if (record.enforcementAttempts < this.options.config.responseReminderLimit) {
           record.enforcementAttempts += 1;
