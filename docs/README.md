@@ -49,3 +49,4 @@ All limits, roles, address overrides, and the model-selection policy are configu
 - [`/agents` work dashboard](agents-dashboard.md): live structured mutation intent/outcomes, exact-path warnings, inspection counters, bounded diffs, inbox/activity/profile tabs, lifecycle controls, and full conversation (`Ctrl+O`).
 - `/agents stop|restart|archive|clear-failure|effort <address> …`: non-interactive equivalents of `manage_agent`.
 - Main-session renderers: `send_email` results and incoming email cards expand (`Ctrl+O`) to show a bounded recent-conversation preview.
+- [Release security checks](release-security-checks.md): secret scanning, production dependency-license policy, inventory artifacts, and action pinning.

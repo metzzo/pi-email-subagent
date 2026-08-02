@@ -1,0 +1,4 @@
+title = "pi-email-subagent secret scanning policy"
+
+[extend]
+useDefault = true
