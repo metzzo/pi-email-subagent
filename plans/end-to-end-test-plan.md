@@ -74,7 +74,7 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-096 | Uncollected reply delivery | Without a collector the worker reply arrives as a displayed custom email message triggering a main turn; journal answers exactly once | `test/e2e/real-flow.test.ts` |
 | E2E-097 | Parallel fan-out | One turn delegates to two addresses; both spawn, both answers are collected in one `wait_for_replies`; registry holds both | `test/e2e/real-flow.test.ts` |
 | E2E-098 | Concurrency queueing | With `maxConcurrent: 1` a second worker's mail stays queued (widget-visible) until the first settles, then completes | `test/e2e/real-flow.test.ts` |
-| E2E-099 | Enforcement reminder | A worker that settles silently is re-prompted; the reminder appears in its persisted transcript and the request is answered exactly once | `test/e2e/real-flow.test.ts` |
+| E2E-099 | Mechanical completion reply | A real worker that produces visible final text but omits `send_email` is answered exactly once without another model turn; truly silent fake workers still exercise bounded reminders/escalation | `test/e2e/real-flow.test.ts`, `test/integration/broker.test.ts` |
 | E2E-100 | Terminal worker failure | A crashing provider marks the worker failed, resolves `wait_for_replies` as `failed`, alerts main, and records the failure in the registry | `test/e2e/real-flow.test.ts` |
 | E2E-101 | Sender rate limiting | With a per-sender limit of 3, the fourth parallel send is rejected and only three identities spawn | `test/e2e/real-flow.test.ts` |
 | E2E-102 | Archival obligation guard | Archiving a stopped agent with queued inbound mail is rejected with an actionable error | `test/e2e/real-flow.test.ts` |

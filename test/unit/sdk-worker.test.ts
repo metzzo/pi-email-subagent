@@ -77,6 +77,30 @@ describe("SDK worker failures", () => {
     assert.equal(markers.length, 2);
   });
 
+  it("emits only visible final assistant text with the settled event", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "idle" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    const events: any[] = [];
+    worker.subscribe((event) => events.push(event));
+    internal.onSessionEvent({ type: "agent_start" });
+    internal.onSessionEvent({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "hidden reasoning" },
+          { type: "text", text: "Implemented the fix.\nTests pass." },
+        ],
+      },
+    });
+    internal.onSessionEvent({ type: "agent_settled" });
+    const settled = [...events].reverse().find((event: any) => event.type === "settled");
+    assert.equal(settled?.completionText, "Implemented the fix.\nTests pass.");
+    assert.doesNotMatch(JSON.stringify(settled), /hidden reasoning/);
+  });
+
   it("correlates parallel tool calls by ID, handles orphan ends, and never stores mutation bodies in activity", () => {
     const worker = new SdkWorker({} as never);
     const work = emptyWorkState(); work.currentBatchId = 7;

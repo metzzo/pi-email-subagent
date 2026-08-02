@@ -234,8 +234,8 @@ function planWorker(messages: readonly Message[]): Plan {
           priority: "low",
         },
       }));
-      // "IGNORE" requests are met with silence until the broker's enforcement
-      // reminder arrives, to exercise the unanswered-obligation path.
+      // "IGNORE" requests deliberately return visible final text without a
+      // send_email call, exercising the broker's mechanical completion reply.
       if (replies.length > 0 && lastText.includes("IGNORE") && !allText(messages).includes("<mailbox-enforcement")) {
         return { text: "WORKER SILENT" };
       }

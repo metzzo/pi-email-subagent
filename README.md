@@ -40,7 +40,7 @@ The main thread is `main@<model>.com`. Model IDs are validated against Pi's avai
 Re: [mail-id] Original subject
 ```
 
-High-priority mail steers a running recipient at the next safe boundary. Low-priority mail waits until the recipient settles. A worker that settles with unanswered requests is automatically prompted to respond.
+High-priority mail steers a running recipient at the next safe boundary. Low-priority mail waits until the recipient settles. If a successful worker finishes with visible final text but forgets `send_email`, the broker mechanically sends that text through the exact durable reply protocol; truly silent runs are automatically prompted to respond.
 
 `send_email` returns the allocated request/correlation ID, exact expected reply subject, effective recipient role/tools/model, finite persisted lifecycle policy, and delivery state. `inspect_agent` previews the same effective profile without spawning. `wait_for_replies` joins several delegated requests and can collect their replies without separate model turns. `manage_agent` is main-thread-only and supports `stop`, `restart`, `archive`, and `clear_failure`; workers continue to receive only the two email tools.
 

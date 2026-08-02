@@ -176,6 +176,7 @@ export class SdkWorker implements WorkerTransport {
   private disposePromise?: Promise<void>;
   private startGeneration = 0;
   private runFailure?: string;
+  private completionText?: string;
   private cwd = process.cwd();
 
   constructor(private readonly modelRuntime: ModelRuntime, private readonly runtimeModel?: Model<any>) {}
@@ -287,6 +288,7 @@ export class SdkWorker implements WorkerTransport {
     switch (event.type) {
       case "agent_start":
         this.runFailure = undefined;
+        this.completionText = undefined;
         this.setState("running");
         this.activity("status", "Agent run started");
         break;
@@ -331,7 +333,10 @@ export class SdkWorker implements WorkerTransport {
           .map((part) => part.text)
           .join("\n")
           .trim();
-        if (text) this.activity("text", text);
+        if (text) {
+          this.completionText = text;
+          this.activity("text", text);
+        }
         const usage = event.message.usage;
         if (usage) {
           this.record.usage.input += usage.input ?? 0;
@@ -365,8 +370,9 @@ export class SdkWorker implements WorkerTransport {
           this.setState("idle");
           this.activity("status", "Agent run settled");
         }
-        this.emit({ type: "settled" });
+        this.emit({ type: "settled", ...(this.completionText ? { completionText: this.completionText } : {}) });
         this.runFailure = undefined;
+        this.completionText = undefined;
         break;
       default:
         break;
