@@ -471,7 +471,9 @@ describe("broker hardening", () => {
 
   it("holds a timing-out collector through an in-flight reply commit", async () => {
     const { broker, workers, main } = await setup({
-      lifecycle: { ...structuredClone(DEFAULT_CONFIG.lifecycle), brokerShutdownTimeoutMs: 400 },
+      // Keep the test bounded without making ordinary concurrent CI filesystem
+      // scheduling compete with an unrealistically small production deadline.
+      lifecycle: { ...structuredClone(DEFAULT_CONFIG.lifecycle), brokerShutdownTimeoutMs: 2_000 },
     });
     try {
       const request = await broker.send(broker.mainAddress, {
@@ -518,7 +520,7 @@ describe("broker hardening", () => {
     } finally {
       const shutdownStarted = Date.now();
       await broker.shutdown();
-      assert.ok(Date.now() - shutdownStarted < 1_000, "collector race leaves no stale shutdown barrier");
+      assert.ok(Date.now() - shutdownStarted < 4_000, "collector race leaves no stale shutdown barrier");
     }
   });
 

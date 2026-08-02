@@ -5,7 +5,7 @@ import { lock } from "proper-lockfile";
 import { errorMessage, nowIso } from "./util.ts";
 
 const OWNER_FILE = ".broker-owner.json";
-const STALE_MS = 10_000;
+export const NAMESPACE_LOCK_STALE_MS = 10_000;
 const UPDATE_MS = 2_000;
 
 interface NamespaceOwner {
@@ -55,7 +55,7 @@ export class NamespaceLock {
     try {
       releaseLock = await lock(namespaceDir, {
         realpath: true,
-        stale: STALE_MS,
+        stale: NAMESPACE_LOCK_STALE_MS,
         update: UPDATE_MS,
         retries: 0,
         onCompromised,
@@ -70,7 +70,7 @@ export class NamespaceLock {
         : "owner metadata unavailable";
       throw new Error(
         `Subagent namespace is already owned (${diagnostic}): ${namespaceDir}. `
-        + `Close the other Pi process or wait ${Math.ceil(STALE_MS / 1_000)} seconds after an abrupt exit before retrying.`,
+        + `Close the other Pi process or wait ${Math.ceil(NAMESPACE_LOCK_STALE_MS / 1_000)} seconds after an abrupt exit before retrying.`,
         { cause: error },
       );
     }
