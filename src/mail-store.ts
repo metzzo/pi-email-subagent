@@ -9,6 +9,7 @@ type MailEvent =
   | { type: "email.created"; email: EmailEnvelope }
   | { type: "email.delivered"; id: string; at: string }
   | { type: "email.failed"; id: string; at: string; error: string }
+  | { type: "email.cancelled"; id: string; at: string; by: string; reason: string }
   | { type: "email.reply_reserved"; id: string; replyId: string; at: string }
   | { type: "email.reply_released"; id: string; replyId: string; at: string; error: string }
   | { type: "email.answered"; id: string; replyId: string; at: string };
@@ -49,7 +50,7 @@ function parseEmail(value: unknown): EmailEnvelope {
   const deliveryState = raw.deliveryState;
   if (priority !== "high" && priority !== "low") throw new Error("email.priority is invalid.");
   if (kind !== "request" && kind !== "reply") throw new Error("email.kind is invalid.");
-  if (deliveryState !== "queued" && deliveryState !== "delivered" && deliveryState !== "failed") {
+  if (deliveryState !== "queued" && deliveryState !== "delivered" && deliveryState !== "failed" && deliveryState !== "cancelled") {
     throw new Error("email.deliveryState is invalid.");
   }
   if (typeof raw.requiresResponse !== "boolean") throw new Error("email.requiresResponse must be boolean.");
@@ -73,6 +74,9 @@ function parseEmail(value: unknown): EmailEnvelope {
     ["replyReservedBy", "email.replyReservedBy"],
     ["replyReservedAt", "email.replyReservedAt"],
     ["error", "email.error"],
+    ["cancelledAt", "email.cancelledAt"],
+    ["cancelledBy", "email.cancelledBy"],
+    ["cancellationReason", "email.cancellationReason"],
   ] as const) {
     const parsed = optionalString(raw[key], label);
     if (parsed !== undefined) (email as unknown as Record<string, unknown>)[key] = parsed;
@@ -81,6 +85,10 @@ function parseEmail(value: unknown): EmailEnvelope {
   if (lifecycleIntent) email.lifecycleIntent = lifecycleIntent;
   if (email.kind === "reply" && !email.inReplyTo) throw new Error("reply email is missing inReplyTo.");
   if (email.kind === "reply" && email.requiresResponse) throw new Error("reply email cannot require a response.");
+  if (email.deliveryState === "cancelled"
+    && (!email.cancelledAt || !email.cancelledBy || !email.cancellationReason)) {
+    throw new Error("cancelled email is missing cancellation audit metadata.");
+  }
   return email;
 }
 
@@ -97,6 +105,15 @@ function parseEvent(value: unknown): MailEvent {
       id: string(raw.id, "mail event.id"),
       at: string(raw.at, "mail event.at"),
       error: string(raw.error, "mail event.error"),
+    };
+  }
+  if (type === "email.cancelled") {
+    return {
+      type,
+      id: string(raw.id, "mail event.id"),
+      at: string(raw.at, "mail event.at"),
+      by: string(raw.by, "mail event.by"),
+      reason: string(raw.reason, "mail event.reason"),
     };
   }
   if (type === "email.reply_reserved" || type === "email.answered") {
@@ -220,17 +237,36 @@ export class MailStore {
     if (!email) throw new Error(`Journal event references unknown email ${event.id}.`);
     if (event.type === "email.delivered") {
       if (email.deliveryState === "delivered") return;
-      if (email.deliveryState === "failed") throw new Error(`Cannot deliver failed email ${email.id}.`);
+      if (email.deliveryState === "failed" || email.deliveryState === "cancelled") {
+        throw new Error(`Cannot deliver ${email.deliveryState} email ${email.id}.`);
+      }
       email.deliveryState = "delivered";
       email.deliveredAt = event.at;
       delete email.error;
       return;
     }
     if (event.type === "email.failed") {
+      if (email.deliveryState === "cancelled") return;
       if (email.deliveryState === "failed" && email.error === event.error) return;
       if (email.answeredAt) throw new Error(`Cannot fail answered email ${email.id}.`);
       email.deliveryState = "failed";
       email.error = event.error;
+      return;
+    }
+    if (event.type === "email.cancelled") {
+      if (email.deliveryState === "cancelled") {
+        if (email.cancelledAt === event.at && email.cancelledBy === event.by && email.cancellationReason === event.reason) return;
+        throw new Error(`Email ${email.id} has conflicting cancellation metadata.`);
+      }
+      if (!email.requiresResponse || email.kind !== "request") throw new Error(`Email ${email.id} has no response obligation to cancel.`);
+      if (email.answeredAt) throw new Error(`Cannot cancel answered email ${email.id}.`);
+      if (email.replyReservedBy) throw new Error(`Cannot cancel ${email.id} while reply ${email.replyReservedBy} is pending delivery.`);
+      if (email.deliveryState === "failed") throw new Error(`Cannot cancel failed email ${email.id}.`);
+      email.deliveryState = "cancelled";
+      email.cancelledAt = event.at;
+      email.cancelledBy = event.by;
+      email.cancellationReason = event.reason;
+      delete email.error;
       return;
     }
     if (event.type === "email.reply_reserved") {
@@ -328,6 +364,20 @@ export class MailStore {
     });
   }
 
+  async cancelRequest(id: string, by: string, reason: string): Promise<EmailEnvelope> {
+    await this.transact(() => {
+      const email = this.emails.get(id);
+      if (!email) throw new Error(`Unknown email ${id}.`);
+      if (email.deliveryState === "cancelled") return [];
+      if (!email.requiresResponse || email.kind !== "request") throw new Error(`${id} has no response obligation to cancel.`);
+      if (email.answeredAt) throw new Error(`${id} was already answered by ${email.answeredBy}.`);
+      if (email.replyReservedBy) throw new Error(`${id} already has reply ${email.replyReservedBy} pending delivery.`);
+      if (email.deliveryState === "failed") throw new Error(`${id} already failed delivery.`);
+      return [{ type: "email.cancelled", id, at: nowIso(), by, reason }];
+    });
+    return this.get(id)!;
+  }
+
   async markDelivered(ids: readonly string[]): Promise<void> {
     await this.transact(() => {
       const at = nowIso();
@@ -351,7 +401,7 @@ export class MailStore {
     await this.transact(() => {
       const email = this.emails.get(id);
       if (!email) throw new Error(`Unknown email ${id}.`);
-      if (email.deliveryState === "failed") return [];
+      if (email.deliveryState === "failed" || email.deliveryState === "cancelled") return [];
       const at = nowIso();
       const events: MailEvent[] = [{ type: "email.failed", id, at, error }];
       if (email.kind === "reply" && email.inReplyTo) {

@@ -23,13 +23,14 @@ This is structural attribution only. Workers share a workspace, so the extension
 - `Ctrl+O`: visible recorded conversation
 - `i`: open Inbox
 - `e`, `k`, `r`, `a`, `x`, `m`: compose, stop, restart, archive, clear failure, change effort
+- `/agents cancel <request-id> <reason>`: durably close an intentionally abandoned Inbox obligation after its recipient is inactive
 - `Esc`: close
 
 The third row prioritizes active edit/write intent, then unverified shell/custom work, then runtime activity. Its run aggregate includes successful explicit mutations only.
 
 ### Detail
 
-`Tab` cycles Work, Activity, Inbox, and Profile/Lifecycle. `i` jumps to Inbox and back. In Work, use `↑` / `↓` to select an item and `d` to open a successful edit patch. `Esc` returns to the list.
+`Tab` cycles Work, Activity, Inbox, and Profile/Lifecycle. `i` jumps to Inbox and back. Inbox shows the exact request IDs needed by `cancel_request` or `/agents cancel`; cancellation requires an inactive recipient and a substantive audit reason. In Work, use `↑` / `↓` to select an item and `d` to open a successful edit patch. `Esc` returns to the list.
 
 The diff view is scrollable with arrows, Page Up/Down, Home/End, and closes with `d` or `Esc`. The live event preview is bounded to 8 KB/200 lines; opening it upgrades from the persisted session result when available, bounded to 50 KB/2,000 lines. Truncation notes distinguish the two sources. Dashboard rows and every terminal line are viewport/width bounded.
 

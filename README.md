@@ -25,6 +25,7 @@ send_email(to, subject, message, priority, lifecycle?)
 fetch_emails()
 inspect_agent(address)
 wait_for_replies(request_ids, timeout_seconds, collect)
+cancel_request(request_id, reason)
 manage_agent(address, action)
 ```
 
@@ -42,7 +43,7 @@ Re: [mail-id] Original subject
 
 High-priority mail steers a running recipient at the next safe boundary. Low-priority mail waits until the recipient settles. If a successful worker finishes with visible final text but forgets `send_email`, the broker mechanically sends that text through the exact durable reply protocol; truly silent runs are automatically prompted to respond.
 
-`send_email` returns the allocated request/correlation ID, exact expected reply subject, effective recipient role/tools/model, finite persisted lifecycle policy, and delivery state. `inspect_agent` previews the same effective profile without spawning. `wait_for_replies` joins several delegated requests and can collect their replies without separate model turns. `manage_agent` is main-thread-only and supports `stop`, `restart`, `archive`, and `clear_failure`; workers continue to receive only the two email tools.
+`send_email` returns the allocated request/correlation ID, exact expected reply subject, effective recipient role/tools/model, finite persisted lifecycle policy, and delivery state. `inspect_agent` previews the same effective profile without spawning. `wait_for_replies` joins several delegated requests and can collect their replies without separate model turns. `cancel_request` durably closes one intentionally abandoned obligation to an inactive recipient, recording the actor and reason without fabricating a reply. `manage_agent` is main-thread-only and supports `stop`, `restart`, `archive`, and `clear_failure`; workers continue to receive only the two email tools.
 
 ## Model selection
 
@@ -58,6 +59,7 @@ High-priority mail steers a running recipient at the next safe boundary. Low-pri
 - `/agents stop <address>`
 - `/agents restart <address>`
 - `/agents archive <address>`
+- `/agents cancel <request-id> <reason>`
 - `/agents clear-failure <address>`
 - `/agents effort <address> <off|minimal|low|medium|high|xhigh|max>`
 
@@ -112,7 +114,7 @@ Provider definitions, the model catalog, and persistent credentials are snapshot
 
 State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. An OS-visible lease permits only one live broker to own a parent-session namespace; a second process receives the recorded PID/acquisition time, and an abruptly abandoned lease becomes recoverable after 10 seconds. Mail is journaled before acceptance and worker sessions are resumed after reload. The initial mail contains durable lifecycle spawn intent and the registry record is saved before worker/provider startup; startup reconciles queued mail whose recipient record was not persisted before a crash without widening its accepted policy. Run, active-run stall, prompt, spawn, abort, dispose, and global shutdown deadlines are finite. Broker shutdown is bounded, but retains namespace ownership when timed-out late mutation cannot be proven quiescent; see [`docs/lifecycle.md`](docs/lifecycle.md). The journal is maintained during live sessions: excess transitions are compacted into a snapshot and the oldest terminal envelopes above `maxRetainedEmails` are pruned, while every open obligation and retained request/reply pair is preserved. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
 
-Reply obligations use durable reservation, delivery, commit, and release transitions: concurrent replies cannot both claim one request, and a failed reply delivery reopens it. Delivery across process-crash recovery is at least once, not exactly once. Stable email IDs let workers recognize retries and avoid repeating completed side effects. Durability targets ordinary process crashes, not sudden power loss.
+Reply obligations use durable reservation, delivery, commit, release, and explicit administrative-cancellation transitions: concurrent replies cannot both claim one request, a failed reply delivery reopens it, and abandoned work can be closed with an audited reason only after its recipient is inactive. Delivery across process-crash recovery is at least once, not exactly once. Stable email IDs let workers recognize retries and avoid repeating completed side effects. Durability targets ordinary process crashes, not sudden power loss.
 
 Workers are trusted collaborators and may delegate. They share the project working directory in this version; host sandboxing, credential isolation, path restrictions, network policy, and protection from malicious same-user processes are external responsibilities. Prefer effectively read-only roles when running several agents; parallel writable agents can make semantic conflicts even though Pi serializes direct file mutations.
 

@@ -3,7 +3,7 @@ import type { Model } from "@earendil-works/pi-ai";
 
 export type EmailPriority = "high" | "low";
 export type EmailKind = "request" | "reply";
-export type DeliveryState = "queued" | "delivered" | "failed";
+export type DeliveryState = "queued" | "delivered" | "failed" | "cancelled";
 export type AgentStatus = "queued" | "spawning" | "running" | "idle" | "failed" | "stopped" | "paused" | "archived";
 
 export interface EmailEnvelope {
@@ -24,6 +24,9 @@ export interface EmailEnvelope {
   replyReservedBy?: string;
   deliveryState: DeliveryState;
   error?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  cancellationReason?: string;
   /** Durable spawn intent, present only on the first accepted request for a new identity. */
   lifecycleIntent?: LifecyclePolicy;
 }
@@ -220,7 +223,7 @@ export interface AgentInspection {
   lifecycle: LifecyclePolicy;
 }
 
-export type ReplyWaitState = "answered" | "failed" | "stopped" | "archived" | "paused" | "pending";
+export type ReplyWaitState = "answered" | "failed" | "cancelled" | "stopped" | "archived" | "paused" | "pending";
 
 export interface ReplyWaitItem {
   requestId: string;

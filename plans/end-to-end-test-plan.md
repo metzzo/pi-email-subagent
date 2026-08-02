@@ -60,7 +60,7 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-065 | Parent provider inheritance | Isolated worker runtimes inherit an extension-start custom/native provider snapshot and fail early for missing model/auth state | `test/unit/model-runtime.test.ts`, optional live K3 scenario |
 | E2E-066 | Side-effect-free inspection | Unknown address preview reports its exact effective profile without spawning or persistence | `test/integration/hardening.test.ts` |
 | E2E-067 | Reply join/collection | Multiple request IDs resolve through structured answered/failed/pending states without JSON polling or a separate reply turn | `test/integration/hardening.test.ts`, optional live K3 scenario |
-| E2E-068 | Main-only lifecycle tools | Stop/restart/archive/clear-failure exist on main; child sessions do not activate them | `test/integration/main-tools.test.ts`, `test/integration/sdk-worker-start.test.ts` |
+| E2E-068 | Main-only coordination tools | Inspect/join/audited cancellation and stop/restart/archive/clear-failure exist on main; child sessions do not activate them | `test/integration/main-tools.test.ts`, `test/integration/sdk-worker-start.test.ts` |
 | E2E-070 | Sender spoofing | Tool input has no sender field; worker-bound closure supplies identity | `test/integration/tools.test.ts` |
 | E2E-071 | Shutdown | Active workers are aborted/paused, disposed, and registry/mail writes flush | Covered by every broker test `finally` plus persistence restart test |
 | E2E-080 | Dashboard width safety | Dashboard lines remain within 20/40/60/80/120-column widths with long addresses and activity | `test/unit/ui.test.ts` |
@@ -77,7 +77,7 @@ Validate the complete extension boundary: package loading, Pi runtime registrati
 | E2E-099 | Mechanical completion reply | A real worker that produces visible final text but omits `send_email` is answered exactly once without another model turn; truly silent fake workers still exercise bounded reminders/escalation | `test/e2e/real-flow.test.ts`, `test/integration/broker.test.ts` |
 | E2E-100 | Terminal worker failure | A crashing provider marks the worker failed, resolves `wait_for_replies` as `failed`, alerts main, and records the failure in the registry | `test/e2e/real-flow.test.ts` |
 | E2E-101 | Sender rate limiting | With a per-sender limit of 3, the fourth parallel send is rejected and only three identities spawn | `test/e2e/real-flow.test.ts` |
-| E2E-102 | Archival obligation guard | Archiving a stopped agent with queued inbound mail is rejected with an actionable error | `test/e2e/real-flow.test.ts` |
+| E2E-102 | Audited abandonment and archival | Archiving a stopped agent with queued mail is rejected; exact-ID cancellation records actor/reason without an answer, clears counts, survives recovery, resolves joins as `cancelled`, and then permits archival | `test/e2e/real-flow.test.ts`, `test/integration/broker.test.ts`, `test/unit/mail-store.test.ts` |
 | E2E-103 | Process-restart restore | Resuming the persisted main session in a new `pi` process restores registry, journal, and worker identity; new mail reuses it | `test/e2e/real-flow.test.ts` |
 | E2E-104 | Orphan-recipient crash recovery | Queued mail with no registry record reconstructs and persists its recipient, then delivers after restart | `test/integration/hardening.test.ts` |
 | E2E-105 | Parallel queue-cap atomicity | Parallel sends cannot jointly exceed per-recipient message/byte capacity | `test/integration/hardening.test.ts` |

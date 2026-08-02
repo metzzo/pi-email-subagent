@@ -26,7 +26,7 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 
 ### Reply validation
 
-Reply subjects are checked strictly, in order: the referenced email must exist, require a response, be unanswered, have no other reply pending delivery, and be delivered; the sender/recipient pair must match the original exactly; the original subject text must match byte-for-byte. A successful reply atomically reserves the obligation, and the original is marked answered when the reply is delivered. If reply delivery fails, the reservation is released and the requester is re-prompted.
+Reply subjects are checked strictly, in order: the referenced email must exist, require a response, be unanswered and not administratively cancelled, have no other reply pending delivery, and be delivered; the sender/recipient pair must match the original exactly; the original subject text must match byte-for-byte. A successful reply atomically reserves the obligation, and the original is marked answered when the reply is delivered. If reply delivery fails, the reservation is released and the requester is re-prompted.
 
 ### Mechanical completion replies
 

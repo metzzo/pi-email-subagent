@@ -23,6 +23,7 @@ Join already-sent response-required requests and wait for their outcomes. Main-t
 |-------|:--------:|---------|
 | `answered` | ✓ | Reply delivered; `reply` contains the full reply envelope |
 | `failed` | ✓ | Request delivery failed, or the recipient agent failed (`error` has the diagnostic) |
+| `cancelled` | ✓ | Main explicitly abandoned the exact request after its recipient became inactive; `error` carries the durable audit actor/reason |
 | `stopped` | ✓ | Recipient is stopped |
 | `archived` | ✓ | Recipient is archived |
 | `paused` | ✓ | Recipient is paused by `maxAgents` capacity and has no live worker |
@@ -49,3 +50,4 @@ Failures throw `Could not wait for replies: <reason>`, so Pi records a native fa
 - Join several independent requests in one call (up to 32) to collect their replies in a single turn.
 - Use a generous timeout for long tasks; `pending` items remain valid and can be joined again later with the same IDs.
 - Treat `failed`/`stopped`/`archived`/`paused` items as recovery signals: retry the agent or redelegate the scope once, then report the blocker.
+- Treat `cancelled` as an explicit administrative outcome, never as successful work or a substantive reply.

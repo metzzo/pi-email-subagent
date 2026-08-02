@@ -8,7 +8,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - Persistent model-addressed Pi workers coordinated through virtual email.
 - Durable at-least-once mail journal with reply reservation/commit/release semantics and crash reconciliation.
-- Main coordination tools: `send_email`, `fetch_emails`, `inspect_agent`, `wait_for_replies`, and `manage_agent`.
+- Main coordination tools: `send_email`, `fetch_emails`, `inspect_agent`, `wait_for_replies`, `cancel_request`, and `manage_agent`.
 - Live `/agents` dashboard, conversation viewer, usage/cost display, and lifecycle controls.
 - Role/address profiles, tool enforcement, spawn control, capacity/rate/queue limits, retention, and configurable model policy.
 - Real scripted-provider Pi RPC E2E suite plus optional paid live-provider acceptance.
@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Work-first `/agents` telemetry and UI: correlated edit/write outcomes, patch statistics and bounded diffs, unverified shell/custom effects, inspection counters, exact-path active warnings, and session-backed crash recovery.
 - Required secret scanning and fail-closed production dependency-license checks with a generated release inventory.
 - Mechanical completion replies that deliver a successful worker's visible final text when it forgets to call `send_email`, without duplicating explicit replies.
+- Exact-ID administrative cancellation for intentionally abandoned requests to inactive recipients, with durable actor/reason audit metadata and no fabricated reply.
 
 ### Changed
 

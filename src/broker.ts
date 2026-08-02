@@ -33,6 +33,8 @@ import type {
 import { byteLength, clone, errorMessage, nowIso, truncateText } from "./util.ts";
 import { emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 
+export const MAX_CANCELLATION_REASON_BYTES = 1_024;
+
 function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
@@ -1337,6 +1339,63 @@ export class AgentBroker {
     });
   }
 
+  async cancelRequest(requestIdInput: string, reasonInput: string): Promise<EmailEnvelope> {
+    this.assertActive();
+    const requestId = requestIdInput.trim();
+    const reason = reasonInput.trim();
+    if (!requestId) throw new Error("Request ID is required.");
+    if (reason.length < 8) throw new Error("Cancellation reason must contain at least 8 characters.");
+    if (byteLength(reason) > MAX_CANCELLATION_REASON_BYTES) {
+      throw new Error(`Cancellation reason exceeds ${MAX_CANCELLATION_REASON_BYTES} UTF-8 bytes.`);
+    }
+    const initial = this.mailStore.get(requestId);
+    if (!initial) throw new Error(`Unknown request ${requestId}.`);
+    if (!initial.requiresResponse || initial.kind !== "request") {
+      throw new Error(`${requestId} has no response obligation to cancel.`);
+    }
+    if (this.isMainIdentity(initial.to)) {
+      throw new Error("Incoming main-thread requests must be answered, not administratively cancelled.");
+    }
+
+    return this.withAddressOperation(initial.to, async () => {
+      const request = this.mailStore.get(requestId);
+      if (!request) throw new Error(`Unknown request ${requestId}.`);
+      if (request.deliveryState === "cancelled") {
+        this.scheduleMailMaintenance();
+        this.emitChange();
+        this.publish();
+        return request;
+      }
+      if (request.answeredAt) throw new Error(`${requestId} was already answered by ${request.answeredBy}.`);
+      if (request.replyReservedBy) throw new Error(`${requestId} already has reply ${request.replyReservedBy} pending delivery.`);
+      const record = this.records.get(request.to);
+      if (!record) throw new Error(`Request recipient ${request.to} has no registered agent.`);
+      const worker = this.workers.get(request.to);
+      const inactive = ["failed", "stopped", "paused", "archived"].includes(record.state)
+        && !worker?.getSnapshot().isStreaming;
+      if (!inactive) {
+        throw new Error("Only requests assigned to an inactive recipient can be cancelled; stop the agent first.");
+      }
+
+      const cancelled = await this.mailStore.cancelRequest(requestId, this.mainAddress, reason);
+      const summary = `Cancelled request ${requestId}: ${truncateText(reason.replace(/\s+/g, " "), 160)}`;
+      record.activity.push({ at: cancelled.cancelledAt ?? nowIso(), kind: "status", summary });
+      record.activity = record.activity.slice(-40);
+      record.updatedAt = nowIso();
+      try {
+        await this.persistRegistry();
+      } catch (error) {
+        this.options.mainAdapter.notifyFailure(
+          `Request ${requestId} was durably cancelled, but registry activity persistence failed: ${errorMessage(error)}`,
+        );
+      }
+      this.scheduleMailMaintenance();
+      this.emitChange();
+      this.publish();
+      return cancelled;
+    });
+  }
+
   async archive(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
     await this.withAddressOperation(address, async () => {
@@ -1436,7 +1495,8 @@ export class AgentBroker {
       ...(record?.currentActivity ? { currentActivity: record.currentActivity } : {}),
       queued: this.mailStore.queued(address).length,
       unanswered: mail.filter((email) =>
-        email.to === address && email.deliveryState === "delivered" && email.requiresResponse && !email.answeredAt).length,
+        email.to === address && email.deliveryState === "delivered" && email.requiresResponse
+          && !email.answeredAt && !email.replyReservedBy).length,
       pendingReplies: mail.filter((email) => email.to === address && Boolean(email.replyReservedBy) && !email.answeredAt).length,
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
@@ -1472,6 +1532,11 @@ export class AgentBroker {
     }
     if (request.deliveryState === "failed") {
       return { requestId, state: "failed", request, error: request.error ?? "Request delivery failed." };
+    }
+    if (request.deliveryState === "cancelled") {
+      const actor = request.cancelledBy ? ` by ${request.cancelledBy}` : "";
+      const reason = request.cancellationReason ? `: ${request.cancellationReason}` : ".";
+      return { requestId, state: "cancelled", request, error: `Request cancelled${actor}${reason}` };
     }
     if (!this.isMainIdentity(request.to)) {
       const record = this.records.get(request.to);
@@ -1583,7 +1648,8 @@ export class AgentBroker {
       const { work, ...withoutWork } = source;
       return { ...clone(withoutWork), ...(work ? { work: lightweightWork(work) } : {}) } as AgentRecord;
     }).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const unanswered = this.mailStore.list().filter((email) => email.requiresResponse && !email.answeredAt && email.deliveryState === "delivered").length;
+    const unanswered = this.mailStore.list().filter((email) =>
+      email.requiresResponse && !email.answeredAt && !email.replyReservedBy && email.deliveryState === "delivered").length;
     return { mainAddress: this.mainAddress, agents, unanswered, queuedMail: this.mailStore.countQueued() };
   }
 
