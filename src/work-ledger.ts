@@ -62,9 +62,11 @@ export function displayWorkPath(input: unknown, cwd: string): { path?: string; d
   if (typeof input !== "string") return {};
   const normalized = sanitizeWorkPath(normalizeToolPath(input));
   if (!normalized) return {};
-  const absolute = canonicalizeNearest(resolve(cwd, normalized));
+  const canonicalCwd = canonicalizeNearest(resolve(cwd));
+  if (!sanitizeWorkPath(canonicalCwd)) return {};
+  const absolute = canonicalizeNearest(resolve(canonicalCwd, normalized));
   if (!sanitizeWorkPath(absolute)) return {};
-  const rel = relative(cwd, absolute);
+  const rel = relative(canonicalCwd, absolute);
   const inside = rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
   return { path: absolute, displayPath: inside ? (rel || ".") : `(absolute) ${absolute}` };
 }
