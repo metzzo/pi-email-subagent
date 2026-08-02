@@ -77,7 +77,9 @@ describe("mail prompts", () => {
     assert.match(prompt, /inspect the same files.*review the result.*run validation/i);
     assert.match(prompt, /at most one justified recovery attempt/i);
     assert.match(prompt, /then report the failure or blocker/i);
-    assert.match(prompt, /main-only coordination tools.*inspect_agent.*wait_for_replies.*manage_agent/is);
+    assert.match(prompt, /main-only coordination tools.*inspect_agent.*wait_for_replies.*cancel_request.*manage_agent/is);
+    assert.match(prompt, /cancel_request.*only when the user explicitly abandons.*substantive reason/is);
+    assert.match(prompt, /never use cancellation merely to hide an unanswered count/i);
     assert.match(prompt, /capability is uncertain.*inspect_agent/i);
     assert.match(prompt, /Never invent.*mail ID.*expected reply subject/i);
     assert.match(prompt, /wait_for_replies.*instead of polling/i);

@@ -14,6 +14,14 @@ export interface WaitForRepliesToolDetails {
   result?: WaitForRepliesResult;
 }
 
+export interface CancelRequestToolDetails {
+  requestId?: string;
+  recipient?: string;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  reason?: string;
+}
+
 export interface ManageAgentToolDetails {
   address?: string;
   action?: "stop" | "restart" | "archive" | "clear_failure";
@@ -123,6 +131,43 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     },
   });
 
+  const cancel = defineTool({
+    name: "cancel_request",
+    label: "Cancel request",
+    description:
+      "Administratively close one exact response obligation without fabricating a reply. Main-thread only. The recipient must already be inactive (failed, stopped, paused, or archived), and a bounded substantive audit reason is required. This does not stop active work; stop the recipient first.",
+    promptSnippet: "Cancel an abandoned request to an inactive subagent by its real correlation ID.",
+    promptGuidelines: [
+      "Cancel only when the user has explicitly abandoned the request or its inactive recipient cannot safely resume.",
+      "Never cancel merely to hide an unanswered count; preserve the substantive reason for the audit journal.",
+    ],
+    executionMode: "sequential" as const,
+    parameters: Type.Object({
+      request_id: Type.String({ minLength: 1, description: "Exact request/correlation ID returned by send_email" }),
+      reason: Type.String({ minLength: 8, maxLength: 1024, description: "Why this obligation is being intentionally abandoned" }),
+    }, { additionalProperties: false }),
+    async execute(_id, params) {
+      try {
+        const broker = getBroker();
+        if (!broker) throw new Error("Email broker is not ready.");
+        const request = await broker.cancelRequest(params.request_id, params.reason);
+        const details: CancelRequestToolDetails = {
+          requestId: request.id,
+          recipient: request.to,
+          cancelledAt: request.cancelledAt,
+          cancelledBy: request.cancelledBy,
+          reason: request.cancellationReason,
+        };
+        return textResult(
+          `Cancelled request ${request.id} to ${request.to}.\nReason: ${request.cancellationReason}`,
+          details,
+        );
+      } catch (error) {
+        throw new Error(`Could not cancel request: ${errorMessage(error)}`);
+      }
+    },
+  });
+
   const manage = defineTool({
     name: "manage_agent",
     label: "Manage agent",
@@ -154,5 +199,5 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     },
   });
 
-  return [inspect, wait, manage] as const;
+  return [inspect, wait, cancel, manage] as const;
 }

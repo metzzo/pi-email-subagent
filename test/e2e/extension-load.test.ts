@@ -12,6 +12,7 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   const extension = result.extensions.find((item) => item.tools.has("send_email"));
   assert.ok(extension, "expected the pi-email-subagent extension");
   assert.deepEqual([...extension.tools.keys()].sort(), [
+    "cancel_request",
     "fetch_emails",
     "inspect_agent",
     "manage_agent",

@@ -426,6 +426,76 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
+  it("audit-cancels an abandoned request only after its recipient is inactive", async () => {
+    const { broker, workers } = await setup();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "reviewer.retired@gpt-5.4.com",
+        subject: "Review abandoned scope",
+        message: "This work may be abandoned by the owner.",
+        priority: "low",
+      });
+      assert.equal(broker.getSnapshot().unanswered, 1);
+      await assert.rejects(broker.cancelRequest(request.correlationId, "short"), /at least 8/);
+      await assert.rejects(broker.cancelRequest(request.correlationId, "🙂".repeat(300)), /1024 UTF-8 bytes/);
+      const pendingReply = {
+        ...request.envelope,
+        id: "mail_pending_cancellation_race",
+        from: request.envelope.to,
+        to: request.envelope.from,
+        subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+        message: "Reply whose delivery has not committed.",
+        kind: "reply" as const,
+        inReplyTo: request.envelope.id,
+        requiresResponse: false,
+        deliveryState: "queued" as const,
+      };
+      await broker.mailStore.reserveReply(pendingReply, request.envelope.id);
+      assert.equal(broker.getSnapshot().unanswered, 0, "a reply reservation is not still labelled unanswered");
+      assert.equal(broker.inspectAgent(request.envelope.to).unanswered, 0);
+      assert.equal(broker.inspectAgent(request.envelope.to).pendingReplies, 1);
+      await assert.rejects(broker.cancelRequest(request.correlationId, "Cannot beat a reply reservation."), /pending delivery/);
+      await broker.mailStore.markFailed(pendingReply.id, "Simulated reply delivery rollback.");
+      assert.equal(broker.getSnapshot().unanswered, 1);
+
+      await assert.rejects(
+        broker.cancelRequest(request.correlationId, "Owner abandoned this review."),
+        /inactive recipient|stop the agent/i,
+      );
+
+      await broker.stop(request.envelope.to);
+      const cancelled = await broker.cancelRequest(request.correlationId, "Owner abandoned this review after a scope violation.");
+      assert.equal(cancelled.deliveryState, "cancelled");
+      assert.equal(cancelled.cancelledBy, broker.mainAddress);
+      assert.equal(cancelled.cancellationReason, "Owner abandoned this review after a scope violation.");
+      assert.equal(cancelled.answeredAt, undefined, "administrative cancellation is not a fabricated reply");
+      assert.equal(broker.getSnapshot().unanswered, 0);
+      assert.equal(broker.inspectAgent(request.envelope.to).unanswered, 0);
+      assert.deepEqual(broker.fetchUnanswered(request.envelope.to), []);
+
+      const joined = await broker.waitForReplies([request.correlationId], 0, true);
+      assert.equal(joined.complete, true);
+      assert.equal(joined.items[0]?.state, "cancelled");
+      assert.match(joined.items[0]?.error ?? "", /scope violation/);
+      await assert.rejects(
+        workers[0]!.send({
+          to: broker.mainAddress,
+          subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+          message: "Late fabricated result.",
+          priority: "low",
+        }),
+        /has not been delivered|cancel/i,
+      );
+
+      await broker.cancelRequest(request.correlationId, "Idempotent retry uses the original durable reason.");
+      assert.equal(broker.mailStore.get(request.correlationId)?.cancellationReason, "Owner abandoned this review after a scope violation.");
+      await broker.archive(request.envelope.to);
+      assert.equal(broker.inspectAgent(request.envelope.to).state, "archived");
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("supports idle effort changes plus stop and restart controls", async () => {
     const { broker, workers } = await setup();
     try {

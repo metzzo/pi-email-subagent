@@ -5,9 +5,9 @@ import type { AgentBroker } from "../../src/broker.ts";
 import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import type { EmailEnvelope, WaitForRepliesResult } from "../../src/types.ts";
 
-it("exposes inspection, reply joining, and lifecycle control without a spawn tool", async () => {
+it("exposes inspection, reply joining, audited cancellation, and lifecycle control without a spawn tool", async () => {
   const tools = createMainCoordinationTools(() => undefined);
-  assert.deepEqual(tools.map((tool) => tool.name), ["inspect_agent", "wait_for_replies", "manage_agent"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["inspect_agent", "wait_for_replies", "cancel_request", "manage_agent"]);
   assert.equal(tools.some((tool) => tool.name.includes("spawn")), false);
 
   await assert.rejects(
@@ -20,7 +20,17 @@ it("exposes inspection, reply joining, and lifecycle control without a spawn too
     ),
     /Could not inspect agent: Email broker is not ready/,
   );
-  const action = (tools[2].parameters as { properties: { action: unknown } }).properties.action;
+  await assert.rejects(
+    tools[2].execute(
+      "cancel-unready",
+      { request_id: "mail_abandoned", reason: "Owner abandoned the request." },
+      undefined,
+      undefined,
+      {} as never,
+    ),
+    /Could not cancel request: Email broker is not ready/,
+  );
+  const action = (tools[3].parameters as { properties: { action: unknown } }).properties.action;
   assert.deepEqual(action, { type: "string", enum: ["stop", "restart", "archive", "clear_failure"] });
 });
 

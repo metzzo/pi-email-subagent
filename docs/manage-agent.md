@@ -24,7 +24,7 @@ Disposes any worker and creates a fresh one bound to the same persistent session
 Frees the agent's activation lease (capacity) while keeping its record, session, and mail. Guard rails:
 
 - Running, spawning, or streaming agents must be stopped and settled first.
-- The agent must have no queued mail and no open obligations in either direction — no unanswered requests addressed to it, and no requests it sent that are still unanswered or have a reply pending delivery. (This is why completed identities should answer all mail before archival.)
+- The agent must have no queued mail and no open obligations in either direction — no unanswered requests addressed to it, and no requests it sent that are still unanswered or have a reply pending delivery. Completed identities should answer all mail. If the user intentionally abandons a request to an inactive recipient, close that exact obligation first with [`cancel_request`](cancel-request.md); cancellation is audited and is not a fabricated answer.
 
 Already-archived agents are a no-op. Sending new mail to an archived address restores it (disposition `restored`). Archive clean completed identities instead of creating unlimited replacement addresses.
 
@@ -42,4 +42,4 @@ restart completed for reviewer.audit@gpt-5.6-sol.com. State: idle.
 
 ## Equivalents
 
-The same actions are available interactively: `/agents stop|restart|archive|clear-failure <address>`, or the dashboard (`/agents`, keys `k` / `r` / `a` / `x`). Effort changes are a separate surface: `/agents effort <address> <level>` or the dashboard `m` key, valid only while the agent is idle.
+The same actions are available interactively: `/agents stop|restart|archive|clear-failure <address>`, or the dashboard (`/agents`, keys `k` / `r` / `a` / `x`). Effort changes are a separate surface: `/agents effort <address> <level>` or the dashboard `m` key, valid only while the agent is idle. Abandoned obligations use the separate exact-ID command `/agents cancel <request-id> <reason>`.

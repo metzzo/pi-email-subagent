@@ -21,10 +21,11 @@
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
  *   user "E2E INSPECT"                              → inspect_agent on the scout
  *   user "E2E STOP" / "E2E ARCHIVE"                 → manage_agent
+ *   user "E2E CANCEL"                                → cancel_request on latest request
  *   send_email result                                → wait_for_replies for all
  *                                                      correlation IDs seen so
  *                                                      far (or finish on NOWAIT)
- *   wait_for_replies / manage_agent / inspect result → final text
+ *   wait/cancel/manage/inspect result                 → final text
  *
  * Worker script (system prompt contains "Subagent Role"):
  *   email batch / steer / enforcement prompt → fetch_emails (after optional
@@ -142,6 +143,7 @@ function planMain(messages: readonly Message[]): Plan {
       return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: ids, timeout_seconds: 90, collect: true } }] };
     }
     if (last.toolName === "wait_for_replies") return { text: "E2E COMPLETE" };
+    if (last.toolName === "cancel_request") return { text: "E2E CANCELLED" };
     if (last.toolName === "manage_agent") return { text: "E2E MANAGED" };
     if (last.toolName === "inspect_agent") return { text: "E2E INSPECTED" };
     return { text: "E2E PONG" };
@@ -153,6 +155,13 @@ function planMain(messages: readonly Message[]): Plan {
   }
   if (lastText.includes("E2E ARCHIVE")) {
     return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "archive" } }] };
+  }
+  if (lastText.includes("E2E CANCEL")) {
+    const requestId = correlationIds(messages).at(-1) ?? "mail_missing";
+    return { toolCalls: [{ name: "cancel_request", arguments: {
+      request_id: requestId,
+      reason: "The owner intentionally abandoned this queued E2E request.",
+    } }] };
   }
   if (lastText.includes("E2E INSPECT")) {
     return { toolCalls: [{ name: "inspect_agent", arguments: { address: MOCK_WORKER_ADDRESS } }] };

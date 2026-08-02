@@ -89,6 +89,38 @@ describe("durable mail store", () => {
     assert.equal(restored.get("mail_original")?.answeredBy, "mail_reply_retry");
   });
 
+  it("durably cancels an abandoned obligation without fabricating an answer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
+    const path = join(root, "mail.jsonl");
+    const store = new MailStore(path);
+    await store.init();
+    await store.accept(email("mail_abandoned"));
+    await store.markDelivered(["mail_abandoned"]);
+
+    const cancelled = await store.cancelRequest("mail_abandoned", "main@gpt-5.4.com", "Recipient was intentionally retired.");
+    assert.equal(cancelled.deliveryState, "cancelled");
+    assert.equal(cancelled.cancelledBy, "main@gpt-5.4.com");
+    assert.equal(cancelled.cancellationReason, "Recipient was intentionally retired.");
+    assert.ok(cancelled.cancelledAt);
+    assert.equal(cancelled.answeredAt, undefined);
+    assert.deepEqual(store.unanswered("worker.task@gpt-5.4.com"), []);
+
+    await store.cancelRequest("mail_abandoned", "main@gpt-5.4.com", "A duplicate administrative attempt.");
+    await store.markFailed("mail_abandoned", "late delivery failure");
+    assert.equal(store.get("mail_abandoned")?.deliveryState, "cancelled");
+    const events = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(events.filter((event) => event.type === "email.cancelled").length, 1);
+
+    const restored = new MailStore(path);
+    await restored.init();
+    assert.equal(restored.get("mail_abandoned")?.deliveryState, "cancelled");
+    assert.equal(restored.get("mail_abandoned")?.cancellationReason, "Recipient was intentionally retired.");
+    await restored.compact();
+    const compacted = new MailStore(path);
+    await compacted.init();
+    assert.equal(compacted.get("mail_abandoned")?.cancelledBy, "main@gpt-5.4.com");
+  });
+
   it("recovers a reply creation truncated before its reservation event", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
     const path = join(root, "mail.jsonl");

@@ -595,8 +595,8 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
-  it("rejects archival while queued obligations remain", { timeout: 240_000 }, async () => {
-    const { client, agentDir } = await start();
+  it("rejects archival until a queued obligation is explicitly cancelled", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
     try {
       let mark = client.mark();
       await client.prompt("E2E DELEGATE");
@@ -622,7 +622,26 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.equal(isErrorResult(archive), true);
       assert.match(toolText(archive), /queued mail|unanswered obligations|cannot be archived/i);
       await client.waitForSettlement(mark);
+
+      mark = client.mark();
+      await client.prompt("E2E CANCEL");
+      const cancellation = await client.waitFor(toolEnd("cancel_request"), "audited cancellation", 90_000, mark);
+      assert.equal(isErrorResult(cancellation), false);
+      assert.match(toolText(cancellation), new RegExp(queued.correlationId));
+      assert.match(toolText(cancellation), /intentionally abandoned/i);
+      await client.waitForSettlement(mark);
+
+      mark = client.mark();
+      await client.prompt("E2E ARCHIVE");
+      const archived = await client.waitFor(toolEnd("manage_agent"), "archive after cancellation", 90_000, mark);
+      assert.equal(isErrorResult(archived), false);
+      await client.waitForSettlement(mark);
       assert.equal(await client.close(), 0, client.stderr);
+
+      const journal = await readJournal(agentDir, sessionId);
+      assert.equal(journal.filter((event) => event.type === "email.cancelled" && event.id === queued.correlationId).length, 1);
+      const registry = await readRegistry(agentDir, sessionId);
+      assert.equal(registry.agents.find((agent: any) => agent.address === WORKER_ADDRESS)?.state, "archived");
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });

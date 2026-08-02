@@ -125,7 +125,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const [inspectAgentTool, waitForRepliesTool, manageAgentTool] = createMainCoordinationTools(() => broker);
+  const [inspectAgentTool, waitForRepliesTool, cancelRequestTool, manageAgentTool] = createMainCoordinationTools(() => broker);
 
   pi.registerTool({
     ...fetchTool,
@@ -150,6 +150,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
 
   pi.registerTool(inspectAgentTool);
   pi.registerTool(waitForRepliesTool);
+  pi.registerTool(cancelRequestTool);
   pi.registerTool(manageAgentTool);
 
   pi.registerMessageRenderer<EmailEnvelope>(MESSAGE_TYPE, (message, { expanded }, theme) => {
@@ -205,6 +206,10 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       } else if (action === "archive" && parts[1]) {
         await broker.archive(parts[1]);
         ctx.ui.notify(`Archived ${parts[1]}.`, "info");
+      } else if (action === "cancel") {
+        if (!parts[1] || parts.length < 3) throw new Error("Usage: /agents cancel <request-id> <reason>");
+        const cancelled = await broker.cancelRequest(parts[1], parts.slice(2).join(" "));
+        ctx.ui.notify(`Cancelled ${cancelled.id} to ${cancelled.to}.`, "info");
       } else if (action === "clear-failure" && parts[1]) {
         await broker.clearFailure(parts[1]);
         ctx.ui.notify(`Cleared failure for ${parts[1]}.`, "info");
@@ -221,7 +226,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("agents", {
-    description: "Inspect and control email subagents: /agents [address|stop|restart|archive|clear-failure|effort]",
+    description: "Inspect and control email subagents: /agents [address|stop|restart|archive|cancel|clear-failure|effort]",
     handler: showAgents,
   });
 
