@@ -1,5 +1,6 @@
 node_modules/
 dist/
 coverage/
+plans/
 *.log
 .pi/subagents.json
