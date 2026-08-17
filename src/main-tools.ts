@@ -6,6 +6,8 @@ import { textResult } from "./tool-result.ts";
 import type { AgentInspection, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
 import { byteLength, errorMessage } from "./util.ts";
 
+const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
 }
@@ -48,7 +50,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "inspect_agent",
     label: "Inspect agent",
     description:
-      "Preview or inspect a virtual email agent without spawning it. Returns the effective model, effort, role, tools, writable/read-only guidance, capacity, mailbox counts, state, usage, and last failure. Use before delegation when recipient capability is uncertain.",
+      "Preview or inspect a virtual email agent without spawning it. For a prospective identity, optional effort previews an initial send override. Returns the effective model, effort, role, tools, writable/read-only guidance, capacity, mailbox counts, state, usage, and last failure. Use before delegation when recipient capability is uncertain.",
     promptSnippet: "Inspect effective subagent capabilities and state without spawning.",
     promptGuidelines: [
       "Use inspect_agent before sending repository changes when you are not certain the address has edit/write/bash tools.",
@@ -57,12 +59,13 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     executionMode: "parallel" as const,
     parameters: Type.Object({
       address: Type.String({ description: "Subagent address to inspect or preview" }),
+      effort: Type.Optional(EffortSchema),
     }, { additionalProperties: false }),
     async execute(_id, params) {
       try {
         const broker = getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
-        const inspection = broker.inspectAgent(params.address);
+        const inspection = broker.inspectAgent(params.address, params.effort);
         const lines = [
           `${inspection.exists ? "Existing" : "Prospective"} agent: ${inspection.address}`,
           `State: ${inspection.state}`,

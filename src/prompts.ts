@@ -48,7 +48,7 @@ Your email identity is:
 
 You can communicate with other agents using:
 
-- \`send_email(to, subject, message, priority, lifecycle?)\`
+- \`send_email(to, subject, message, priority, effort?, lifecycle?)\`
 - \`fetch_emails()\`
 
 ### Valid addresses
@@ -60,7 +60,7 @@ Only use these currently routable model IDs:
 ${modelIds.join("\n") || "(none)"}
 </available-email-models>
 
-Never invent or guess a model name. Sending to a valid unknown address creates that agent; sending to an existing address reuses its persistent context.
+Never invent or guess a model name. Sending to a valid unknown address creates that agent; sending to an existing address reuses its persistent context. An optional \`effort\` override (\`off|minimal|low|medium|high|xhigh|max\`) is accepted only on the first send that creates an unknown identity and is then persisted.
 
 ### Model selection policy
 

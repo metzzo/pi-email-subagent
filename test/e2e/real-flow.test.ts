@@ -389,6 +389,43 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("previews and persists an xhigh effort override through the real tool and SDK worker", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
+    try {
+      let mark = client.mark();
+      await client.prompt("E2E INSPECT XHIGH");
+      const prospective = (await client.waitFor(toolEnd("inspect_agent"), "xhigh prospective inspection", 90_000, mark))
+        .result as any;
+      assert.equal(prospective.details.inspection.exists, false);
+      assert.equal(prospective.details.inspection.effort, "xhigh");
+      await client.waitForSettlement(mark);
+
+      mark = client.mark();
+      await client.prompt("E2E DELEGATE XHIGH");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "xhigh send", 90_000, mark));
+      assert.equal(sent.spawned, true);
+      assert.equal(sent.envelope.effortIntent, "xhigh");
+      assert.equal(sent.recipientEffort, "xhigh");
+      await client.waitFor(toolEnd("wait_for_replies"), "xhigh worker reply", 120_000, mark);
+      await client.waitForSettlement(mark);
+
+      const registry = await eventuallyRegistry(
+        agentDir,
+        sessionId,
+        (candidate) => candidate.agents?.[0]?.state === "idle",
+        "with an idle xhigh worker",
+      );
+      assert.equal(registry.agents[0]?.effort, "xhigh");
+      const journal = await readJournal(agentDir, sessionId);
+      const created = journal.find((event) => event.type === "email.created" && event.email.id === sent.correlationId);
+      assert.equal(created?.email?.effortIntent, "xhigh");
+      assert.equal(await client.close(), 0, client.stderr);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("delivers an uncollected reply as an ordinary main mail turn", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {

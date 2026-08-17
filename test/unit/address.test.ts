@@ -38,10 +38,24 @@ describe("email address routing", () => {
     assert.throws(() => parseSubagentAddress("scout.task@missing.com", catalog), /not routable/);
   });
 
-  it("omits ambiguous model IDs from routable addresses", () => {
-    const catalog = new ModelCatalog([fakeModel("shared", "openai-codex"), fakeModel("shared", "kimi-coding")]);
+  it("omits ambiguous model IDs from routable addresses without a matching provider preference", () => {
+    const models = [fakeModel("shared", "openai-codex"), fakeModel("shared", "github-copilot")];
+    const catalog = new ModelCatalog(models);
     assert.deepEqual(catalog.routableModelIds, []);
     assert.throws(() => parseSubagentAddress("scout.task@shared.com", catalog), /ambiguous/);
+
+    const unmatched = new ModelCatalog(models, "kimi-coding");
+    assert.deepEqual(unmatched.routableModelIds, []);
+    assert.throws(() => parseSubagentAddress("scout.task@shared.com", unmatched), /ambiguous/);
+  });
+
+  it("routes an ambiguous model ID through the current provider preference", () => {
+    const catalog = new ModelCatalog(
+      [fakeModel("gpt-5.6-sol", "github-copilot"), fakeModel("gpt-5.6-sol", "openai-codex")],
+      "openai-codex",
+    );
+    assert.deepEqual(catalog.routableModelIds, ["gpt-5.6-sol"]);
+    assert.equal(parseSubagentAddress("worker.task@gpt-5.6-sol.com", catalog).model.provider, "openai-codex");
   });
 
   it("creates the required main address", () => {

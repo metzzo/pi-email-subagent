@@ -18,6 +18,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Required secret scanning and fail-closed production dependency-license checks with a generated release inventory.
 - Mechanical completion replies that deliver a successful worker's visible final text when it forgets to call `send_email`, without duplicating explicit replies.
 - Exact-ID administrative cancellation for intentionally abandoned requests to inactive recipients, with durable actor/reason audit metadata and no fabricated reply.
+- Initial-delegation `effort` overrides on `send_email`, including side-effect-free prospective previews through `inspect_agent` and crash-safe spawn-intent recovery.
 
 ### Changed
 
@@ -26,6 +27,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Mail and joined-reply tool output is bounded to Pi's context-safe byte/line recommendations.
 - Conversation rendering collapses mutation arguments and never dumps raw write/replacement content; edit results use bounded patch previews.
 - The dashboard and Agents widget label paused, stopped, and archived identities uniformly as `closed`; internal lifecycle/API states remain distinct.
+- When an enabled model ID exists under multiple providers, email routing prefers the main session's current provider and remains fail-closed when that does not uniquely resolve the model.
 
 ### Security
 

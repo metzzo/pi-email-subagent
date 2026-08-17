@@ -14,7 +14,10 @@ export class AddressError extends Error {
 export class ModelCatalog {
   private readonly byId = new Map<string, Model<any>[]>();
 
-  constructor(models: readonly Model<any>[]) {
+  constructor(
+    models: readonly Model<any>[],
+    private readonly preferredProvider?: string,
+  ) {
     for (const model of models) {
       const key = model.id.toLowerCase();
       const entries = this.byId.get(key) ?? [];
@@ -25,9 +28,16 @@ export class ModelCatalog {
 
   get routableModelIds(): string[] {
     return [...this.byId.entries()]
-      .filter(([, models]) => models.length === 1)
-      .map(([, models]) => models[0]!.id)
+      .filter(([, models]) => this.preferredMatch(models) !== undefined)
+      .map(([, models]) => this.preferredMatch(models)!.id)
       .sort();
+  }
+
+  private preferredMatch(models: readonly Model<any>[]): Model<any> | undefined {
+    if (models.length === 1) return models[0];
+    if (!this.preferredProvider) return undefined;
+    const preferred = models.filter((model) => model.provider === this.preferredProvider);
+    return preferred.length === 1 ? preferred[0] : undefined;
   }
 
   resolve(modelId: string): Model<any> {
@@ -36,13 +46,14 @@ export class ModelCatalog {
       const available = this.routableModelIds.join(", ") || "none";
       throw new AddressError(`Model \"${modelId}\" is not routable. Available email models: ${available}.`);
     }
-    if (matches.length > 1) {
+    const resolved = this.preferredMatch(matches);
+    if (!resolved) {
       const providers = matches.map((model) => model.provider).join(", ");
       throw new AddressError(
         `Model ID \"${modelId}\" is ambiguous across providers (${providers}) and cannot be encoded in an email address.`,
       );
     }
-    return matches[0]!;
+    return resolved;
   }
 }
 

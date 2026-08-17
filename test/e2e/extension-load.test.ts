@@ -52,7 +52,17 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   assert.doesNotMatch(emailOutput, /clipboard|https:\/\/bad\.invalid|\x1b|\x07/);
   assert.match(emailOutput, /History result/);
 
+  const enumFromOptional = (schema: unknown): string[] | undefined => {
+    const typed = schema as { enum?: string[]; anyOf?: Array<{ enum?: string[] }> };
+    return typed.enum ?? typed.anyOf?.find((item) => item.enum)?.enum;
+  };
   const sendDefinition = extension.tools.get("send_email")!.definition;
+  const sendProperties = (sendDefinition.parameters as { properties: Record<string, unknown> }).properties;
+  assert.deepEqual(enumFromOptional(sendProperties.effort), ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  const inspectDefinition = extension.tools.get("inspect_agent")!.definition;
+  const inspectProperties = (inspectDefinition.parameters as { properties: Record<string, unknown> }).properties;
+  assert.deepEqual(enumFromOptional(inspectProperties.effort), ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
   const callComponent = sendDefinition.renderCall!({
     to: "worker.history@gpt-5.4.com\x1b]0;recipient\x07",
     subject: "Subject\nline\x1b]52;c;secret\x07",

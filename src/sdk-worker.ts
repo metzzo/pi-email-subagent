@@ -29,6 +29,7 @@ import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem } from "./work-ledger.ts";
 
 const PrioritySchema = StringEnum(["high", "low"] as const);
+const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
 const LifecycleSchema = Type.Object({
   spawnTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
   promptAcceptanceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
@@ -52,11 +53,12 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     name: "send_email",
     label: "Send email",
     description:
-      "Send virtual email to another Pi agent. Sender identity is automatic. Unknown valid recipients spawn. Use low normally and high only for blockers. To answer, copy the exact `Re: [mail-id] subject` from fetch_emails().",
+      "Send virtual email to another Pi agent. Sender identity is automatic. Unknown valid recipients spawn; optional effort applies only to that initial creation. Use low normally and high only for blockers. To answer, copy the exact `Re: [mail-id] subject` from fetch_emails().",
     promptSnippet: "Send internal mail to persistent subagents; unknown valid addresses spawn.",
     promptGuidelines: [
       "Use low-priority email by default; high is only for blockers that should change ongoing work.",
       "Answer received requests with the exact reply subject returned by fetch_emails().",
+      "Use send_email effort only on the first request that creates an unknown identity; later mail cannot mutate persisted effort.",
     ],
     executionMode: "parallel" as const,
     parameters: Type.Object({
@@ -64,6 +66,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
       subject: Type.String({ description: "New subject, or exact reply subject from fetch_emails()" }),
       message: Type.String({ description: "Self-contained request or substantive response" }),
       priority: PrioritySchema,
+      effort: Type.Optional(EffortSchema),
       lifecycle: Type.Optional(LifecycleSchema),
     }, { additionalProperties: false }),
     async execute(_id, params, signal) {
