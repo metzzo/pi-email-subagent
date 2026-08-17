@@ -29,6 +29,8 @@ export interface EmailEnvelope {
   cancellationReason?: string;
   /** Durable spawn intent, present only on the first accepted request for a new identity. */
   lifecycleIntent?: LifecyclePolicy;
+  /** Durable initial thinking-level intent for crash-safe identity creation. */
+  effortIntent?: ThinkingLevel;
 }
 
 export interface ParsedAddress {
@@ -179,6 +181,8 @@ export interface SendEmailInput {
   subject: string;
   message: string;
   priority: EmailPriority;
+  /** Initial effort override, accepted only when this send creates an unknown identity. */
+  effort?: ThinkingLevel;
   lifecycle?: LifecycleOverride;
 }
 
@@ -307,6 +311,7 @@ export interface BrokerOptions {
   namespaceDir: string;
   config: SubagentConfig;
   models: Model<any>[];
+  preferredProvider?: string;
   mainAdapter: MainAdapter;
   workerFactory: (model: Model<any>) => WorkerTransport | Promise<WorkerTransport>;
   projectTrusted: boolean;

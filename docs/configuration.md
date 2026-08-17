@@ -77,10 +77,10 @@ All values are integer milliseconds from 1 through `2147483647` (Node's runtime-
 ```
 
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
-- Resolution order per field: exact address → role → defaults. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
+- Resolution order per configured profile field: exact address → role → defaults. An initial `send_email.effort` overrides those three levels only while creating an unknown identity; the resulting effort is persisted. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
 - `canSpawn` (default `true`) controls whether an agent may send to an unknown address and thereby create a new identity. Spawn-disabled agents get an actionable error and may still reuse existing addresses, reply, and mail main; their system prompt states the restriction. Main is never spawn-restricted.
 - Unknown tool names are dropped at worker start and noted in the agent's activity log.
-- Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result.
+- Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
 ## Default roles

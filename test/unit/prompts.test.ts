@@ -33,7 +33,8 @@ describe("mail prompts", () => {
       { address: "main@gpt-5.4.com", modelId: "gpt-5.4", effort: "high" },
       ["gpt-5.4", "kimi-for-coding"],
     );
-    assert.match(prompt, /send_email/);
+    assert.match(prompt, /send_email\(to, subject, message, priority, effort\?, lifecycle\?\)/);
+    assert.match(prompt, /effort.*off\|minimal\|low\|medium\|high\|xhigh\|max.*first send.*unknown identity/is);
     assert.match(prompt, /fetch_emails/);
     assert.match(prompt, /Every response-required email/);
     assert.match(prompt, /gpt-5\.4/);

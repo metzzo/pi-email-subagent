@@ -19,7 +19,7 @@
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
  *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
- *   user "E2E INSPECT"                              → inspect_agent on the scout
+ *   user "E2E INSPECT [XHIGH]"                      → inspect_agent on the scout
  *   user "E2E STOP" / "E2E ARCHIVE"                 → manage_agent
  *   user "E2E CANCEL"                                → cancel_request on latest request
  *   send_email result                                → wait_for_replies for all
@@ -164,7 +164,13 @@ function planMain(messages: readonly Message[]): Plan {
     } }] };
   }
   if (lastText.includes("E2E INSPECT")) {
-    return { toolCalls: [{ name: "inspect_agent", arguments: { address: MOCK_WORKER_ADDRESS } }] };
+    return { toolCalls: [{
+      name: "inspect_agent",
+      arguments: {
+        address: MOCK_WORKER_ADDRESS,
+        ...(lastText.includes("XHIGH") ? { effort: "xhigh" } : {}),
+      },
+    }] };
   }
   if (lastText.includes("E2E TOOL ERRORS")) {
     return {
@@ -207,7 +213,13 @@ function planMain(messages: readonly Message[]): Plan {
         : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
     const send = (to: string): ToolCallPlan => ({
       name: "send_email",
-      arguments: { to, subject: "Verify e2e mailbox", message, priority },
+      arguments: {
+        to,
+        subject: "Verify e2e mailbox",
+        message,
+        priority,
+        ...(lastText.includes("XHIGH") ? { effort: "xhigh" } : {}),
+      },
     });
     if (lastText.includes("BOTH")) return { toolCalls: [send(MOCK_WORKER_ADDRESS), send(MOCK_REVIEWER_ADDRESS)] };
     if (lastText.includes("WORK")) return { toolCalls: [send(MOCK_WRITER_ADDRESS)] };
@@ -351,7 +363,8 @@ export default function mockE2EProvider(pi: ExtensionAPI): void {
     models: [{
       id: MOCK_MODEL_ID,
       name: "Mock E2E Model",
-      reasoning: false,
+      reasoning: true,
+      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128_000,

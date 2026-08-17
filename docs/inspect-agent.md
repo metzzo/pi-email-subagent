@@ -7,12 +7,14 @@ Preview or inspect an agent address without spawning it. Main-thread only. Execu
 | Parameter | Type | Required | Description |
 |-----------|------|:--------:|-------------|
 | `address` | string | ✓ | Subagent address to inspect or preview (existing or prospective) |
+| `effort` | `off`…`max` |  | Preview this initial effort for a prospective unknown identity |
 
 ## Behavior
 
-- Never spawns. For an unknown (but valid) address it computes the *effective* profile the agent would receive: model, provider, effort, role, tools, and instructions after exact-address → role → default resolution.
+- Never spawns. For an unknown (but valid) address it computes the *effective* profile the agent would receive: model, provider, effort, role, tools, and instructions. A supplied `effort` previews the initial-send override; otherwise effort resolves exact address → role → default. Model capability clamping occurs only when the worker runtime is created.
 - Persisted identities whose model is no longer routable remain inspectable as failed/unavailable records; they do not prevent other agents from restoring or consume an activation lease.
 - The address must parse and reference a routable model; otherwise the tool returns an error result (no side effects).
+- `effort` is rejected for an existing identity because inspection is read-only and later mail cannot mutate persisted effort. Use `/agents effort` or the dashboard while that agent is idle.
 - `writable` is derived from the effective tools: `true` when they include any of `bash`, `edit`, `write`. Role labels alone grant nothing.
 
 ## Result
@@ -46,7 +48,7 @@ Last failure: …            (only when present)
 | `providerReady` | `available` when a live worker exists, else `unknown` |
 | `lifecycle` | Exact persisted policy for an existing identity, or currently resolved configured defaults for a prospective one |
 
-Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true` — typically an invalid address shape or an unroutable/ambiguous model ID.
+Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true` — typically an invalid address shape, invalid effort, an effort override supplied for an existing identity, or an unroutable/ambiguous model ID.
 
 ## Usage guidance
 

@@ -51,6 +51,26 @@ describe("durable mail store", () => {
     assert.equal(restored.get("mail_first")?.answeredBy, "mail_reply");
   });
 
+  it("persists and validates initial effort spawn intent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-effort-"));
+    const path = join(root, "mail.jsonl");
+    const store = new MailStore(path);
+    await store.init();
+    await store.accept({ ...email("mail_effort"), effortIntent: "xhigh" });
+
+    const restored = new MailStore(path);
+    await restored.init();
+    assert.equal(restored.get("mail_effort")?.effortIntent, "xhigh");
+
+    const invalidPath = join(root, "invalid-mail.jsonl");
+    await appendFile(invalidPath, `${JSON.stringify({
+      type: "email.created",
+      email: { ...email("mail_invalid_effort"), effortIntent: "ultra" },
+    })}\n`);
+    const invalid = new MailStore(invalidPath);
+    await assert.rejects(invalid.init(), /email\.effortIntent is invalid/i);
+  });
+
   it("atomically reserves one concurrent reply and reopens the obligation when delivery fails", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
     const path = join(root, "mail.jsonl");

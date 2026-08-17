@@ -1,7 +1,7 @@
 import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
+import { isThinkingLevel, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
 import type { EmailEnvelope, LifecyclePolicy } from "./types.ts";
 import { byteLength, clone, nowIso } from "./util.ts";
 
@@ -83,6 +83,11 @@ function parseEmail(value: unknown): EmailEnvelope {
   }
   const lifecycleIntent = parseLifecycle(raw.lifecycleIntent, "email.lifecycleIntent");
   if (lifecycleIntent) email.lifecycleIntent = lifecycleIntent;
+  const effortIntent = optionalString(raw.effortIntent, "email.effortIntent");
+  if (effortIntent !== undefined) {
+    if (!isThinkingLevel(effortIntent)) throw new Error("email.effortIntent is invalid.");
+    email.effortIntent = effortIntent;
+  }
   if (email.kind === "reply" && !email.inReplyTo) throw new Error("reply email is missing inReplyTo.");
   if (email.kind === "reply" && email.requiresResponse) throw new Error("reply email cannot require a response.");
   if (email.deliveryState === "cancelled"
@@ -147,7 +152,8 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && left.inReplyTo === right.inReplyTo
     && left.requiresResponse === right.requiresResponse
     && left.createdAt === right.createdAt
-    && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent);
+    && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent)
+    && left.effortIntent === right.effortIntent;
 }
 
 // Rewrite the journal as a snapshot once it grows past this many events.

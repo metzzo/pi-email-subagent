@@ -27,6 +27,7 @@ describe("worker mail tools", () => {
           envelope,
           spawned: false,
           recipientDisposition: "main",
+          recipientEffort: "xhigh",
           correlationId: envelope.id,
           expectedReplySubject: "Re: [mail_tool] Result",
         };
@@ -35,19 +36,35 @@ describe("worker mail tools", () => {
     });
     const result = await send.execute(
       "tool-1",
-      { to: envelope.to, subject: envelope.subject, message: envelope.message, priority: "low" },
+      { to: envelope.to, subject: envelope.subject, message: envelope.message, priority: "low", effort: "xhigh" },
       undefined,
       undefined,
       {} as never,
     );
-    assert.deepEqual(input, { to: envelope.to, subject: envelope.subject, message: envelope.message, priority: "low" });
+    assert.deepEqual(input, {
+      to: envelope.to,
+      subject: envelope.subject,
+      message: envelope.message,
+      priority: "low",
+      effort: "xhigh",
+    });
     const text = (result.content[0] as { text: string }).text;
     assert.match(text, /Email accepted/);
     assert.match(text, /Correlation ID: mail_tool/);
     assert.match(text, /Expected reply subject: Re: \[mail_tool\] Result/);
+    assert.match(text, /Recipient effort: xhigh/);
     assert.equal(Object.hasOwn(input as object, "from"), false);
-    const properties = (send.parameters as { properties: { priority: unknown; lifecycle: { anyOf?: unknown[]; type?: string; properties?: Record<string, unknown> } } }).properties;
+    const properties = (send.parameters as {
+      properties: {
+        priority: unknown;
+        effort: { anyOf?: unknown[]; type?: string; enum?: string[] };
+        lifecycle: { anyOf?: unknown[]; type?: string; properties?: Record<string, unknown> };
+      };
+    }).properties;
     assert.deepEqual(properties.priority, { type: "string", enum: ["high", "low"] });
+    const effortSchema = (properties.effort.anyOf?.find((item) => (item as { enum?: string[] }).enum)
+      ?? properties.effort) as { enum?: string[] };
+    assert.deepEqual(effortSchema.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
     assert.ok(properties.lifecycle, "initial send schema exposes lifecycle");
     const lifecycleObject = (properties.lifecycle.anyOf?.find((item) => (item as { type?: string }).type === "object")
       ?? properties.lifecycle) as { properties?: Record<string, unknown> } | undefined;

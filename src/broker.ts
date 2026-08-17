@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from "./address.ts";
-import { resolveAgentProfile, resolveLifecycle } from "./config.ts";
+import { isThinkingLevel, resolveAgentProfile, resolveLifecycle } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
 import { NamespaceLock } from "./namespace-lock.ts";
@@ -158,7 +158,7 @@ export class AgentBroker {
   constructor(private readonly options: BrokerOptions) {
     this.mailStore = new MailStore(join(options.namespaceDir, "mail.jsonl"));
     this.registryStore = new RegistryStore(join(options.namespaceDir, "registry.json"));
-    this.catalog = new ModelCatalog(options.models);
+    this.catalog = new ModelCatalog(options.models, options.preferredProvider);
     this.globalRateLimiter = new SlidingWindowRateLimiter(options.config.maxMailsPerMinute);
   }
 
@@ -242,7 +242,11 @@ export class AgentBroker {
         const shape = parseSubagentAddressShape(email.to);
         try {
           const parsed = parseSubagentAddress(shape.address, this.catalog);
-          const record = this.makeRecord(parsed, email.lifecycleIntent ?? resolveLifecycle(this.options.config, parsed.address, parsed.name));
+          const record = this.makeRecord(
+            parsed,
+            email.lifecycleIntent ?? resolveLifecycle(this.options.config, parsed.address, parsed.name),
+            email.effortIntent,
+          );
           record.createdAt = email.createdAt;
           record.updatedAt = nowIso();
           record.state = "paused";
@@ -463,6 +467,9 @@ export class AgentBroker {
     }
     if (!input.message.trim()) throw new Error("Message is required.");
     if (input.priority !== "high" && input.priority !== "low") throw new Error("Priority must be high or low.");
+    if (input.effort !== undefined && !isThinkingLevel(input.effort)) {
+      throw new Error("Effort must be one of off, minimal, low, medium, high, xhigh, or max.");
+    }
     // Reply subjects carry the `Re: [mail-id] ` prefix on top of the original
     // subject; without the allowance, maximally sized requests would be
     // impossible to answer.
@@ -539,15 +546,22 @@ export class AgentBroker {
     const toMain = this.isMainIdentity(requestedTo);
     let parsed: ParsedAddress | undefined;
     let to = requestedTo;
+    let initialEffort: ThinkingLevel | undefined;
     let initialLifecycle: LifecyclePolicy | undefined;
     if (!toMain) {
       parsed = parseSubagentAddress(requestedTo, this.catalog);
       to = parsed.address;
       if (this.sameIdentity(sender, to)) throw new Error("Sending email to yourself is not supported.");
       const existingRecord = this.records.get(to);
+      if (input.effort !== undefined && existingRecord) {
+        throw new Error(`Effort overrides are accepted only on the first delegation to an unknown address. ${to} already exists (${existingRecord.state}); omit effort and use its persisted value. Archived restoration also preserves its original effort.`);
+      }
       if (input.lifecycle !== undefined && existingRecord) {
         throw new Error(`Lifecycle overrides are accepted only on the first delegation to an unknown address. ${to} already exists (${existingRecord.state}); omit lifecycle and use its persisted policy. Archived restoration also preserves its original policy.`);
       }
+      initialEffort = existingRecord?.effort
+        ?? input.effort
+        ?? resolveAgentProfile(this.options.config, to, parsed.name).effort;
       initialLifecycle = existingRecord?.lifecycle ?? resolveLifecycle(this.options.config, to, parsed.name, input.lifecycle);
       const senderRecord = this.records.get(sender);
       if (senderRecord && !senderRecord.canSpawn && !this.records.has(to)) {
@@ -556,8 +570,13 @@ export class AgentBroker {
       if (!this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
         throw new Error(`Agent limit reached (${this.options.config.maxAgents}); archive or reuse an existing address.`);
       }
-    } else if (input.lifecycle !== undefined) {
-      throw new Error("Lifecycle overrides apply only when creating an unknown subagent, not when mailing the main identity.");
+    } else {
+      if (input.effort !== undefined) {
+        throw new Error("Effort overrides apply only when creating an unknown subagent, not when mailing the main identity.");
+      }
+      if (input.lifecycle !== undefined) {
+        throw new Error("Lifecycle overrides apply only when creating an unknown subagent, not when mailing the main identity.");
+      }
     }
 
     if (!reply && looksLikeReply(input.subject)) {
@@ -602,7 +621,10 @@ export class AgentBroker {
       requiresResponse: !reply,
       createdAt: nowIso(),
       deliveryState: "queued",
-      ...(parsed && !this.records.has(to) ? { lifecycleIntent: { ...initialLifecycle! } } : {}),
+      ...(parsed && !this.records.has(to) ? {
+        effortIntent: initialEffort!,
+        lifecycleIntent: { ...initialLifecycle! },
+      } : {}),
     };
     try {
       this.validateDeliverySize(envelope);
@@ -708,7 +730,13 @@ export class AgentBroker {
         }
         this.activationLeases.add(parsed.address);
       }
-      const worker = await this.createWorker(parsed, record, this.lifecycleGeneration, envelope.lifecycleIntent);
+      const worker = await this.createWorker(
+        parsed,
+        record,
+        this.lifecycleGeneration,
+        envelope.lifecycleIntent,
+        envelope.effortIntent,
+      );
       await this.routeToWorker(envelope, worker);
       return {
         worker,
@@ -718,7 +746,11 @@ export class AgentBroker {
     });
   }
 
-  private makeRecord(parsed: ParsedAddress, lifecycle = resolveLifecycle(this.options.config, parsed.address, parsed.name)): AgentRecord {
+  private makeRecord(
+    parsed: ParsedAddress,
+    lifecycle = resolveLifecycle(this.options.config, parsed.address, parsed.name),
+    effortIntent?: ThinkingLevel,
+  ): AgentRecord {
     const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
     const now = nowIso();
     return {
@@ -727,7 +759,7 @@ export class AgentBroker {
       taskSlug: parsed.taskSlug,
       provider: parsed.model.provider,
       modelId: parsed.model.id,
-      effort: profile.effort,
+      effort: effortIntent ?? profile.effort,
       tools: profile.tools,
       canSpawn: profile.canSpawn,
       ...(profile.instructions !== undefined ? { instructions: profile.instructions } : {}),
@@ -775,8 +807,9 @@ export class AgentBroker {
     restored?: AgentRecord,
     generation = this.lifecycleGeneration,
     lifecycleIntent?: LifecyclePolicy,
+    effortIntent?: ThinkingLevel,
   ): Promise<WorkerTransport> {
-    const record = restored ?? this.makeRecord(parsed, lifecycleIntent);
+    const record = restored ?? this.makeRecord(parsed, lifecycleIntent, effortIntent);
     record.state = "spawning";
     delete record.failure;
     record.updatedAt = nowIso();
@@ -1466,14 +1499,20 @@ export class AgentBroker {
     });
   }
 
-  inspectAgent(addressInput: string): AgentInspection {
+  inspectAgent(addressInput: string, effortOverride?: ThinkingLevel): AgentInspection {
     this.assertActive();
+    if (effortOverride !== undefined && !isThinkingLevel(effortOverride)) {
+      throw new Error("Effort must be one of off, minimal, low, medium, high, xhigh, or max.");
+    }
     const shape = parseSubagentAddressShape(addressInput);
     const existing = this.records.get(shape.address);
     const parsed = existing ? undefined : parseSubagentAddress(shape.address, this.catalog);
     const address = existing?.address ?? parsed!.address;
     const name = existing?.name ?? parsed!.name;
     const record = this.records.get(address);
+    if (record && effortOverride !== undefined) {
+      throw new Error("An effort override can preview only a prospective unknown agent; omit effort for an existing identity.");
+    }
     const profile = resolveAgentProfile(this.options.config, address, name);
     const tools = record?.tools ?? profile.tools;
     const mail = this.mailStore.list();
@@ -1485,7 +1524,7 @@ export class AgentBroker {
         && (this.activationLeases.has(address) || this.activeIdentityCount() < this.options.config.maxAgents),
       modelId: record?.modelId ?? parsed!.model.id,
       provider: record?.provider ?? parsed!.model.provider,
-      effort: record?.effort ?? profile.effort,
+      effort: record?.effort ?? effortOverride ?? profile.effort,
       role: name,
       tools: [...tools],
       ...(record?.instructions ?? profile.instructions ? { instructions: record?.instructions ?? profile.instructions } : {}),

@@ -34,6 +34,58 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   assert.deepEqual(action, { type: "string", enum: ["stop", "restart", "archive", "clear_failure"] });
 });
 
+it("previews an initial effort override without spawning", async () => {
+  let call: { address?: string; effort?: string } = {};
+  const broker = {
+    inspectAgent(address: string, effort?: string) {
+      call = { address, effort };
+      return {
+        address,
+        exists: false,
+        wouldSpawn: true,
+        capacityAvailable: true,
+        modelId: "gpt-5.6-sol",
+        provider: "openai-codex",
+        effort: effort ?? "medium",
+        role: "worker",
+        tools: ["read", "bash", "edit", "write", "send_email", "fetch_emails"],
+        writable: true,
+        canSpawn: true,
+        state: "new",
+        queued: 0,
+        unanswered: 0,
+        pendingReplies: 0,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+        providerReady: "unknown",
+        lifecycle: {
+          spawnTimeoutMs: 30_000,
+          promptAcceptanceTimeoutMs: 30_000,
+          runTimeoutMs: 14_400_000,
+          idleTimeoutMs: 900_000,
+          abortTimeoutMs: 10_000,
+          disposeTimeoutMs: 10_000,
+          brokerShutdownTimeoutMs: 60_000,
+        },
+      };
+    },
+  } as unknown as AgentBroker;
+  const [inspect] = createMainCoordinationTools(() => broker);
+  const result = await inspect.execute(
+    "inspect-effort",
+    { address: "worker.deep@gpt-5.6-sol.com", effort: "xhigh" },
+    undefined,
+    undefined,
+    {} as never,
+  );
+  assert.deepEqual(call, { address: "worker.deep@gpt-5.6-sol.com", effort: "xhigh" });
+  assert.match((result.content[0] as { text: string }).text, /effort xhigh/);
+  const effort = (inspect.parameters as {
+    properties: { effort: { anyOf?: unknown[]; enum?: string[] } };
+  }).properties.effort;
+  const effortSchema = (effort.anyOf?.find((item) => (item as { enum?: string[] }).enum) ?? effort) as { enum?: string[] };
+  assert.deepEqual(effortSchema.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+});
+
 it("bounds joined reply bodies and directs callers to re-fetch omitted IDs", async () => {
   const request = (id: string): EmailEnvelope => ({
     id,

@@ -21,7 +21,7 @@ For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads 
 ## Tools
 
 ```text
-send_email(to, subject, message, priority, lifecycle?)
+send_email(to, subject, message, priority, effort?, lifecycle?)
 fetch_emails()
 inspect_agent(address)
 wait_for_replies(request_ids, timeout_seconds, collect)
@@ -29,7 +29,10 @@ cancel_request(request_id, reason)
 manage_agent(address, action)
 ```
 
-Sending to an unknown valid address creates a persistent worker. Addresses use:
+Sending to an unknown valid address creates a persistent worker. The first send
+may include `effort: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" |
+"max"`; that value overrides configured defaults for the new identity and is
+persisted. Later mail cannot mutate it. Addresses use:
 
 ```text
 <name>.<task-slug>@<registered-model>.com
@@ -106,7 +109,13 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
 }
 ```
 
-Profile resolution order is exact address, role name, then defaults. Initial lifecycle fields resolve initial request, exact address, role, then finite global defaults, subject to administrator-configured maxima. Later mail cannot mutate a persisted policy; archived restoration preserves it. The address always controls the model. Effective configured tools—not role labels—determine whether a recipient is writable.
+Profile resolution order is exact address, role name, then defaults. Initial
+effort resolves initial request, exact address, role, then `defaultEffort`;
+initial lifecycle fields resolve initial request, exact address, role, then
+finite global defaults, subject to administrator-configured maxima. Later mail
+cannot mutate either persisted value; archived restoration preserves both. The
+address always controls the model. Effective configured tools—not role
+labels—determine whether a recipient is writable.
 
 Provider definitions, the model catalog, and persistent credentials are snapshotted for workers when the extension starts. Provider/model/auth configuration changes take effect after an extension reload; workers are not continuously synchronized. Runtime-only credentials that are absent from Pi's persistent credential store cannot be transferred to an isolated worker; persist them before delegating worker tasks.
 

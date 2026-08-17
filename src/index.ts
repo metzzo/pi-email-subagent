@@ -300,6 +300,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       namespaceDir: join(agentDir, "subagents", ctx.sessionManager.getSessionId()),
       config: configResult.config,
       models: availableModels(ctx),
+      preferredProvider: ctx.model?.provider,
       mainAdapter: adapter,
       workerFactory: async (model) => {
         const snapshot = await runtimeFactory.create(model.provider, model.id);
