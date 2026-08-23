@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -8,7 +8,10 @@ import { NamespaceLock } from "../../src/namespace-lock.ts";
 it("excludes a second owner, reports the PID, and releases idempotently", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-namespace-lock-"));
   const namespace = join(root, "state");
+  await mkdir(namespace, { mode: 0o755 });
+  await chmod(namespace, 0o755);
   const first = await NamespaceLock.acquire(namespace, () => undefined);
+  assert.equal((await stat(namespace)).mode & 0o777, 0o700);
   await assert.rejects(
     NamespaceLock.acquire(namespace, () => undefined),
     new RegExp(`already owned \\(pid ${process.pid}, acquired`),
@@ -29,20 +32,25 @@ it("recovers a proper-lockfile lease after its stale threshold", {
   const root = await mkdtemp(join(tmpdir(), "pi-email-stale-lock-"));
   const namespace = join(root, "state");
   await mkdir(namespace, { recursive: true });
+  await chmod(namespace, 0o755);
   await mkdir(`${namespace}.lock`);
-  await writeFile(join(namespace, ".broker-owner.json"), JSON.stringify({
+  const ownerPath = join(namespace, ".broker-owner.json");
+  await writeFile(ownerPath, JSON.stringify({
     pid: 999_999_999,
     token: "stale-token",
     acquiredAt: "2000-01-01T00:00:00.000Z",
     namespaceDir: namespace,
   }));
+  await chmod(ownerPath, 0o644);
   const stale = new Date(Date.now() - 30_000);
   await utimes(`${namespace}.lock`, stale, stale);
 
   const recovered = await NamespaceLock.acquire(namespace, () => undefined);
   assert.equal(recovered.abandonedOwner, true);
-  const owner = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number; token: string; bootId?: string; processStartTime?: string };
+  const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { pid: number; token: string; bootId?: string; processStartTime?: string };
   assert.equal(owner.pid, process.pid);
+  assert.equal((await stat(namespace)).mode & 0o777, 0o700);
+  assert.equal((await stat(ownerPath)).mode & 0o777, 0o600);
   assert.notEqual(owner.token, "stale-token");
   if (process.platform === "linux") {
     assert.ok(owner.bootId);

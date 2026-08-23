@@ -6,6 +6,12 @@ import { describe, it } from "node:test";
 import { MailStore } from "../../src/mail-store.ts";
 import type { EmailEnvelope } from "../../src/types.ts";
 
+class FaultInjectedMailStore extends MailStore {
+  protected override async beforeJournalReplace(): Promise<void> {
+    throw new Error("injected before rename");
+  }
+}
+
 function email(id: string, priority: "high" | "low" = "low"): EmailEnvelope {
   return {
     id,
@@ -381,5 +387,24 @@ describe("durable mail store", () => {
     await restored.init();
     assert.deepEqual(restored.list().map((item) => item.id), ["mail_before", "mail_after"]);
     assert.doesNotMatch(await readFile(path, "utf8"), /\"email\":$/m);
+  });
+
+  it("leaves the original journal intact when atomic tail repair fails before rename", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-repair-fault-"));
+    const path = join(root, "mail.jsonl");
+    const first = new MailStore(path);
+    await first.init();
+    await first.accept(email("mail_accepted"));
+    await appendFile(path, '{"type":"email.created","email":');
+    const original = await readFile(path, "utf8");
+
+    await assert.rejects(new FaultInjectedMailStore(path).init(), /injected before rename/);
+    assert.equal(await readFile(path, "utf8"), original, "pre-rename failure must not rewrite the journal in place");
+    const [acceptedLine] = original.split("\n");
+    assert.doesNotThrow(() => JSON.parse(acceptedLine!));
+
+    const recovered = new MailStore(path);
+    await recovered.init();
+    assert.deepEqual(recovered.list().map((item) => item.id), ["mail_accepted"]);
   });
 });
