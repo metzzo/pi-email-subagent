@@ -21,8 +21,8 @@ Workers always receive exactly `send_email` and `fetch_emails` on top of their c
 
 - Subagent: `<name>.<task-slug>@<model-id>.com` — e.g. `reviewer.audit@gpt-5.6-sol.com`. Name and slug are lowercase kebab-case; exactly one dot separates them.
 - Main thread: `main@<model-id>.com`. It follows model switches; previous main addresses stay valid aliases.
-- The model ID is resolved against Pi's available model catalog, case-insensitively. An ID offered by several providers is ambiguous and unroutable; `inspect_agent` and the system prompt list the routable IDs.
-- Sending to a well-formed but unknown address **spawns** a persistent agent. The first send may override its initial effort from `off` through `max`; `inspect_agent` can preview that override without spawning. Sending to an existing address **reuses** its persistent session, context, and persisted effort.
+- The domain is a model ID, not a provider ID. A globally unique ID resolves directly for a new address. Duplicate IDs use the current main provider only when it identifies exactly one candidate; otherwise mail fails before acceptance.
+- Sending to a well-formed but unknown address **spawns** a persistent agent and durably binds the selected provider/model. The first send may override its initial effort from `off` through `max`; `inspect_agent` can preview both profile and routing selection without spawning. Sending to an existing address **reuses** its persistent session, context, effort, and exact original provider/model regardless of later main-provider changes. See [provider-aware durable model routing](provider-aware-model-routing.md).
 
 ### Priority and delivery
 
@@ -35,7 +35,7 @@ Every request carries a response obligation. Replies must reuse the exact subjec
 
 ### Durability
 
-A proper-lockfile lease allows only one live broker to own a parent-session namespace; contention reports owner metadata and abrupt-exit leases become stale after 10 seconds. Mail is journaled (`mail.jsonl`) before acceptance; the registry (`registry.json`) is a derived cache. Delivery across process crashes is **at least once**: stable email IDs let recipients recognize retries, and startup reconstructs a missing recipient record—including its accepted lifecycle and effort spawn intent—from queued mail when a crash lands between mail acceptance and first registry persistence. Live maintenance compacts excess transition events and prunes old terminal envelopes above `maxRetainedEmails` while preserving every open obligation and retained request/reply pair. Worker sessions persist under `~/.pi/agent/subagents/<parent-session-id>/` and resume across restarts.
+A proper-lockfile lease allows only one live broker to own a parent-session namespace; contention reports owner metadata and abrupt-exit leases become stale after 10 seconds. Mail is journaled (`mail.jsonl`) before acceptance; the registry (`registry.json`) is a derived cache. Delivery across process crashes is **at least once**: stable email IDs let recipients recognize retries, and startup reconstructs a missing recipient record—including its accepted provider/model, lifecycle, and effort spawn intent—from queued mail when a crash lands between mail acceptance and first registry persistence. Live maintenance compacts excess transition events and prunes old terminal envelopes above `maxRetainedEmails` while preserving every open obligation and retained request/reply pair. Worker sessions persist under `~/.pi/agent/subagents/<parent-session-id>/` and resume across restarts.
 
 ### Lifecycle states and deadlines
 
@@ -55,4 +55,5 @@ All limits, roles, address overrides, and the model-selection policy are configu
 - `/agents stop|restart|archive|clear-failure|effort <address> …`: non-interactive equivalents of `manage_agent`.
 - `/agents cancel <request-id> <reason>`: interactive equivalent of `cancel_request`; request IDs are visible in the Inbox tab.
 - Main-session renderers: `send_email` results and incoming email cards expand (`Ctrl+O`) to show a bounded recent-conversation preview.
+- [Provider-aware durable model routing](provider-aware-model-routing.md): new-vs-existing selection, binding intent, removal/reintroduction, and rollback boundary.
 - [Release security checks](release-security-checks.md): secret scanning, production dependency-license policy, inventory artifacts, and action pinning.

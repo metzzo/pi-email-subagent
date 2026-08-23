@@ -87,7 +87,10 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
           `Expected reply subject: ${result.expectedReplySubject ?? "none"}`,
           `Answered email: ${result.answeredEmailId ?? "none"}`,
         ];
-        if (result.recipientModel) lines.push(`Recipient model: ${result.recipientModel}`);
+        if (result.recipientProvider && result.recipientModel) {
+          lines.push(`Recipient model: ${result.recipientProvider}/${result.recipientModel}`);
+          lines.push("Binding: persisted for this identity");
+        } else if (result.recipientModel) lines.push(`Recipient model: ${result.recipientModel}`);
         if (result.recipientEffort) lines.push(`Recipient effort: ${result.recipientEffort}`);
         if (result.recipientRole) lines.push(`Recipient role: ${result.recipientRole}`);
         if (result.recipientTools) lines.push(`Recipient tools: ${result.recipientTools.join(", ")}`);

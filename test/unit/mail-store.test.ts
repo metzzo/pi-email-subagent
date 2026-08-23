@@ -51,6 +51,60 @@ describe("durable mail store", () => {
     assert.equal(restored.get("mail_first")?.answeredBy, "mail_reply");
   });
 
+  it("persists, compacts, and validates durable model binding intent", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-binding-"));
+    const path = join(root, "mail.jsonl");
+    const store = new MailStore(path);
+    await store.init();
+    const bound = {
+      ...email("mail_binding"),
+      to: "worker.task@shared.com",
+      modelBindingIntent: { provider: "provider-a", modelId: "SHARED" },
+    };
+    await store.accept(bound);
+    await store.compact();
+    await store.flush();
+
+    const restored = new MailStore(path);
+    await restored.init();
+    assert.deepEqual(restored.get(bound.id)?.modelBindingIntent, { provider: "provider-a", modelId: "SHARED" });
+
+    await assert.rejects(
+      store.accept({ ...bound, modelBindingIntent: { provider: "provider-b", modelId: "shared" } }),
+      /Conflicting duplicate email/,
+    );
+
+    for (const [suffix, modelBindingIntent, pattern] of [
+      ["provider", { provider: "", modelId: "shared" }, /modelBindingIntent\.provider must be a non-empty string/i],
+      ["model", { provider: "provider-a", modelId: "" }, /modelBindingIntent\.modelId must be a non-empty string/i],
+      ["mismatch", { provider: "provider-a", modelId: "other" }, /does not match recipient model domain/i],
+    ] as const) {
+      const invalidPath = join(root, `invalid-${suffix}.jsonl`);
+      await appendFile(invalidPath, `${JSON.stringify({
+        type: "email.created",
+        email: { ...email(`mail_invalid_${suffix}`), to: "worker.task@shared.com", modelBindingIntent },
+      })}\n`);
+      await assert.rejects(new MailStore(invalidPath).init(), pattern);
+    }
+
+    const replyIntentPath = join(root, "invalid-reply-intent.jsonl");
+    await appendFile(replyIntentPath, `${JSON.stringify({
+      type: "email.created",
+      email: {
+        ...email("mail_invalid_reply_intent"),
+        to: "worker.task@shared.com",
+        kind: "reply",
+        inReplyTo: "mail_original",
+        requiresResponse: false,
+        modelBindingIntent: { provider: "provider-a", modelId: "shared" },
+      },
+    })}\n`);
+    await assert.rejects(
+      new MailStore(replyIntentPath).init(),
+      /modelBindingIntent is allowed only on a response-required creation request/i,
+    );
+  });
+
   it("persists and validates initial effort spawn intent", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-effort-"));
     const path = join(root, "mail.jsonl");

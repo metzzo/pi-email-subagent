@@ -2,7 +2,14 @@ import { join } from "node:path";
 import { stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { ModelCatalog, parseSubagentAddress, parseSubagentAddressShape } from "./address.ts";
+import {
+  AddressError,
+  ModelCatalog,
+  parseBoundSubagentAddress,
+  parseLegacySubagentAddress,
+  parseNewSubagentAddress,
+  parseSubagentAddressShape,
+} from "./address.ts";
 import { isThinkingLevel, resolveAgentProfile, resolveLifecycle } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
@@ -27,6 +34,7 @@ import type {
   SendEmailInput,
   SendEmailResult,
   LifecyclePolicy,
+  ModelBinding,
   WaitForRepliesResult,
   WorkerCleanupReport,
   WorkerEvent,
@@ -217,11 +225,16 @@ export class AgentBroker {
   private closePromise?: Promise<void>;
   private namespaceLock?: NamespaceLock;
   private disposed = false;
+  private mainRouting: { address: string; preferredProvider?: string };
 
   constructor(private readonly options: BrokerOptions) {
     this.mailStore = new MailStore(join(options.namespaceDir, "mail.jsonl"));
     this.registryStore = new RegistryStore(join(options.namespaceDir, "registry.json"));
-    this.catalog = new ModelCatalog(options.models, options.preferredProvider);
+    this.catalog = new ModelCatalog(options.models);
+    this.mainRouting = {
+      address: options.mainAdapter.getAddress().toLowerCase(),
+      ...(options.preferredProvider ? { preferredProvider: options.preferredProvider } : {}),
+    };
     this.globalRateLimiter = new SlidingWindowRateLimiter(options.config.maxMailsPerMinute);
   }
 
@@ -255,6 +268,7 @@ export class AgentBroker {
       await this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails);
       this.checkpoint(generation);
       const currentMain = this.options.mainAdapter.getAddress().toLowerCase();
+      this.mainRouting = { address: currentMain, ...(this.mainRouting.preferredProvider ? { preferredProvider: this.mainRouting.preferredProvider } : {}) };
       this.registry = await this.registryStore.load(currentMain);
       this.checkpoint(generation);
       this.registry.mainAddress = currentMain;
@@ -285,25 +299,36 @@ export class AgentBroker {
         record.name = shape.name;
         record.taskSlug = shape.taskSlug;
         try {
-          const parsed = parseSubagentAddress(shape.address, this.catalog);
-          const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
-          record.address = parsed.address;
-          record.provider = parsed.model.provider;
-          record.modelId = parsed.model.id;
-          record.tools = profile.tools;
-          record.canSpawn = profile.canSpawn;
-          record.instructions = profile.instructions;
-          if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
-          if (record.state !== "running") this.interruptRecordWork(record);
-          this.routableRecords.add(record.address);
-        } catch (error) {
+          let parsed: ParsedAddress;
+          if (record.provider === "unavailable") {
+            parsed = parseLegacySubagentAddress(shape.address, this.catalog);
+            record.provider = parsed.model.provider;
+            record.modelId = parsed.model.id;
+            const summary = `Legacy provider binding uniquely migrated to ${record.provider}/${record.modelId}; no main-provider preference was used.`;
+            record.activity.push({ at: nowIso(), kind: "status", summary });
+            record.activity = record.activity.slice(-40);
+            record.currentActivity = summary;
+          } else {
+            parsed = this.resolveExistingRecord(record);
+          }
           const profile = resolveAgentProfile(this.options.config, record.address, record.name);
           record.tools = profile.tools;
           record.canSpawn = profile.canSpawn;
           record.instructions = profile.instructions;
+          if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
+          if (record.failure?.startsWith("Model unavailable during restore:") && !record.cleanup) {
+            if (record.state === "failed") record.state = "paused";
+            delete record.failure;
+            record.currentActivity = `Exact binding ${record.provider}/${record.modelId} is available again; restoration resumed without rebinding.`;
+          }
+          if (record.state !== "running") this.interruptRecordWork(record);
+          this.routableRecords.add(record.address);
+        } catch (error) {
+          // The exact runtime binding is unavailable, so preserve the loaded
+          // durable profile rather than partially reconfiguring this identity.
           const priorState = record.state;
           if (priorState !== "archived" && priorState !== "stopped") record.state = "failed";
-          record.failure = `Model unavailable during restore: ${errorMessage(error)}`;
+          record.failure = truncateText(`Model unavailable during restore: ${errorMessage(error)}`, 1_500);
           record.currentActivity = record.failure;
           record.updatedAt = nowIso();
           if (priorState !== "archived") startupFailures.push(`${record.address}: ${record.failure}`);
@@ -318,7 +343,9 @@ export class AgentBroker {
         if (email.deliveryState !== "queued" || this.isMainIdentity(email.to) || this.records.has(email.to)) continue;
         const shape = parseSubagentAddressShape(email.to);
         try {
-          const parsed = parseSubagentAddress(shape.address, this.catalog);
+          const parsed = email.modelBindingIntent
+            ? parseBoundSubagentAddress(shape.address, this.catalog, email.modelBindingIntent)
+            : parseLegacySubagentAddress(shape.address, this.catalog);
           const record = this.makeRecord(
             parsed,
             email.lifecycleIntent ?? resolveLifecycle(this.options.config, parsed.address, parsed.name),
@@ -327,11 +354,23 @@ export class AgentBroker {
           record.createdAt = email.createdAt;
           record.updatedAt = nowIso();
           record.state = "paused";
+          if (!email.modelBindingIntent) {
+            const summary = `Legacy provider binding uniquely migrated to ${record.provider}/${record.modelId}; no main-provider preference was used.`;
+            record.activity.push({ at: nowIso(), kind: "status", summary });
+            record.currentActivity = summary;
+          }
           this.records.set(record.address, record);
           this.routableRecords.add(record.address);
         } catch (error) {
           const profile = resolveAgentProfile(this.options.config, shape.address, shape.name);
-          const record = this.makeUnavailableRecord(shape, email.createdAt, errorMessage(error));
+          const record = this.makeUnavailableRecord(
+            shape,
+            email.createdAt,
+            errorMessage(error),
+            email.modelBindingIntent,
+            email.lifecycleIntent,
+            email.effortIntent,
+          );
           record.tools = profile.tools;
           record.canSpawn = profile.canSpawn;
           record.instructions = profile.instructions;
@@ -358,8 +397,8 @@ export class AgentBroker {
       const registered = [...this.records.values()].filter((record) =>
         record.state !== "archived" && this.routableRecords.has(record.address));
       for (const record of registered.slice(0, this.options.config.maxAgents)) this.activationLeases.add(record.address);
-      for (const record of registered) {
-        if (record.cleanup) {
+      for (const record of this.records.values()) {
+        if (record.cleanup && record.state !== "archived") {
           this.activationLeases.add(record.address);
           this.active.add(record.address);
         }
@@ -378,7 +417,7 @@ export class AgentBroker {
         .filter((record) => this.activationLeases.has(record.address) && !["stopped", "failed", "archived"].includes(record.state));
       const restored = await Promise.allSettled(restorable.map(async (record) => {
         try {
-          const parsed = parseSubagentAddress(record.address, this.catalog);
+          const parsed = this.resolveExistingRecord(record);
           await this.createWorker(parsed, record, generation);
         } catch (error) {
           if (this.cancelled(generation)) return;
@@ -651,7 +690,7 @@ export class AgentBroker {
       if (this.disposed || this.cleanupQuarantines.has(address) || this.workers.has(address)) return;
       const record = this.records.get(address);
       if (!record || record.cleanup || record.state !== "paused") return;
-      const parsed = parseSubagentAddress(address, this.catalog);
+      const parsed = this.resolveExistingRecord(record);
       const worker = await this.createWorker(parsed, record, this.lifecycleGeneration);
       if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
       else if (this.mailStore.queued(address).length > 0) await this.schedule(address);
@@ -715,6 +754,23 @@ export class AgentBroker {
   private requiredRegistry(): BrokerRegistry {
     if (!this.registry) throw new Error("Email broker has not started.");
     return this.registry;
+  }
+
+  private resolveExistingRecord(record: AgentRecord): ParsedAddress {
+    try {
+      return parseBoundSubagentAddress(record.address, this.catalog, {
+        provider: record.provider,
+        modelId: record.modelId,
+      });
+    } catch (error) {
+      throw new AddressError(`${record.address} ${errorMessage(error)}`);
+    }
+  }
+
+  private firstBindingIntent(address: string): EmailEnvelope | undefined {
+    return this.mailStore.list()
+      .filter((email) => email.to === address && email.modelBindingIntent)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
   }
 
   private assertActive(): void {
@@ -856,11 +912,12 @@ export class AgentBroker {
   }
 
   get mainAddress(): string {
-    return this.requiredRegistry().mainAddress;
+    this.requiredRegistry();
+    return this.mainRouting.address;
   }
 
   get modelIds(): string[] {
-    return this.catalog.routableModelIds;
+    return this.catalog.routableModelIds(this.mainRouting.preferredProvider);
   }
 
   get toolResultByteLimit(): number {
@@ -881,14 +938,21 @@ export class AgentBroker {
     throw new Error(`Unknown sender identity ${normalized}.`);
   }
 
-  async updateMainAddress(address: string): Promise<void> {
+  async updateMainModel(address: string, preferredProvider?: string): Promise<void> {
     this.assertActive();
     const normalized = address.toLowerCase();
+    // Replace one object synchronously before persistence so a concurrent new
+    // recipient observes either the old or new complete routing preference.
+    this.mainRouting = { address: normalized, ...(preferredProvider ? { preferredProvider } : {}) };
     const registry = this.requiredRegistry();
     registry.mainAddress = normalized;
     registry.mainAliases = [...new Set([...registry.mainAliases, normalized])];
     await this.persistRegistry();
     this.publish();
+  }
+
+  async updateMainAddress(address: string): Promise<void> {
+    await this.updateMainModel(address, this.mainRouting.preferredProvider);
   }
 
   private validateInput(input: SendEmailInput, isReply: boolean): void {
@@ -981,10 +1045,13 @@ export class AgentBroker {
     let initialEffort: ThinkingLevel | undefined;
     let initialLifecycle: LifecyclePolicy | undefined;
     if (!toMain) {
-      parsed = parseSubagentAddress(requestedTo, this.catalog);
+      const shape = parseSubagentAddressShape(requestedTo);
+      const existingRecord = this.records.get(shape.address);
+      parsed = existingRecord
+        ? this.resolveExistingRecord(existingRecord)
+        : parseNewSubagentAddress(shape.address, this.catalog, this.mainRouting.preferredProvider);
       to = parsed.address;
       if (this.sameIdentity(sender, to)) throw new Error("Sending email to yourself is not supported.");
-      const existingRecord = this.records.get(to);
       if (input.effort !== undefined && existingRecord) {
         throw new Error(`Effort overrides are accepted only on the first delegation to an unknown address. ${to} already exists (${existingRecord.state}); omit effort and use its persisted value. Archived restoration also preserves its original effort.`);
       }
@@ -1033,36 +1100,60 @@ export class AgentBroker {
     }
 
     let acquiredLease = false;
-    if (parsed && !this.activationLeases.has(to)) {
-      if (this.activeIdentityCount() >= this.options.config.maxAgents) {
-        throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
-      }
-      this.activationLeases.add(to);
-      acquiredLease = true;
-    }
-
-    const envelope: EmailEnvelope = {
-      id: createMailId(),
-      from: sender,
-      to,
-      subject: input.subject.trim(),
-      message: input.message,
-      priority: input.priority,
-      kind: reply ? "reply" : "request",
-      ...(reply ? { inReplyTo: reply.emailId } : {}),
-      requiresResponse: !reply,
-      createdAt: nowIso(),
-      deliveryState: "queued",
-      ...(parsed && !this.records.has(to) ? {
-        effortIntent: initialEffort!,
-        lifecycleIntent: { ...initialLifecycle! },
-      } : {}),
-    };
+    let envelope!: EmailEnvelope;
     try {
-      this.validateDeliverySize(envelope);
       await this.withAddressOperation(to, async () => {
         const currentWorker = this.workers.get(to);
         const currentRecord = this.records.get(to);
+        const acceptedCreation = toMain ? undefined : this.firstBindingIntent(to);
+        if (!toMain) {
+          if (currentRecord) parsed = this.resolveExistingRecord(currentRecord);
+          else if (acceptedCreation?.modelBindingIntent) {
+            parsed = parseBoundSubagentAddress(to, this.catalog, acceptedCreation.modelBindingIntent);
+          }
+          if (!parsed) throw new Error(`Recipient ${to} has no model binding.`);
+          if (input.effort !== undefined && (currentRecord || acceptedCreation)) {
+            throw new Error(`Effort overrides are accepted only on the first delegation to an unknown address. ${to} already has durable identity intent; omit effort and use its persisted value.`);
+          }
+          if (input.lifecycle !== undefined && (currentRecord || acceptedCreation)) {
+            throw new Error(`Lifecycle overrides are accepted only on the first delegation to an unknown address. ${to} already has durable identity intent; omit lifecycle and use its persisted policy.`);
+          }
+          initialEffort = currentRecord?.effort
+            ?? acceptedCreation?.effortIntent
+            ?? input.effort
+            ?? resolveAgentProfile(this.options.config, to, parsed.name).effort;
+          initialLifecycle = currentRecord?.lifecycle
+            ?? acceptedCreation?.lifecycleIntent
+            ?? resolveLifecycle(this.options.config, to, parsed.name, input.lifecycle);
+          if (!this.activationLeases.has(to)) {
+            if (this.activeIdentityCount() >= this.options.config.maxAgents) {
+              throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
+            }
+            this.activationLeases.add(to);
+            acquiredLease = true;
+          }
+        }
+
+        const firstIdentityMail = Boolean(parsed && !currentRecord && !acceptedCreation && !reply);
+        envelope = {
+          id: createMailId(),
+          from: sender,
+          to,
+          subject: input.subject.trim(),
+          message: input.message,
+          priority: input.priority,
+          kind: reply ? "reply" : "request",
+          ...(reply ? { inReplyTo: reply.emailId } : {}),
+          requiresResponse: !reply,
+          createdAt: nowIso(),
+          deliveryState: "queued",
+          ...(firstIdentityMail ? {
+            effortIntent: initialEffort!,
+            lifecycleIntent: { ...initialLifecycle! },
+            modelBindingIntent: { provider: parsed!.model.provider, modelId: parsed!.model.id },
+          } : {}),
+        };
+        this.validateDeliverySize(envelope);
         const steersImmediately = !toMain
           && input.priority === "high"
           && Boolean(currentWorker?.getSnapshot().isStreaming)
@@ -1120,6 +1211,7 @@ export class AgentBroker {
       ...(envelope.requiresResponse ? { expectedReplySubject: makeReplySubject(envelope.id, envelope.subject) } : {}),
       ...(recipientRecord ? {
         recipientModel: recipientRecord.modelId,
+        recipientProvider: recipientRecord.provider,
         recipientEffort: recipientRecord.effort,
         recipientRole: recipientRecord.name,
         recipientTools: [...recipientRecord.tools],
@@ -1220,15 +1312,18 @@ export class AgentBroker {
     shape: ReturnType<typeof parseSubagentAddressShape>,
     createdAt: string,
     reason: string,
+    binding?: ModelBinding,
+    lifecycleIntent?: LifecyclePolicy,
+    effortIntent?: ThinkingLevel,
   ): AgentRecord {
-    const failure = `Model unavailable during restore: ${reason}`;
+    const failure = truncateText(`Model unavailable during restore: ${reason}`, 1_500);
     return {
       address: shape.address,
       name: shape.name,
       taskSlug: shape.taskSlug,
-      provider: "unavailable",
-      modelId: shape.modelId,
-      effort: this.options.config.defaultEffort,
+      provider: binding?.provider ?? "unavailable",
+      modelId: binding?.modelId ?? shape.modelId,
+      effort: effortIntent ?? this.options.config.defaultEffort,
       tools: [],
       canSpawn: true,
       state: "failed",
@@ -1237,7 +1332,7 @@ export class AgentBroker {
       currentActivity: failure,
       failure,
       enforcementAttempts: 0,
-      lifecycle: resolveLifecycle(this.options.config, shape.address, shape.name),
+      lifecycle: lifecycleIntent ? { ...lifecycleIntent } : resolveLifecycle(this.options.config, shape.address, shape.name),
       usage: emptyUsage(),
       activity: [{ at: nowIso(), kind: "error", summary: failure }],
       work: emptyWorkState(),
@@ -1932,7 +2027,7 @@ export class AgentBroker {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
       this.assertNoCleanupQuarantine(address);
-      const parsed = parseSubagentAddress(address, this.catalog);
+      const parsed = this.resolveExistingRecord(record);
       if (!this.activationLeases.has(address)) {
         if (this.activeIdentityCount() >= this.options.config.maxAgents) {
           throw new Error(this.capacityFullDiagnostic());
@@ -2081,7 +2176,9 @@ export class AgentBroker {
     }
     const shape = parseSubagentAddressShape(addressInput);
     const existing = this.records.get(shape.address);
-    const parsed = existing ? undefined : parseSubagentAddress(shape.address, this.catalog);
+    const parsed = existing
+      ? undefined
+      : parseNewSubagentAddress(shape.address, this.catalog, this.mainRouting.preferredProvider);
     const address = existing?.address ?? parsed!.address;
     const name = existing?.name ?? parsed!.name;
     const record = this.records.get(address);
@@ -2122,7 +2219,9 @@ export class AgentBroker {
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
       ...(record?.cleanup ? { cleanup: clone(record.cleanup) } : {}),
-      providerReady: this.workers.has(address) ? "available" : "unknown",
+      providerReady: this.workers.has(address)
+        ? "available"
+        : (record && !this.routableRecords.has(address) ? "unavailable" : "unknown"),
       lifecycle: clone(record?.lifecycle ?? resolveLifecycle(this.options.config, address, name)),
     };
   }

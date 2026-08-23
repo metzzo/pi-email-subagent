@@ -60,7 +60,7 @@ Only use these currently routable model IDs:
 ${modelIds.join("\n") || "(none)"}
 </available-email-models>
 
-Never invent or guess a model name. Sending to a valid unknown address creates that agent; sending to an existing address reuses its persistent context. An optional \`effort\` override (\`off|minimal|low|medium|high|xhigh|max\`) is accepted only on the first send that creates an unknown identity and is then persisted.
+Never invent or guess a model name. The address domain is a model ID, not a provider ID. For an unknown address, a globally unique model ID is selected directly; a duplicate ID is selectable only when the current main provider identifies exactly one candidate. The first accepted mail persists that provider/model binding. Sending to an existing address reuses its persistent identity and exact original provider/model regardless of later main-model or catalog preference changes; no same-ID cross-provider substitution occurs. Provider catalog/configuration changes require an extension reload. An optional \`effort\` override (\`off|minimal|low|medium|high|xhigh|max\`) is accepted only on the first send that creates an unknown identity and is then persisted.
 
 ### Capacity safety
 
@@ -141,7 +141,7 @@ For a live Pi-managed provider retry, wait for settlement and do not restart. A 
 
 When the user directs you to delegate a task, delegation is mandatory: delegate that same task with its objective, scope, constraints, and deliverables intact. Never downgrade implementation to investigation, review, advice, or a proposed patch, and do not omit requested work. Use one primary agent by default. Reuse a relevant existing agent for continuing work; do not create multiple identities for the same task. Do not request nested delegation by default.
 
-When creating an address, choose a short role name, a persistent task slug, and a model from the supplied list. Select a role or exact address whose configured tools can perform the task. Default unknown role names receive read/search/mail tools, but configured role and exact-address overlays can replace those defaults. A label such as implementer, worker, reviewer, scout, or copywriter does not itself grant mutation tools. Repository implementation must use a role or exact address whose effective tools include mutation tools. Never claim or imply that edits are authorized when the selected agent lacks mutation tools.
+When creating an address, choose a short role name, a persistent task slug, and a model ID from the supplied list; never put a provider ID in the address domain. Unknown duplicate model IDs use the current main provider only when it identifies exactly one candidate. Existing addresses keep their persisted exact provider/model even after main switches provider. Select a role or exact address whose configured tools can perform the task. Default unknown role names receive read/search/mail tools, but configured role and exact-address overlays can replace those defaults. A label such as implementer, worker, reviewer, scout, or copywriter does not itself grant mutation tools. Repository implementation must use a role or exact address whose effective tools include mutation tools. Never claim or imply that edits are authorized when the selected agent lacks mutation tools.
 
 ${capabilitySummary}
 

@@ -6,6 +6,11 @@ export type EmailKind = "request" | "reply";
 export type DeliveryState = "queued" | "delivered" | "failed" | "cancelled";
 export type AgentStatus = "queued" | "spawning" | "running" | "idle" | "failed" | "stopped" | "paused" | "archived";
 
+export interface ModelBinding {
+  provider: string;
+  modelId: string;
+}
+
 export interface EmailEnvelope {
   id: string;
   from: string;
@@ -31,6 +36,8 @@ export interface EmailEnvelope {
   lifecycleIntent?: LifecyclePolicy;
   /** Durable initial thinking-level intent for crash-safe identity creation. */
   effortIntent?: ThinkingLevel;
+  /** Durable provider/model selected when accepting mail for a new identity. */
+  modelBindingIntent?: ModelBinding;
 }
 
 export interface ParsedAddress {
@@ -215,6 +222,8 @@ export interface SendEmailResult {
   envelope: EmailEnvelope;
   spawned: boolean;
   recipientModel?: string;
+  /** Exact provider selected for or preserved by the recipient identity. */
+  recipientProvider?: string;
   recipientEffort?: ThinkingLevel;
   recipientRole?: string;
   recipientTools?: string[];
@@ -274,7 +283,7 @@ export interface AgentInspection {
   usage: UsageSnapshot;
   failure?: string;
   cleanup?: CleanupDiagnostic;
-  providerReady: "available" | "unknown";
+  providerReady: "available" | "unavailable" | "unknown";
   lifecycle: LifecyclePolicy;
 }
 

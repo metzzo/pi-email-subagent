@@ -81,11 +81,14 @@ it("loads the packaged extension with tools, command, and renderers and no confl
         envelope: { ...envelope, from: envelope.to, to: envelope.from, kind: "request", inReplyTo: undefined, requiresResponse: true },
         spawned: true,
         recipientDisposition: "spawned",
+        recipientProvider: "provider-alpha",
+        recipientModel: "shared",
         correlationId: "mail_history_render",
       },
     },
   } as never, { expanded: true, isPartial: false }, theme, {} as never);
   const sendOutput = sendComponent.render(100).join("\n");
+  assert.match(sendOutput, /spawned · provider-alpha\/shared/);
   assert.match(sendOutput, /Conversation preview is loading.*Full transcript/s);
   assert.doesNotMatch(sendOutput, /clipboard|https:\/\/bad\.invalid|\x1b|\x07/);
 });

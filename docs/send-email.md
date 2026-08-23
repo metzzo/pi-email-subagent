@@ -17,7 +17,8 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 
 ### New mail
 
-- An unknown valid recipient **spawns** a persistent agent (subject to `maxAgents`, default 8). An existing address reuses its persistent session.
+- An unknown valid recipient **spawns** a persistent agent (subject to `maxAgents`, default 8). The address domain is a model ID, not a provider ID: one global candidate resolves directly, while duplicate IDs require exactly one candidate under the current main provider. Otherwise the send fails before acceptance. An existing address reuses its persistent session and exact durable provider/model without consulting current main preference.
+- The first accepted request stores the selected provider/model in `modelBindingIntent` alongside effort/lifecycle intent. A crash before registry persistence reconstructs that exact binding rather than selecting again. Later mail carries no new binding intent and cannot rebind an identity.
 - The first send may provide `effort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. It overrides exact-address, role, and default effort for the new identity. The accepted value is copied into durable spawn intent before worker creation; the runtime may clamp it only if the selected model lacks that level.
 - The first send may provide any of `spawnTimeoutMs`, `promptAcceptanceTimeoutMs`, `runTimeoutMs`, `idleTimeoutMs`, `abortTimeoutMs`, and `disposeTimeoutMs` under `lifecycle`. Missing fields resolve from exact address → role → global finite defaults; configured administrative maxima reject oversized values. Broker shutdown is administrator-controlled global configuration and cannot be delegated.
 - Later mail, including mail that restores an archived identity, must omit `effort` and `lifecycle` and preserve the identity's durable original values. This prevents silent mutation. Idle effort remains explicitly mutable through the dashboard or `/agents effort`; there is currently no lifecycle mutation action.
@@ -64,7 +65,8 @@ Delivery state: queued
 Correlation ID: mail_…
 Expected reply subject: Re: [mail_…] Audit token handling
 Answered email: none
-Recipient model: gpt-5.6-sol
+Recipient model: openai-codex/gpt-5.6-sol
+Binding: persisted for this identity
 Recipient effort: high
 Recipient role: reviewer
 Recipient tools: read, grep, find, ls, send_email, fetch_emails
@@ -82,10 +84,11 @@ Recipient lifecycle: {"spawnTimeoutMs":30000,...}
 | `correlationId` | Equals the envelope ID; use it with `wait_for_replies` |
 | `expectedReplySubject` | Present for requests; the exact subject the recipient must answer with |
 | `answeredEmailId` | Present when this send answered an earlier request |
-| `recipientModel/Effort/Role/Tools/State` | Effective recipient profile after model capability clamping (agents only) |
+| `recipientProvider`, `recipientModel` | Exact selected/preserved provider and compatible model ID (agents only) |
+| `recipientEffort/Role/Tools/State` | Effective recipient profile after model capability clamping (agents only) |
 | `recipientLifecycle` | Exact persisted and enforced lifecycle policy (agents only) |
 
-Failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, identity/activation capacity full (with separate run-slot use and safe recovery), mailbox queue full, subject/message or formatted delivery too large, invalid effort, effort/lifecycle override on an existing identity or main mail, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
+Failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, identity/activation capacity full (with separate run-slot use and safe recovery), mailbox queue full, subject/message or formatted delivery too large, invalid effort, effort/lifecycle override on an existing identity or main mail, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model/address shape, prospective duplicate model not uniquely selected by current main provider, or an existing exact binding absent from the current catalog (`not rebound`). A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
 
 If the tool call is aborted before acceptance, the result is `Email send aborted before acceptance.` and nothing is journaled.
 

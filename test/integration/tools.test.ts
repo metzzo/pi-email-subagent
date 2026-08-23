@@ -27,6 +27,8 @@ describe("worker mail tools", () => {
           envelope,
           spawned: false,
           recipientDisposition: "main",
+          recipientProvider: "provider-alpha",
+          recipientModel: "shared",
           recipientEffort: "xhigh",
           correlationId: envelope.id,
           expectedReplySubject: "Re: [mail_tool] Result",
@@ -52,6 +54,8 @@ describe("worker mail tools", () => {
     assert.match(text, /Email accepted/);
     assert.match(text, /Correlation ID: mail_tool/);
     assert.match(text, /Expected reply subject: Re: \[mail_tool\] Result/);
+    assert.match(text, /Recipient model: provider-alpha\/shared/);
+    assert.match(text, /Binding: persisted for this identity/);
     assert.match(text, /Recipient effort: xhigh/);
     assert.equal(Object.hasOwn(input as object, "from"), false);
     const properties = (send.parameters as {

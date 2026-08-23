@@ -684,7 +684,7 @@ describe("broker hardening", () => {
       assert.equal(staleInspection.state, "failed");
       assert.equal(staleInspection.provider, "removed-provider");
       assert.match(staleInspection.failure ?? "", /model unavailable/i);
-      await assert.rejects(restored.broker.restart(staleInspection.address), /not routable/);
+      await assert.rejects(restored.broker.restart(staleInspection.address), /bound to removed-provider\/removed-model.*not rebound/is);
       assert.equal(restored.broker.inspectAgent(staleInspection.address).state, "failed");
       await restored.broker.archive(staleInspection.address);
       assert.equal(restored.broker.inspectAgent(staleInspection.address).state, "archived");

@@ -19,6 +19,10 @@ export interface LaunchOptions {
   piBin?: string;
   /** Keep the main session on disk (omit --no-session) so it can be resumed. */
   persistSession?: boolean;
+  /** Resume one exact session from process startup. */
+  session?: string;
+  /** Additional deterministic child environment for local test providers. */
+  env?: Record<string, string>;
 }
 
 export class PiRpcClient {
@@ -59,11 +63,12 @@ export class PiRpcClient {
     for (const extension of options.extensions) args.push("-e", extension);
     args.push("--mode", "rpc");
     if (!options.persistSession) args.push("--no-session");
+    if (options.session) args.push("--session", options.session);
     args.push("--model", options.model);
     const child = spawn(options.piBin ?? process.env.PI_BIN ?? "pi", args, {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, PI_CODING_AGENT_DIR: options.agentDir },
+      env: { ...process.env, ...options.env, PI_CODING_AGENT_DIR: options.agentDir },
     });
     return new PiRpcClient(child);
   }
@@ -110,6 +115,17 @@ export class PiRpcClient {
     await this.waitFor(
       (line) => line.type === "response" && line.command === "prompt",
       "prompt preflight response",
+      30_000,
+      mark,
+    );
+  }
+
+  async setModel(provider: string, modelId: string): Promise<RpcLine> {
+    const mark = this.mark();
+    this.send({ type: "set_model", provider, modelId });
+    return this.waitFor(
+      (line) => line.type === "response" && line.command === "set_model",
+      "set_model response",
       30_000,
       mark,
     );

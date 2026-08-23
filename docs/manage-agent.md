@@ -17,7 +17,7 @@ Detaches routing immediately and joins the worker's one cleanup lease. State bec
 
 ### `restart`
 
-Joins verified cleanup of any old worker before creating a fresh one bound to the same persistent session file and mailbox. No replacement is created while cleanup is pending or unknown. A cleanup that verifies after the caller deadline may complete the requested replacement generation-safely; otherwise an explicit later restart is required. The replacement resumes enforcement for unanswered mail or scheduling for queued mail and clears `failure` and the reminder counter. Requires free capacity under `maxAgents` when the agent no longer holds an activation lease.
+Joins verified cleanup of any old worker before creating a fresh one bound to the same persisted exact provider/model, session file, and mailbox. Current main-provider preference is not consulted; if the exact tuple is absent, restart fails with `not rebound` guidance rather than substituting a same-ID model. No replacement is created while cleanup is pending or unknown. A cleanup that verifies after the caller deadline may complete the requested replacement generation-safely; otherwise an explicit later restart is required. The replacement resumes enforcement for unanswered mail or scheduling for queued mail and clears `failure` and the reminder counter. Requires free capacity under `maxAgents` when the agent no longer holds an activation lease.
 
 A provider retry that is still live is not a reason to restart: Pi owns that automatic continuation. Before restarting a terminally failed worker, inspect `/agents` Work and Conversation. Current-batch edit/write/shell/custom attempts mean effects may exist; absence of a recorded item does not prove pre-tool safety. Restart is explicit same-identity recovery that preserves the existing session, mailbox, lifecycle, effort, and stable accepted mail ID. It does not resend the envelope and does not promise that replaying later model decisions is side-effect-free.
 
@@ -28,7 +28,7 @@ Frees the agent's activation lease (capacity) while keeping its record, session,
 - Running, spawning, or streaming agents must be stopped and settled first. The error names the active category and reminds you that stop alone retains the lease.
 - The agent must have no queued mail and no open obligations in either direction — no unanswered requests addressed to it, and no requests it sent that are still unanswered or have a reply pending delivery. Refusal reports bounded category counts, up to five real request/mail IDs per category, and omitted counts, without subjects, bodies, or counterparty addresses. Completed identities should answer all mail. If the user intentionally abandons a request to an inactive recipient, close that exact obligation first with [`cancel_request`](cancel-request.md); cancellation is audited and is not a fabricated answer.
 
-The activation lease is released only after any live worker reports verified cleanup. Pending/unknown cleanup blocks archive and retains capacity. Already-archived agents are a no-op. Sending new mail to an archived address restores it (disposition `restored`). Archive clean completed identities instead of creating unlimited replacement addresses.
+The activation lease is released only after any live worker reports verified cleanup. Pending/unknown cleanup blocks archive and retains capacity. Already-archived agents are a no-op. Sending new mail to an archived address restores it (disposition `restored`) only through its persisted exact provider/model; a later main switch cannot rebind it. Archive clean completed identities instead of creating unlimited replacement addresses.
 
 ### `clear_failure`
 
@@ -52,7 +52,7 @@ Action-specific text reports that stop retains its lease, restart resumes the sa
 5. Archive only after queued mail and open obligations are clear.
 6. Retry the new/restored identity after archive releases the lease.
 
-No step is automatic or bulk. Capacity pressure alone authorizes neither cancellation nor archive. Provider failure also authorizes no automatic restart, resend, provider switch, or cancellation; follow [provider retry visibility and recovery](provider-retry-recovery.md).
+No step is automatic or bulk. Capacity pressure alone authorizes neither cancellation nor archive. Provider failure also authorizes no automatic restart, resend, provider switch, or cancellation; follow [provider retry visibility and recovery](provider-retry-recovery.md). Removed or duplicate model bindings follow [provider-aware durable model routing](provider-aware-model-routing.md).
 
 ## Equivalents
 
