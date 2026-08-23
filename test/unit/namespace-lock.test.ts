@@ -23,7 +23,9 @@ it("excludes a second owner, reports the PID, and releases idempotently", async 
   await replacement.release();
 });
 
-it("recovers a proper-lockfile lease after its stale threshold", async () => {
+it("recovers a proper-lockfile lease after its stale threshold", {
+  skip: process.platform !== "linux" ? "abandoned takeover fails closed without Linux kernel identity fencing" : false,
+}, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-stale-lock-"));
   const namespace = join(root, "state");
   await mkdir(namespace, { recursive: true });

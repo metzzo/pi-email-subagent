@@ -855,7 +855,7 @@ export class AgentBroker {
     }
     return {
       active: record?.state === "running" || record?.state === "spawning" || Boolean(worker?.getSnapshot().isStreaming),
-      cleanupQuarantine: Boolean(record?.cleanup),
+      cleanupQuarantine: Boolean(record?.cleanup || this.cleanupQuarantines.has(address)),
       queued: this.boundedRequestIds(queued),
       incomingUnanswered: this.boundedRequestIds(incomingUnanswered),
       outgoingUnanswered: this.boundedRequestIds(outgoingUnanswered),
@@ -1715,7 +1715,10 @@ export class AgentBroker {
       }, 25);
       timer.unref?.(); this.pendingWorkPersists.set(address, timer);
     }
-    if (event.type === "state" || event.type === "settled") swallow(this.persistRegistry());
+    // SdkWorker emits its failed state immediately before the richer failure
+    // event. Persist the latter atomically so readers never observe a terminal
+    // failed record with its failure cause missing.
+    if ((event.type === "state" && event.state !== "failed") || event.type === "settled") swallow(this.persistRegistry());
     this.publish();
     if (event.type === "settled") {
       this.clearWatchdog(address);
@@ -2375,12 +2378,14 @@ export class AgentBroker {
     const mail = this.mailStore.list();
     const holdsActivationLease = this.activationLeases.has(address);
     const archiveBlockers = this.classifyArchiveBlockers(address, record, this.workers.get(address));
+    const cleanup = record?.cleanup
+      ?? (this.cleanupQuarantines.get(address) ? this.cleanupDiagnostic(this.cleanupQuarantines.get(address)!) : undefined);
     return {
       address,
       exists: Boolean(record),
       wouldSpawn: !record,
       capacityAvailable: (!record || holdsActivationLease || this.routableRecords.has(address))
-        && !record?.cleanup
+        && !cleanup
         && !this.mutationSchedulingQuarantined({ tools })
         && (holdsActivationLease || this.activeIdentityCount() < this.options.config.maxAgents),
       capacity: this.capacitySnapshot(),
@@ -2403,7 +2408,7 @@ export class AgentBroker {
       archiveBlockers,
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
-      ...(record?.cleanup ? { cleanup: clone(record.cleanup) } : {}),
+      ...(cleanup ? { cleanup: clone(cleanup) } : {}),
       providerReady: this.workers.has(address)
         ? "available"
         : (record && !this.routableRecords.has(address) ? "unavailable" : "unknown"),
@@ -2552,7 +2557,13 @@ export class AgentBroker {
   getSnapshot(): BrokerSnapshot {
     const agents = [...this.records.values()].map((source) => {
       const { work, ...withoutWork } = source;
-      return { ...clone(withoutWork), ...(work ? { work: lightweightWork(work) } : {}) } as AgentRecord;
+      const cleanup = source.cleanup
+        ?? (this.cleanupQuarantines.get(source.address) ? this.cleanupDiagnostic(this.cleanupQuarantines.get(source.address)!) : undefined);
+      return {
+        ...clone(withoutWork),
+        ...(cleanup ? { cleanup: clone(cleanup) } : {}),
+        ...(work ? { work: lightweightWork(work) } : {}),
+      } as AgentRecord;
     }).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     const unanswered = this.mailStore.list().filter((email) =>
       email.requiresResponse && !email.answeredAt && !email.replyReservedBy && email.deliveryState === "delivered").length;

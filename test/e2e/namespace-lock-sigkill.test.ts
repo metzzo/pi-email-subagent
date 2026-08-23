@@ -71,7 +71,10 @@ it("never steals a stale-mtime namespace lease from a live SIGSTOPed owner", {
   }
 });
 
-it("recovers the real namespace lease after its owner is killed with SIGKILL", { timeout: 25_000 }, async () => {
+it("recovers the real namespace lease after its owner is killed with SIGKILL", {
+  timeout: 25_000,
+  skip: process.platform !== "linux" ? "abandoned takeover fails closed without Linux kernel identity fencing" : false,
+}, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sigkill-lock-"));
   const namespace = join(root, "state");
   const child = spawn(process.execPath, ["--import", "tsx", "test/e2e/helpers/namespace-lock-holder.ts", namespace], {
