@@ -140,19 +140,23 @@ export class NamespaceLock {
       );
     }
 
-    let identity: KernelProcessIdentity;
+    let identity: KernelProcessIdentity | undefined;
     try {
       identity = await kernelProcessIdentity(process.pid);
     } catch (error) {
-      await releaseLock().catch(() => undefined);
-      throw new Error(`Could not establish safe subagent namespace owner fencing: ${errorMessage(error)}`, { cause: error });
+      // A clean first owner can still use proper-lockfile on other platforms,
+      // but an abandoned takeover cannot be fenced there and must fail closed.
+      if (process.platform === "linux" || abandonedOwner) {
+        await releaseLock().catch(() => undefined);
+        throw new Error(`Could not establish safe subagent namespace owner fencing: ${errorMessage(error)}`, { cause: error });
+      }
     }
     const owner: NamespaceOwner = {
       pid: process.pid,
       token,
       acquiredAt: nowIso(),
       namespaceDir,
-      ...identity,
+      ...(identity ?? {}),
     };
     try {
       await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600 });

@@ -2,7 +2,7 @@
 
 ## Status, priority, and classification
 
-- **Status:** review-remediation containment implemented; full-process quiescence remains blocked on a released Pi receipt (validation evidence is recorded in the current change artifacts, not inferred from this plan)
+- **Status:** review-remediation containment implemented; focused real-process/race suites, full `npm run validate`, and CI-pinned Gitleaks passed; full-process quiescence remains blocked on a released Pi receipt
 - **Priority:** P1 safety/reliability
 - **Classification:** async lifecycle cleanup, process quiescence, capacity/namespace ownership, late-promise races
 - **Target baseline inspected:** `5bbcce0c1f40f50c586b79a6a14c5eece3388560`
@@ -20,7 +20,7 @@ The directly recorded representative Linux tests use the real Pi 0.81.1 SDK work
 
 Settlement continuations now carry exact worker/generation ownership and are revalidated after awaits and before record/run-slot mutation. Management invalidates and joins the old continuation. Mutable prompt, steer, schedule, resume, and settlement-enforcement admission share a quarantine epoch that is checked after journal transitions and at synchronous admission boundaries. Persisted cleanup records store `mutationCapableAtStart` and exact `heldRunSlot`; startup restores those quarantines before applying current profiles or ordinary capacity.
 
-Linux namespace ownership now records boot ID and `/proc/<pid>/stat` start time. An exact live or `SIGSTOP`ed owner is never stolen because its lock mtime became stale. Exact-owner death is surfaced as abandoned and prior mutation-capable restorable records become sticky unknown before restore. Other platforms fail closed because this cluster does not add a cross-platform kernel fence.
+Linux namespace ownership now records boot ID and `/proc/<pid>/stat` start time. An exact live or `SIGSTOP`ed owner is never stolen because its lock mtime became stale. Exact-owner death is surfaced as abandoned and prior mutation-capable restorable records become sticky unknown before restore. Other platforms allow clean ownership but fail closed on abandoned takeover because this cluster does not add a cross-platform kernel fence.
 
 The installed supported contract documents `AgentSession.abort()` as waiting for agent idle, while `dispose()` returns void; neither returns a tracked process-group absence receipt. `shell.js` performs a group `SIGKILL`, but its tracking/kill functions are not an awaited public quiescence capability. Therefore the full issue-cluster release gate remains blocked: no released Pi version consumed here can provide authoritative generic active-tool/process quiescence. No `node_modules` or external repository was patched, and the extension deliberately keeps active-tool cleanup quarantined rather than fabricating `verified` confidence.
 
