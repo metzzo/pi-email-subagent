@@ -33,8 +33,8 @@ Archive eligible: no
 Archive blockers: incoming unanswered 1 (mail_…) · outgoing unanswered 1 (mail_…)
 Recovery: restart this inactive identity to finish real obligations; cancel only an explicitly abandoned exact request; archive only after blockers are clear.
 Lifecycle: {"spawnTimeoutMs":30000,...}
-Cleanup: unknown · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved
-Cleanup phases: abort succeeded · dispose succeeded · generation 7
+Cleanup: unknown · quiescence unknown · activation held · restart/archive blocked · queued mail preserved
+Cleanup phases: abort succeeded · dispose succeeded · generation 7 · mutation-capable at start yes · run slot held no
 Last failure: …            (only when present)
 Terminal worker run failure · openai/gpt-5.6-sol · provider/network cause may be external or unclear.
 1 delivered request remains unanswered. Current batch includes mutation/shell/custom work; effects may exist.
@@ -61,7 +61,7 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `archiveBlockers` | Bounded counts and up to five real request/mail IDs per queued, incoming, outgoing, and pending-reply category; includes omitted counts and no subjects/bodies/counterparties |
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
-| `cleanup` | Optional persisted cleanup quarantine: pending/unknown state, worker generation, abort/dispose phases, unknown quiescence, held capacity, bounded active tool IDs/names, and non-sensitive detail |
+| `cleanup` | Optional persisted cleanup quarantine: pending/unknown state, worker generation, abort/dispose phases, unknown quiescence, exact `mutationCapableAtStart` and `heldRunSlot` facts, bounded active tool IDs/names, and non-sensitive detail |
 | `providerReady` | `available` for a live worker, `unavailable` when an existing exact binding is absent, otherwise `unknown` |
 | `lifecycle` | Exact persisted policy for an existing identity, or currently resolved configured defaults for a prospective one |
 

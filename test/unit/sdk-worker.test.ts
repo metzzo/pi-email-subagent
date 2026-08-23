@@ -152,6 +152,54 @@ describe("SDK worker failures", () => {
     assert.deepEqual(record, recordBefore, "cleanup also suppresses stale session mutation");
   });
 
+  it("keeps cleanup pending through a late successful abort instead of treating its caller deadline as cancellation", async () => {
+    const worker = new SdkWorker({} as never);
+    let releaseAbort!: () => void;
+    const abortSettled = new Promise<void>((resolve) => { releaseAbort = resolve; });
+    let disposed = false;
+    const session = {
+      isStreaming: true,
+      abort: async () => { await abortSettled; },
+      dispose: () => { disposed = true; },
+    };
+    const internal = worker as unknown as { session: typeof session };
+    internal.session = session;
+
+    let settled = false;
+    const cleanup = worker.cleanup({ abortTimeoutMs: 10 }).then((report) => {
+      settled = true;
+      return report;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(settled, false, "the authoritative cleanup operation remains pending after the broker deadline");
+    assert.equal(disposed, false, "disposal waits for actual abort settlement");
+
+    releaseAbort();
+    const report = await cleanup;
+    assert.equal(report.abort, "succeeded");
+    assert.equal(report.dispose, "succeeded");
+    assert.equal(report.quiescence, "verified");
+    assert.equal(disposed, true);
+  });
+
+  it("retains generation-level Bash process risk after the tool reports success", async () => {
+    const worker = new SdkWorker({} as never);
+    const session = { isStreaming: false, abort: async () => undefined, dispose: () => undefined };
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "idle" } as any;
+    const internal = worker as unknown as { session: typeof session; record: typeof record; cwd: string; onSessionEvent(event: unknown): void };
+    internal.session = session;
+    internal.record = record;
+    internal.cwd = "/work";
+    internal.onSessionEvent({ type: "tool_execution_start", toolCallId: "completed-bash", toolName: "bash", args: { command: "PRIVATE" } });
+    internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "completed-bash", toolName: "bash", result: {}, isError: false });
+
+    const report = await worker.cleanup({ abortTimeoutMs: 10 });
+    assert.deepEqual(report.tools, [], "completed tools are not mislabeled as active");
+    assert.equal(report.quiescence, "unknown");
+    assert.match(report.source, /process|Bash|receipt/i);
+    assert.doesNotMatch(JSON.stringify(report), /PRIVATE/);
+  });
+
   it("always unsubscribes and disposes a session when abort rejects", async () => {
     const worker = new SdkWorker({} as never);
     let unsubscribed = false;

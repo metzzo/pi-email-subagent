@@ -166,7 +166,7 @@ function parseWork(value: unknown, label: string): AgentWorkState {
   return work;
 }
 
-function parseCleanup(value: unknown, label: string): CleanupDiagnostic | undefined {
+function parseCleanup(value: unknown, label: string, fallbackTools: readonly string[]): CleanupDiagnostic | undefined {
   if (value === undefined) return undefined;
   const raw = object(value, label);
   const state = string(raw.state, `${label}.state`) as CleanupDiagnostic["state"];
@@ -175,7 +175,19 @@ function parseCleanup(value: unknown, label: string): CleanupDiagnostic | undefi
   if (!CLEANUP_STATES.has(state)) throw new Error(`${label}.state is invalid.`);
   if (!CLEANUP_PHASES.has(abort) || !CLEANUP_PHASES.has(dispose)) throw new Error(`${label} has an invalid cleanup phase.`);
   if (raw.quiescence !== "unknown") throw new Error(`${label}.quiescence must be unknown while persisted.`);
-  if (raw.heldCapacity !== true) throw new Error(`${label}.heldCapacity must be true while cleanup is quarantined.`);
+  if (raw.mutationCapableAtStart !== undefined && typeof raw.mutationCapableAtStart !== "boolean") {
+    throw new Error(`${label}.mutationCapableAtStart must be a boolean.`);
+  }
+  if (raw.heldRunSlot !== undefined && typeof raw.heldRunSlot !== "boolean") {
+    throw new Error(`${label}.heldRunSlot must be a boolean.`);
+  }
+  if (raw.heldRunSlot === undefined && raw.heldCapacity !== true) {
+    throw new Error(`${label}.heldRunSlot must be a boolean (legacy heldCapacity must be true).`);
+  }
+  const mutationCapableAtStart = raw.mutationCapableAtStart === undefined
+    ? fallbackTools.some((tool) => tool === "bash" || tool === "edit" || tool === "write")
+    : raw.mutationCapableAtStart;
+  const heldRunSlot = raw.heldRunSlot === undefined ? true : raw.heldRunSlot;
   if (!Number.isSafeInteger(raw.workerGeneration) || (raw.workerGeneration as number) < 1) {
     throw new Error(`${label}.workerGeneration must be a positive safe integer.`);
   }
@@ -202,7 +214,8 @@ function parseCleanup(value: unknown, label: string): CleanupDiagnostic | undefi
     abort,
     dispose,
     quiescence: "unknown",
-    heldCapacity: true,
+    mutationCapableAtStart,
+    heldRunSlot,
     activeTools,
     ...(detail ? { detail } : {}),
   };
@@ -241,7 +254,7 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     activity: parseActivity(raw.activity, `${label}.activity`),
     work: parseWork(raw.work, `${label}.work`),
   };
-  const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`);
+  const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`, record.tools);
   if (cleanup) record.cleanup = cleanup;
   for (const [key, fieldLabel] of [
     ["instructions", `${label}.instructions`],

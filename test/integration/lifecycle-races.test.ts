@@ -15,14 +15,14 @@ function deferred() {
   return { promise, resolve };
 }
 
-function makeBroker(root: string, factory: () => FakeWorker) {
+function makeBroker(root: string, factory: () => FakeWorker, mainAdapter = new FakeMainAdapter()) {
   return new AgentBroker({
     cwd: root,
     agentDir: root,
     namespaceDir: join(root, "state"),
     config: structuredClone(DEFAULT_CONFIG),
     models: [fakeModel("gpt-5.4")],
-    mainAdapter: new FakeMainAdapter(),
+    mainAdapter,
     workerFactory: factory,
     projectTrusted: true,
   });
@@ -61,6 +61,121 @@ describe("broker lifecycle races", () => {
     await assert.rejects(init, /cancelled by shutdown/);
     await closing;
     assert.equal(late.disposed, true);
+  });
+
+  it("invalidates and joins an old settlement continuation before stop or replacement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-settlement-owner-"));
+    const deliveryEntered = deferred();
+    const releaseDelivery = deferred();
+    class BlockingMain extends FakeMainAdapter {
+      override async deliver(delivery: Parameters<FakeMainAdapter["deliver"]>[0]): Promise<void> {
+        deliveryEntered.resolve();
+        await releaseDelivery.promise;
+        await super.deliver(delivery);
+      }
+    }
+    const workers: FakeWorker[] = [];
+    const broker = makeBroker(root, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    }, new BlockingMain());
+    await broker.init();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.settlement-owner@gpt-5.4.com", subject: "Finish", message: "Use completion fallback.", priority: "low",
+      });
+      workers[0]!.settle("Completion reply blocked in delivery.");
+      await deliveryEntered.promise;
+
+      let stopFinished = false;
+      const stopping = broker.stop(request.envelope.to).then(() => { stopFinished = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(stopFinished, false, "management joins the exact old settlement continuation");
+      releaseDelivery.resolve();
+      await stopping;
+      assert.equal(broker.inspectAgent(request.envelope.to).state, "stopped");
+      assert.equal((broker as any).active.has(request.envelope.to), false);
+
+      await broker.restart(request.envelope.to);
+      assert.equal(workers.length, 2);
+      const next = await broker.send(broker.mainAddress, {
+        to: request.envelope.to, subject: "Replacement", message: "Settle the replacement independently.", priority: "low",
+      });
+      await workers[1]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(next.envelope.id, next.envelope.subject),
+        message: "Replacement complete.",
+        priority: "low",
+      });
+      workers[1]!.settle();
+      await eventually(() => assert.equal(broker.inspectAgent(request.envelope.to).state, "idle"));
+    } finally {
+      releaseDelivery.resolve();
+      await broker.shutdown();
+    }
+  });
+
+  it("joins settlement persistence before restart and preserves replacement settlement ownership", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-settlement-persist-owner-"));
+    const workers: FakeWorker[] = [];
+    const broker = makeBroker(root, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    await broker.init();
+    const persistEntered = deferred();
+    const releasePersist = deferred();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.settlement-persist@gpt-5.4.com", subject: "Persist", message: "Answer before settlement.", priority: "low",
+      });
+      await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+        message: "Answered.",
+        priority: "low",
+      });
+      const originalSave = broker.registryStore.save.bind(broker.registryStore);
+      let savesAfterSettlement = 0;
+      broker.registryStore.save = async (registry) => {
+        savesAfterSettlement += 1;
+        if (savesAfterSettlement === 2) {
+          persistEntered.resolve();
+          await releasePersist.promise;
+        }
+        await originalSave(registry);
+      };
+      workers[0]!.settle();
+      await persistEntered.promise;
+
+      let restartFinished = false;
+      const restart = broker.restart(request.envelope.to).then(() => { restartFinished = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(restartFinished, false, "replacement waits for the exact old settlement persistence boundary");
+      releasePersist.resolve();
+      await restart;
+      assert.equal(workers.length, 2);
+
+      const replacementRequest = await broker.send(broker.mainAddress, {
+        to: request.envelope.to, subject: "Replacement persist", message: "Settle only this generation.", priority: "low",
+      });
+      await workers[1]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(replacementRequest.envelope.id, replacementRequest.envelope.subject),
+        message: "Replacement settled.",
+        priority: "low",
+      });
+      workers[1]!.settle();
+      await eventually(() => {
+        assert.equal(broker.inspectAgent(request.envelope.to).state, "idle");
+        assert.equal((broker as any).active.has(request.envelope.to), false);
+      });
+    } finally {
+      releasePersist.resolve();
+      await broker.shutdown();
+    }
   });
 
   it("settles and cleans a long-lived reply waiter during shutdown", async () => {

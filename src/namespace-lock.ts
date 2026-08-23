@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { lock } from "proper-lockfile";
 import { errorMessage, nowIso } from "./util.ts";
@@ -13,6 +13,59 @@ interface NamespaceOwner {
   token: string;
   acquiredAt: string;
   namespaceDir: string;
+  bootId?: string;
+  processStartTime?: string;
+}
+
+interface KernelProcessIdentity {
+  bootId: string;
+  processStartTime: string;
+}
+
+async function kernelProcessIdentity(pid: number): Promise<KernelProcessIdentity> {
+  if (process.platform !== "linux") {
+    throw new Error("safe local namespace ownership requires Linux /proc boot-ID and process-start fencing");
+  }
+  const [bootId, processStat] = await Promise.all([
+    readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+    readFile(`/proc/${pid}/stat`, "utf8"),
+  ]);
+  const close = processStat.lastIndexOf(")");
+  if (close < 0) throw new Error(`could not parse /proc/${pid}/stat`);
+  const fieldsAfterCommand = processStat.slice(close + 1).trim().split(/\s+/);
+  const processStartTime = fieldsAfterCommand[19]; // field 22; field 3 is index 0 here
+  if (!processStartTime || !/^\d+$/.test(processStartTime)) {
+    throw new Error(`could not parse process start time from /proc/${pid}/stat`);
+  }
+  return { bootId: bootId.trim(), processStartTime };
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try { await stat(path); return true; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function ownerStillLive(owner: NamespaceOwner): Promise<boolean> {
+  if (owner.bootId && owner.processStartTime) {
+    try {
+      const current = await kernelProcessIdentity(owner.pid);
+      return current.bootId === owner.bootId && current.processStartTime === owner.processStartTime;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      // An existing PID whose kernel identity cannot be read is not safe to
+      // steal from. A missing PID was handled above.
+      try { process.kill(owner.pid, 0); return true; } catch (killError) {
+        return (killError as NodeJS.ErrnoException).code !== "ESRCH";
+      }
+    }
+  }
+  // Legacy metadata has no PID-reuse proof. Absence is enough to identify an
+  // abandoned lease, but any live/reused PID fails closed.
+  try { process.kill(owner.pid, 0); return true; } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 function isOwner(value: unknown): value is NamespaceOwner {
@@ -39,6 +92,7 @@ export class NamespaceLock {
 
   private constructor(
     readonly namespaceDir: string,
+    readonly abandonedOwner: boolean,
     private readonly ownerPath: string,
     private readonly owner: NamespaceOwner,
     private readonly releaseLock: () => Promise<void>,
@@ -51,6 +105,17 @@ export class NamespaceLock {
     await mkdir(namespaceDir, { recursive: true, mode: 0o700 });
     const ownerPath = join(namespaceDir, OWNER_FILE);
     const token = randomUUID();
+    const [priorOwner, priorLockExists] = await Promise.all([
+      readOwner(ownerPath),
+      pathExists(`${namespaceDir}.lock`),
+    ]);
+    if (priorOwner && await ownerStillLive(priorOwner)) {
+      throw new Error(
+        `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
+        + "The kernel still identifies that exact owner process; close or resume it before retrying.",
+      );
+    }
+    const abandonedOwner = Boolean(priorOwner || priorLockExists);
     let releaseLock: (() => Promise<void>) | undefined;
     try {
       releaseLock = await lock(namespaceDir, {
@@ -75,15 +140,23 @@ export class NamespaceLock {
       );
     }
 
+    let identity: KernelProcessIdentity;
+    try {
+      identity = await kernelProcessIdentity(process.pid);
+    } catch (error) {
+      await releaseLock().catch(() => undefined);
+      throw new Error(`Could not establish safe subagent namespace owner fencing: ${errorMessage(error)}`, { cause: error });
+    }
     const owner: NamespaceOwner = {
       pid: process.pid,
       token,
       acquiredAt: nowIso(),
       namespaceDir,
+      ...identity,
     };
     try {
       await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600 });
-      return new NamespaceLock(namespaceDir, ownerPath, owner, releaseLock);
+      return new NamespaceLock(namespaceDir, abandonedOwner, ownerPath, owner, releaseLock);
     } catch (error) {
       await releaseLock().catch(() => undefined);
       throw new Error(`Could not persist subagent namespace ownership: ${errorMessage(error)}`, { cause: error });

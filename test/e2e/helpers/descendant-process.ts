@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
 const readinessPath = process.argv[2];
 const heartbeatPath = process.argv[3];
@@ -13,6 +13,15 @@ const childScript = [
   "write();",
   "setInterval(write, 100);",
 ].join("");
+function processStartTime(pid: number): string {
+  const value = readFileSync(`/proc/${pid}/stat`, "utf8");
+  const close = value.lastIndexOf(")");
+  const fields = value.slice(close + 1).trim().split(/\s+/);
+  const startTime = fields[19];
+  if (!startTime) throw new Error("process start time unavailable");
+  return startTime;
+}
+
 const child = spawn(process.execPath, ["-e", childScript, heartbeatPath], {
   detached: false,
   stdio: "ignore",
@@ -21,7 +30,9 @@ if (!child.pid) throw new Error("descendant PID was unavailable");
 
 writeFileSync(readinessPath, JSON.stringify({
   parentPid: process.pid,
+  parentProcessStartTime: processStartTime(process.pid),
   childPid: child.pid,
+  childProcessStartTime: processStartTime(child.pid),
   heartbeatPath,
   startedAt: new Date().toISOString(),
 }));

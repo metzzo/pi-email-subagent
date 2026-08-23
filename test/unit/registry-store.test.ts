@@ -79,7 +79,8 @@ describe("registry schema", () => {
       abort: "succeeded",
       dispose: "succeeded",
       quiescence: "unknown",
-      heldCapacity: true,
+      mutationCapableAtStart: true,
+      heldRunSlot: false,
       activeTools: [{ toolCallId: "call-1", toolName: "bash" }],
       detail: "Pi 0.81.1 exposes no process-quiescence receipt.",
     };
@@ -91,7 +92,8 @@ describe("registry schema", () => {
       { ...(base as any).cleanup, workerGeneration: -1 },
       { ...(base as any).cleanup, startedAt: "not-a-time" },
       { ...(base as any).cleanup, abort: "maybe" },
-      { ...(base as any).cleanup, heldCapacity: false },
+      { ...(base as any).cleanup, mutationCapableAtStart: "yes" },
+      { ...(base as any).cleanup, heldRunSlot: "yes" },
       { ...(base as any).cleanup, activeTools: [{ toolCallId: "x".repeat(201), toolName: "bash" }] },
       { ...(base as any).cleanup, detail: "x".repeat(2_001) },
     ]) {

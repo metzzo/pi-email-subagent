@@ -167,7 +167,10 @@ export interface CleanupDiagnostic {
   abort: CleanupPhaseState;
   dispose: CleanupPhaseState;
   quiescence: "unknown";
-  heldCapacity: true;
+  /** Capability of the exact worker generation, independent of later config changes. */
+  mutationCapableAtStart: boolean;
+  /** Whether this cleanup generation inherited one concrete run-slot lease. */
+  heldRunSlot: boolean;
   activeTools: CleanupToolRef[];
   detail?: string;
 }

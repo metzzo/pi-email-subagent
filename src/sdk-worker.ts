@@ -98,7 +98,11 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientLifecycle) lines.push(`Recipient lifecycle: ${JSON.stringify(result.recipientLifecycle)}`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
-        throw new Error(`Email was not accepted: ${errorMessage(error)}`);
+        const message = errorMessage(error);
+        // The broker may report a post-journal delivery problem. Do not
+        // relabel a durable email.created commit as rejection.
+        if (/^Email\s+\S+\s+was persisted\b/.test(message)) throw new Error(message);
+        throw new Error(`Email was not accepted: ${message}`);
       }
     },
   });
@@ -183,6 +187,7 @@ export class SdkWorker implements WorkerTransport {
   private disposed = false;
   private cleanupPromise?: Promise<WorkerCleanupReport>;
   private readonly activeToolCalls = new Map<string, string>();
+  private processCapableRisk = false;
   private startGeneration = 0;
   private runFailure?: string;
   private completionText?: string;
@@ -222,6 +227,7 @@ export class SdkWorker implements WorkerTransport {
     if (this.session) return;
     if (this.disposed) throw new Error("Disposed workers cannot be restarted.");
     const generation = ++this.startGeneration;
+    this.processCapableRisk = false;
     this.record = clone(config.record);
     this.record.work ??= emptyWorkState();
     this.cwd = config.cwd;
@@ -308,6 +314,10 @@ export class SdkWorker implements WorkerTransport {
         this.activity("status", "Agent run started");
         break;
       case "tool_execution_start": {
+        // Pi 0.81.1 has no released receipt proving that descendants of a
+        // completed built-in Bash call are absent. This risk belongs to the
+        // whole worker generation, not only the active-call map.
+        if (event.toolName.toLowerCase() === "bash") this.processCapableRisk = true;
         this.activeToolCalls.set(event.toolCallId, event.toolName);
         this.emit({
           type: "tool_lifecycle",
@@ -479,13 +489,14 @@ export class SdkWorker implements WorkerTransport {
     }
   }
 
-  cleanup(options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
+  cleanup(_options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
     if (this.cleanupPromise) return this.cleanupPromise;
     this.disposed = true;
     this.startGeneration += 1;
     const session = this.session;
     const unsubscribe = this.unsubscribeSession;
     const activeTools = [...this.activeToolCalls].map(([toolCallId, toolName]) => ({ toolCallId, toolName }));
+    const processCapableRisk = this.processCapableRisk;
     this.session = undefined;
     this.sessionManager = undefined;
     this.unsubscribeSession = undefined;
@@ -498,24 +509,17 @@ export class SdkWorker implements WorkerTransport {
       let providerQuiescent = !session?.isStreaming;
       let detail: string | undefined;
       if (session?.isStreaming) {
-        const abortPromise = session.abort();
-        abortPromise.catch(() => undefined);
-        let timer: ReturnType<typeof setTimeout> | undefined;
+        // The broker owns caller responsiveness. A timeout there is not
+        // cancellation here: this one authoritative operation stays pending
+        // until Pi's abort actually settles, then disposes the session once.
         try {
-          const result = await Promise.race([
-            abortPromise.then(() => "succeeded" as const, (error: unknown) => {
-              detail = truncateText(errorMessage(error), 500);
-              return "failed" as const;
-            }),
-            new Promise<"timed-out">((resolve) => {
-              timer = setTimeout(() => resolve("timed-out"), options.abortTimeoutMs);
-            }),
-          ]);
-          abort = result;
-          providerQuiescent = result === "succeeded";
-          if (result === "timed-out") detail = `LIFECYCLE_ABORT_TIMEOUT: session abort did not settle after ${options.abortTimeoutMs}ms`;
-        } finally {
-          if (timer) clearTimeout(timer);
+          await session.abort();
+          abort = "succeeded";
+          providerQuiescent = true;
+        } catch (error) {
+          abort = "failed";
+          providerQuiescent = false;
+          detail = truncateText(errorMessage(error), 500);
         }
       }
       try {
@@ -531,15 +535,22 @@ export class SdkWorker implements WorkerTransport {
         quiescence: "unknown" as const,
         detailCode: "PI_TOOL_QUIESCENCE_RECEIPT_UNAVAILABLE",
       }));
-      const quiescence = providerQuiescent && dispose === "succeeded" && tools.length === 0 ? "verified" as const : "unknown" as const;
+      const quiescence = providerQuiescent
+        && dispose === "succeeded"
+        && tools.length === 0
+        && !processCapableRisk
+        ? "verified" as const
+        : "unknown" as const;
       return {
         sessionDisposed: dispose === "succeeded",
         providerQuiescent,
         tools,
         quiescence,
         source: quiescence === "verified"
-          ? "pi-agent-session-idle-with-no-active-tools"
-          : "pi-0.81.1-no-tool-process-quiescence-receipt",
+          ? "pi-agent-session-idle-with-no-process-capable-tool-risk"
+          : processCapableRisk
+            ? "pi-0.81.1-bash-process-quiescence-receipt-unavailable"
+            : "pi-0.81.1-no-tool-process-quiescence-receipt",
         abort,
         dispose,
         ...(detail ? { detail } : {}),

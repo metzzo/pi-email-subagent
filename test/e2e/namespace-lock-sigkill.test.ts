@@ -32,6 +32,45 @@ function waitForReady(child: ReturnType<typeof spawn>, stderr: () => string): Pr
   });
 }
 
+it("never steals a stale-mtime namespace lease from a live SIGSTOPed owner", {
+  timeout: 30_000,
+  skip: process.platform !== "linux" ? "kernel owner fencing requires Linux /proc" : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sigstop-lock-"));
+  const namespace = join(root, "state");
+  const child = spawn(process.execPath, ["--import", "tsx", "test/e2e/helpers/namespace-lock-holder.ts", namespace], {
+    cwd: process.cwd(),
+    stdio: ["ignore", "pipe", "pipe"],
+    env: process.env,
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+  const closed = new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", () => resolve());
+  });
+  try {
+    const holderPid = await waitForReady(child, () => stderr);
+    assert.equal(child.kill("SIGSTOP"), true);
+    await new Promise((resolve) => setTimeout(resolve, NAMESPACE_LOCK_STALE_MS + 1_000));
+    await assert.rejects(
+      NamespaceLock.acquire(namespace, () => undefined),
+      new RegExp(`already owned \\(pid ${holderPid}, acquired`),
+    );
+    const owner = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number; bootId?: string; processStartTime?: string };
+    assert.equal(owner.pid, holderPid);
+    assert.ok(owner.bootId);
+    assert.ok(owner.processStartTime);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGCONT");
+      child.kill("SIGKILL");
+    }
+    await closed.catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("recovers the real namespace lease after its owner is killed with SIGKILL", { timeout: 25_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sigkill-lock-"));
   const namespace = join(root, "state");
@@ -72,6 +111,7 @@ it("recovers the real namespace lease after its owner is killed with SIGKILL", {
       }
     }
     assert.ok(recovered, `lease did not recover after SIGKILL\n${stderr}`);
+    assert.equal(recovered.abandonedOwner, true, "takeover reports abrupt owner loss to registry recovery");
     assert.ok(Date.now() - killedAt >= NAMESPACE_LOCK_STALE_MS - 2_500, "fresh leases must not be stolen immediately");
 
     const ownerAfter = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number };

@@ -224,6 +224,22 @@ function planMain(messages: readonly Message[]): Plan {
   if (lastText.includes("E2E CLEANUP STOP")) {
     return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WRITER_ADDRESS, action: "stop" } }] };
   }
+  if (lastText.includes("E2E CLEANUP RESTART")) {
+    return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WRITER_ADDRESS, action: "restart" } }] };
+  }
+  if (lastText.includes("E2E CLEANUP BACKGROUND START")) {
+    const paths = / PATH ([^\s]+) HEARTBEAT ([^\s]+)/.exec(lastText);
+    if (!paths) return { text: "E2E CLEANUP PATHS MISSING" };
+    return { toolCalls: [{
+      name: "send_email",
+      arguments: {
+        to: MOCK_WRITER_ADDRESS,
+        subject: "Verify completed Bash quarantine",
+        message: `CLEANUP BACKGROUND PATH ${paths[1]} HEARTBEAT ${paths[2]}`,
+        priority: "low",
+      },
+    }] };
+  }
   if (lastText.includes("E2E CLEANUP START")) {
     const paths = / PATH ([^\s]+) HEARTBEAT ([^\s]+)/.exec(lastText);
     if (!paths) return { text: "E2E CLEANUP PATHS MISSING" };
@@ -339,6 +355,17 @@ function planWorker(messages: readonly Message[]): Plan {
 
   if (last?.role === "toolResult") {
     if (last.toolName === "fetch_emails") {
+      if (lastText.includes("CLEANUP BACKGROUND") && lastToolResultIndex(messages, "bash") < 0) {
+        const paths = /CLEANUP BACKGROUND PATH ([^\s<]+) HEARTBEAT ([^\s<]+)/.exec(lastText);
+        if (!paths) return { text: "WORKER MISSING BACKGROUND PATHS" };
+        return { toolCalls: [{
+          name: "bash",
+          arguments: {
+            command: `${JSON.stringify(process.execPath)} --import tsx test/e2e/helpers/background-heartbeat.ts ${JSON.stringify(paths[1])} ${JSON.stringify(paths[2])} >/dev/null 2>&1 &`,
+            timeout: 5,
+          },
+        }] };
+      }
       if (lastText.includes("CLEANUP PROCESS") && lastToolResultIndex(messages, "bash") < 0) {
         const paths = /CLEANUP PROCESS PATH ([^\s<]+) HEARTBEAT ([^\s<]+)/.exec(lastText);
         if (!paths) return { text: "WORKER MISSING CLEANUP PATHS" };

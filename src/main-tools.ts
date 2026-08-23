@@ -123,8 +123,8 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         if (blockerDetails.length) lines.push(`Archive blockers: ${blockerDetails.join(" · ")}`);
         lines.push(`Recovery: ${inspectionRecovery(inspection)}`);
         if (inspection.cleanup) {
-          lines.push(`Cleanup: ${inspection.cleanup.state} · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved`);
-          lines.push(`Cleanup phases: abort ${inspection.cleanup.abort} · dispose ${inspection.cleanup.dispose} · generation ${inspection.cleanup.workerGeneration}`);
+          lines.push(`Cleanup: ${inspection.cleanup.state} · quiescence unknown · activation held · restart/archive blocked · queued mail preserved`);
+          lines.push(`Cleanup phases: abort ${inspection.cleanup.abort} · dispose ${inspection.cleanup.dispose} · generation ${inspection.cleanup.workerGeneration} · mutation-capable at start ${inspection.cleanup.mutationCapableAtStart ? "yes" : "no"} · run slot held ${inspection.cleanup.heldRunSlot ? "yes" : "no"}`);
         }
         if (inspection.failure) {
           lines.push(`Last failure: ${inspection.failure}`);

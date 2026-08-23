@@ -26,7 +26,7 @@ Project values merge over global values, which merge over the defaults below. In
 | `maxRetainedEmails` | `10000` | 1–1000000 | Soft cap for retained envelopes; open obligations are never pruned |
 | `responseReminderLimit` | `2` | 1–10 | Re-prompts before an agent settling with unanswered mail is marked failed |
 
-`maxAgents` and `maxConcurrent` are intentionally separate. `maxAgents` counts current activation leases for persistent identities, including stopped identities and cleanup quarantines. `maxConcurrent` counts current run slots; work can queue for a run slot while its identity already holds a lease. Waiting for run concurrency or stopping a worker does not free identity capacity. A successful clean archive is the normal explicit lease release.
+`maxAgents` and `maxConcurrent` are intentionally separate. `maxAgents` counts current activation leases for persistent identities, including stopped identities and cleanup quarantines. `maxConcurrent` counts current run slots; work can queue for a run slot while its identity already holds a lease. Persisted cleanup records reconstruct their exact `heldRunSlot` value before ordinary admission, so lowering limits preserves inherited quarantine overcommit but does not invent holds for an idle generation or admit ordinary work over them. Waiting for run concurrency or stopping a worker does not free identity capacity. A successful clean archive is the normal explicit lease release.
 
 `inspect_agent` and `/agents` derive current used/limit values directly from the broker's authoritative lease sets. These capacity views are not written to `registry.json` and do not change either default (`8` identities, `4` runs).
 
