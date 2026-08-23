@@ -82,6 +82,10 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   );
   const action = (tools[3].parameters as { properties: { action: unknown } }).properties.action;
   assert.deepEqual(action, { type: "string", enum: ["stop", "restart", "archive", "clear_failure"] });
+  assert.match(tools[0].description, /identity-lease.*run-slot.*archive blockers/i);
+  const manageGuidance = (tools[3].promptGuidelines ?? []).join("\n");
+  assert.match(manageGuidance, /stop.*does not free.*maxAgents/i);
+  assert.match(manageGuidance, /cancel only.*explicitly abandoned.*exact requests/i);
 });
 
 it("previews an initial effort override without spawning", async () => {
@@ -94,6 +98,8 @@ it("previews an initial effort override without spawning", async () => {
         exists: false,
         wouldSpawn: true,
         capacityAvailable: true,
+        capacity: { identitiesUsed: 0, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 },
+        holdsActivationLease: false,
         modelId: "gpt-5.6-sol",
         provider: "openai-codex",
         effort: effort ?? "medium",
@@ -104,7 +110,17 @@ it("previews an initial effort override without spawning", async () => {
         state: "new",
         queued: 0,
         unanswered: 0,
+        outgoingUnanswered: 0,
         pendingReplies: 0,
+        archiveEligible: false,
+        archiveBlockers: {
+          active: false,
+          cleanupQuarantine: false,
+          queued: { count: 0, requestIds: [], omitted: 0 },
+          incomingUnanswered: { count: 0, requestIds: [], omitted: 0 },
+          outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 },
+          pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+        },
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
         providerReady: "unknown",
         lifecycle: {
@@ -134,6 +150,94 @@ it("previews an initial effort override without spawning", async () => {
   }).properties.effort;
   const effortSchema = (effort.anyOf?.find((item) => (item as { enum?: string[] }).enum) ?? effort) as { enum?: string[] };
   assert.deepEqual(effortSchema.enum, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+});
+
+it("renders derived capacity, lease, obligations, archive eligibility, and safe recovery", async () => {
+  const requestIds = ["mail_incoming", "mail_outgoing"];
+  const inspection = {
+    address: "worker.capacity@gpt-5.4.com",
+    exists: true,
+    wouldSpawn: false,
+    capacityAvailable: true,
+    capacity: { identitiesUsed: 2, identitiesLimit: 2, runSlotsUsed: 1, runSlotsLimit: 1 },
+    holdsActivationLease: true,
+    modelId: "gpt-5.4",
+    provider: "openai-codex",
+    effort: "medium",
+    role: "worker",
+    tools: ["read", "send_email", "fetch_emails"],
+    writable: false,
+    canSpawn: true,
+    state: "stopped",
+    queued: 0,
+    unanswered: 1,
+    outgoingUnanswered: 1,
+    pendingReplies: 0,
+    archiveEligible: false,
+    archiveBlockers: {
+      active: false,
+      cleanupQuarantine: false,
+      queued: { count: 0, requestIds: [], omitted: 0 },
+      incomingUnanswered: { count: 1, requestIds: [requestIds[0]], omitted: 0 },
+      outgoingUnanswered: { count: 1, requestIds: [requestIds[1]], omitted: 0 },
+      pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+    },
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    providerReady: "unknown",
+    lifecycle: {
+      spawnTimeoutMs: 30_000, promptAcceptanceTimeoutMs: 30_000, runTimeoutMs: 10_000,
+      idleTimeoutMs: 5_000, abortTimeoutMs: 1_000, disposeTimeoutMs: 1_000, brokerShutdownTimeoutMs: 5_000,
+    },
+  };
+  const broker = { inspectAgent: () => inspection } as unknown as AgentBroker;
+  const rendered = await createMainCoordinationTools(() => broker)[0].execute(
+    "inspect-capacity", { address: inspection.address }, undefined, undefined, {} as never,
+  );
+  const text = (rendered.content[0] as { text: string }).text;
+  assert.match(text, /Identity capacity: 2\/2 used.*holds a lease: yes.*available for this address: yes/i);
+  assert.match(text, /Run concurrency: 1\/1 slots used/i);
+  assert.match(text, /1 incoming unanswered.*1 outgoing unanswered/i);
+  assert.match(text, /Archive eligible: no/i);
+  assert.match(text, /restart.*real obligations/i);
+  assert.match(text, /cancel only.*explicitly abandoned.*exact request/i);
+  for (const id of requestIds) assert.match(text, new RegExp(id));
+  assert.doesNotMatch(text, /subject|body/i);
+  const details = rendered.details as { inspection: any };
+  assert.deepEqual(details.inspection.capacity, inspection.capacity);
+  assert.equal(details.inspection.holdsActivationLease, true);
+  assert.equal(details.inspection.archiveEligible, false);
+});
+
+it("reports actual post-action identity capacity in manage_agent results", async () => {
+  let state: "stopped" | "archived" = "stopped";
+  let holdsActivationLease = true;
+  let identitiesUsed = 1;
+  const inspection = () => ({
+    address: "worker.capacity@gpt-5.4.com", state, holdsActivationLease,
+    capacity: { identitiesUsed, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1 },
+    archiveEligible: state === "stopped",
+  });
+  const broker = {
+    stop: async () => { state = "stopped"; },
+    restart: async () => undefined,
+    archive: async () => { state = "archived"; holdsActivationLease = false; identitiesUsed = 0; },
+    clearFailure: async () => undefined,
+    inspectAgent: inspection,
+  } as unknown as AgentBroker;
+  const manage = createMainCoordinationTools(() => broker)[3];
+  const stopped = await manage.execute(
+    "manage-stop", { address: inspection().address, action: "stop" }, undefined, undefined, {} as never,
+  );
+  assert.match((stopped.content[0] as { text: string }).text, /lease remains held.*stop alone does not free.*maxAgents/i);
+  assert.deepEqual((stopped.details as any).capacity, inspection().capacity);
+  assert.equal((stopped.details as any).holdsActivationLease, true);
+
+  const archived = await manage.execute(
+    "manage-archive", { address: inspection().address, action: "archive" }, undefined, undefined, {} as never,
+  );
+  assert.match((archived.content[0] as { text: string }).text, /lease released.*Identity capacity: 0\/1/i);
+  assert.equal((archived.details as any).holdsActivationLease, false);
+  assert.equal((archived.details as any).capacity.identitiesUsed, 0);
 });
 
 it("guides timed-out pending waits without changing exact structured results", async () => {

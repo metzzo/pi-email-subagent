@@ -3,7 +3,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentBroker } from "./broker.ts";
 import { textResult } from "./tool-result.ts";
-import type { AgentInspection, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
+import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
 import { byteLength, errorMessage } from "./util.ts";
 
 const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
@@ -29,10 +29,39 @@ export interface ManageAgentToolDetails {
   address?: string;
   action?: "stop" | "restart" | "archive" | "clear_failure";
   state?: string;
+  capacity?: AgentCapacitySnapshot;
+  holdsActivationLease?: boolean;
+  archiveEligible?: boolean;
 }
 
 function compactEnvelopeDetails(envelope: EmailEnvelope | undefined): EmailEnvelope | undefined {
   return envelope ? { ...envelope, message: "[body omitted from structured tool details; see tool text]" } : undefined;
+}
+
+function formatBlocker(label: string, blocker: BoundedRequestIds): string | undefined {
+  if (blocker.count === 0) return undefined;
+  const ids = blocker.requestIds.join(", ");
+  const omitted = blocker.omitted ? `${ids ? ", " : ""}+${blocker.omitted} omitted` : "";
+  return `${label} ${blocker.count}${ids || omitted ? ` (${ids}${omitted})` : ""}`;
+}
+
+function inspectionRecovery(inspection: AgentInspection): string {
+  const blockers = inspection.archiveBlockers.queued.count
+    + inspection.archiveBlockers.incomingUnanswered.count
+    + inspection.archiveBlockers.outgoingUnanswered.count
+    + inspection.archiveBlockers.pendingReplies.count;
+  if (inspection.cleanup) return "Wait for affirmative cleanup quiescence; restart/archive remain blocked and capacity stays held.";
+  if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity or ask main to resolve real obligations and archive a clean identity before retrying.";
+  if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity or archive another clean identity first.";
+  if (inspection.state === "paused" && !inspection.holdsActivationLease) return "This overflow identity needs free identity capacity before restart; retain or resolve its obligations through main.";
+  if ((inspection.state === "stopped" || inspection.state === "failed") && blockers > 0) {
+    return "Restart this inactive identity to finish real obligations. Cancel only an explicitly abandoned exact request after final validation; archive only after blockers are clear.";
+  }
+  if (inspection.archiveEligible && inspection.holdsActivationLease) {
+    return "Reuse this identity if relevant, or archive this clean identity when it is no longer needed; stop alone does not free its lease.";
+  }
+  if (inspection.holdsActivationLease) return "Reuse this relevant identity and finish real obligations; stop only to become inactive and never to free its lease.";
+  return "Ask main to resolve obligations and obtain identity capacity before retrying.";
 }
 
 function compactWaitDetails(result: WaitForRepliesResult): WaitForRepliesResult {
@@ -51,7 +80,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "inspect_agent",
     label: "Inspect agent",
     description:
-      "Preview or inspect a virtual email agent without spawning it. For a prospective identity, optional effort previews an initial send override. Returns the effective model, effort, role, tools, writable/read-only guidance, capacity, mailbox counts, state, usage, and last failure. Use before delegation when recipient capability is uncertain.",
+      "Preview or inspect a virtual email agent without spawning it. For a prospective identity, optional effort previews an initial send override. Returns the effective profile, derived identity-lease and run-slot capacity, exact lease ownership, bounded obligation/archive blockers, lifecycle state, usage, and last failure. Use before delegation or capacity recovery.",
     promptSnippet: "Inspect effective subagent capabilities and state without spawning.",
     promptGuidelines: [
       "Use inspect_agent before sending repository changes when you are not certain the address has edit/write/bash tools.",
@@ -73,10 +102,22 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           `Model: ${inspection.provider}/${inspection.modelId} · effort ${inspection.effort}`,
           `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"} · ${inspection.canSpawn ? "can spawn" : "spawn disabled"}`,
           `Tools: ${inspection.tools.join(", ")}`,
-          `Capacity available: ${inspection.capacityAvailable ? "yes" : "no"}`,
-          `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} unanswered · ${inspection.pendingReplies} pending replies`,
+          `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} used · this address holds a lease: ${inspection.holdsActivationLease ? "yes" : "no"} · capacity available for this address: ${inspection.capacityAvailable ? "yes" : "no"}`,
+          `Run concurrency: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit} slots used`,
+          `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} incoming unanswered · ${inspection.outgoingUnanswered} outgoing unanswered · ${inspection.pendingReplies} pending replies`,
+          `Archive eligible: ${inspection.archiveEligible ? "yes" : "no"}`,
           `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
         ];
+        const blockerDetails = [
+          inspection.archiveBlockers.active ? "active worker" : undefined,
+          inspection.archiveBlockers.cleanupQuarantine ? "cleanup quiescence unknown" : undefined,
+          formatBlocker("queued", inspection.archiveBlockers.queued),
+          formatBlocker("incoming unanswered", inspection.archiveBlockers.incomingUnanswered),
+          formatBlocker("outgoing unanswered", inspection.archiveBlockers.outgoingUnanswered),
+          formatBlocker("reply delivery pending", inspection.archiveBlockers.pendingReplies),
+        ].filter((value): value is string => Boolean(value));
+        if (blockerDetails.length) lines.push(`Archive blockers: ${blockerDetails.join(" · ")}`);
+        lines.push(`Recovery: ${inspectionRecovery(inspection)}`);
         if (inspection.cleanup) {
           lines.push(`Cleanup: ${inspection.cleanup.state} · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved`);
           lines.push(`Cleanup phases: abort ${inspection.cleanup.abort} · dispose ${inspection.cleanup.dispose} · generation ${inspection.cleanup.workerGeneration}`);
@@ -184,9 +225,12 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "manage_agent",
     label: "Manage agent",
     description:
-      "Control an existing email agent without assigning work. Main-thread only. Stop, restart, safely archive a clean identity to free capacity, or clear a stale failure diagnostic. Unknown cleanup remains quarantined: restart/archive/clear-failure stay blocked, capacity is held, and queued mail is preserved. Sending email remains the only way to create agents or assign tasks.",
-    promptSnippet: "Stop, restart, archive, or clear a failure on an existing subagent.",
-    promptGuidelines: ["Archive clean completed identities instead of creating unlimited replacement addresses."],
+      "Control an existing email agent without assigning work. Main-thread only. Stop retains the identity lease; restart resumes the same persistent work; only verified clean archive releases identity capacity. Unknown cleanup remains quarantined. Cancellation of explicitly abandoned exact requests is a separate audited tool.",
+    promptSnippet: "Stop, restart, archive, or clear a failure on an existing subagent with explicit capacity safety.",
+    promptGuidelines: [
+      "Stop only to make work inactive; it does not free maxAgents identity capacity.",
+      "Cancel only explicitly abandoned exact requests after the recipient is inactive, then archive only when all blockers are clear.",
+    ],
     executionMode: "sequential" as const,
     parameters: Type.Object({
       address: Type.String({ description: "Existing subagent address" }),
@@ -200,10 +244,26 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         else if (params.action === "restart") await broker.restart(params.address);
         else if (params.action === "archive") await broker.archive(params.address);
         else await broker.clearFailure(params.address);
-        const state = broker.inspectAgent(params.address).state;
+        const inspection = broker.inspectAgent(params.address);
+        const state = inspection.state;
+        const capacityText = `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} activation leases used · run concurrency: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit} slots used.`;
+        const actionText = params.action === "stop"
+          ? `Identity lease remains ${inspection.holdsActivationLease ? "held" : "free"}; stop alone does not free maxAgents identity capacity.`
+          : params.action === "restart"
+            ? "The same persistent session and mailbox are resumed; genuine obligations remain authoritative."
+            : params.action === "archive"
+              ? `Identity lease released: ${inspection.holdsActivationLease ? "no" : "yes"}.`
+              : "Clearing a failure diagnostic does not resolve or cancel any obligation.";
         return textResult(
-          `${params.action} completed for ${params.address}. State: ${state}.`,
-          { address: params.address, action: params.action, state } satisfies ManageAgentToolDetails,
+          `${params.action} completed for ${params.address}. State: ${state}.\n${actionText} ${capacityText}`,
+          {
+            address: params.address,
+            action: params.action,
+            state,
+            capacity: inspection.capacity,
+            holdsActivationLease: inspection.holdsActivationLease,
+            archiveEligible: inspection.archiveEligible,
+          } satisfies ManageAgentToolDetails,
         );
       } catch (error) {
         throw new Error(`Could not manage agent: ${errorMessage(error)}`);

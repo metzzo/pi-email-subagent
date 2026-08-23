@@ -19,6 +19,7 @@
  *   user "E2E DELEGATE WORK"                        → writable worker performs edit/write/bash
  *   user "E2E WATCHDOG IDLE|RUN PATH <path>"         → writable worker runs a real silent Bash child
  *   user "E2E CLEANUP START|STOP ..."                 → writable worker runs/stops a parent+descendant process
+ *   user "E2E CAPACITY RECOVERY"                      → reject, stop, cancel, archive, retry explicitly
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
  *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
@@ -114,6 +115,10 @@ function unansweredPairs(text: string): MailPair[] {
   return pairs;
 }
 
+function toolResultCount(messages: readonly Message[], toolName: string): number {
+  return messages.filter((message) => message?.role === "toolResult" && message.toolName === toolName).length;
+}
+
 function lastToolResultIndex(messages: readonly Message[], toolName: string): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
@@ -135,6 +140,7 @@ function planMain(messages: readonly Message[]): Plan {
   if (!lastIsInstruction
     && ids.length > 0
     && !instruction.includes("NOWAIT")
+    && !instruction.includes("CAPACITY RECOVERY")
     && lastToolResultIndex(messages, "send_email") > lastToolResultIndex(messages, "wait_for_replies")) {
     return { toolCalls: [{
       name: "wait_for_replies",
@@ -143,6 +149,48 @@ function planMain(messages: readonly Message[]): Plan {
   }
 
   if (last?.role === "toolResult") {
+    if (instruction.includes("CAPACITY RECOVERY")) {
+      const failed = last.isError === true;
+      if (last.toolName === "send_email") {
+        if (failed) return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "archive" } }] };
+        if (toolResultCount(messages, "send_email") === 1) {
+          return { toolCalls: [{
+            name: "send_email",
+            arguments: {
+              to: MOCK_REVIEWER_ADDRESS,
+              subject: "Capacity probe rejected before acceptance",
+              message: "This request must not be journaled while identity capacity is full.",
+              priority: "low",
+            },
+          }] };
+        }
+        return { text: "E2E CAPACITY RECOVERED" };
+      }
+      if (last.toolName === "manage_agent") {
+        if (failed) return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "stop" } }] };
+        if (/^stop completed/i.test(lastText)) {
+          return { toolCalls: [{
+            name: "cancel_request",
+            arguments: {
+              request_id: ids[0] ?? "mail_missing",
+              reason: "The E2E test owner explicitly abandoned this exact capacity request.",
+            },
+          }] };
+        }
+        return { toolCalls: [{
+          name: "send_email",
+          arguments: {
+            to: MOCK_REVIEWER_ADDRESS,
+            subject: "Capacity retry after explicit archive",
+            message: "This request is accepted only after the clean lease is released.",
+            priority: "low",
+          },
+        }] };
+      }
+      if (last.toolName === "cancel_request") {
+        return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "archive" } }] };
+      }
+    }
     if (last.toolName === "send_email") {
       if (instruction.includes("NOWAIT")) return { text: "E2E SENT" };
       const ids = correlationIds(messages);
@@ -162,6 +210,17 @@ function planMain(messages: readonly Message[]): Plan {
   }
 
   if (lastText.includes('<agent-email') && lastText.includes('kind="reply"')) return { text: "E2E REPLY SEEN" };
+  if (lastText.includes("E2E CAPACITY RECOVERY")) {
+    return { toolCalls: [{
+      name: "send_email",
+      arguments: {
+        to: MOCK_WORKER_ADDRESS,
+        subject: "Capacity owner obligation",
+        message: "SLOW 10000. Keep this exact request open until main explicitly abandons it.",
+        priority: "low",
+      },
+    }] };
+  }
   if (lastText.includes("E2E CLEANUP STOP")) {
     return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WRITER_ADDRESS, action: "stop" } }] };
   }

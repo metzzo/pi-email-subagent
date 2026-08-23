@@ -348,7 +348,7 @@ describe("broker hardening", () => {
   });
 
   it("preserves overflow identities when maxAgents is lowered", async () => {
-    const first = await setup({ maxAgents: 2 });
+    const first = await setup({ maxAgents: 2, maxConcurrent: 2 });
     await first.broker.send(first.broker.mainAddress, {
       to: "worker.one@gpt-5.4.com", subject: "One", message: "One.", priority: "low",
     });
@@ -357,10 +357,17 @@ describe("broker hardening", () => {
     });
     await first.broker.shutdown();
 
-    const second = await setup({ maxAgents: 1 }, first.root);
+    const second = await setup({ maxAgents: 1, maxConcurrent: 1 }, first.root);
     try {
-      assert.equal(second.broker.getSnapshot().agents.length, 2);
+      const snapshot = second.broker.getSnapshot();
+      assert.equal(snapshot.agents.length, 2);
+      assert.deepEqual(snapshot.capacity, {
+        identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 1, runSlotsLimit: 1,
+      });
       assert.equal(second.workers.length, 1);
+      assert.equal(second.broker.inspectAgent("worker.one@gpt-5.4.com").holdsActivationLease, true);
+      assert.equal(second.broker.inspectAgent("worker.two@gpt-5.4.com").holdsActivationLease, false);
+      assert.equal(second.broker.inspectAgent("worker.two@gpt-5.4.com").capacityAvailable, false);
       assert.match(second.broker.inspectAgent("worker.two@gpt-5.4.com").currentActivity ?? "", /Paused by maxAgents capacity/);
       await assert.rejects(second.broker.send(second.broker.mainAddress, {
         to: "worker.two@gpt-5.4.com", subject: "Activate overflow", message: "Must remain paused.", priority: "low",
@@ -463,7 +470,8 @@ describe("broker hardening", () => {
         const inspection = broker.inspectAgent(request.envelope.to);
         assert.equal(inspection.state, "failed");
         assert.equal(inspection.cleanup, undefined);
-        assert.equal(workers[0]?.disposed, true, "provider-failure cleanup has settled before lifecycle assertions");
+        assert.equal(workers[0]?.disposed, true, "provider-failure worker disposal completed");
+        assert.equal((broker as any).cleanupQuarantines.has(request.envelope.to), false, "broker cleanup lease release completed before lifecycle assertions");
       });
       await assert.rejects(broker.clearFailure(request.envelope.to), /idle, stopped, or archived/);
       await broker.stop(request.envelope.to);

@@ -43,6 +43,12 @@ If one settled batch contains unanswered requests from multiple senders, the bro
 - Rate: 60 mails/minute global, 30 mails/minute per sender (sliding window). Validation failures are not charged; quota is consumed before journaling.
 - Queue per recipient: 256 messages / 4 MB.
 
+### Identity-capacity rejection and recovery
+
+An identity-capacity error reports `maxAgents` activation leases used/limit and the separate current `maxConcurrent` run-slot use. A native `Email was not accepted: Agent limit reached …` result for an unknown recipient is a pre-accept rejection: no envelope, recipient record, or response obligation is created. A distinct `Email <id> was persisted but delivery failed: …` wrapper still means acceptance already occurred. The aggregate capacity diagnostic never lists other agent addresses, subjects, or bodies.
+
+Waiting for a run slot or stopping an identity does not free its activation lease. Use the explicit recovery order: reuse a relevant existing address; restart stopped/failed real work; stop only to make an active identity inactive; cancel only an exact request the user explicitly abandoned and only after its recipient is inactive; archive a clean identity; then retry. Downstream agents cannot manage/cancel and should reuse a relevant address they already know or report the blocker to main.
+
 ## Result
 
 Success text (`isError: false`):
@@ -79,7 +85,7 @@ Recipient lifecycle: {"spawnTimeoutMs":30000,...}
 | `recipientModel/Effort/Role/Tools/State` | Effective recipient profile after model capability clamping (agents only) |
 | `recipientLifecycle` | Exact persisted and enforced lifecycle policy (agents only) |
 
-Failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, agent limit reached, mailbox queue full, subject/message or formatted delivery too large, invalid effort, effort/lifecycle override on an existing identity or main mail, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
+Failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, identity/activation capacity full (with separate run-slot use and safe recovery), mailbox queue full, subject/message or formatted delivery too large, invalid effort, effort/lifecycle override on an existing identity or main mail, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model or address shape. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …`.
 
 If the tool call is aborted before acceptance, the result is `Email send aborted before acceptance.` and nothing is journaled.
 

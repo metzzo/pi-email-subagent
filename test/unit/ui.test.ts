@@ -13,6 +13,8 @@ const fakeTheme = {
   bold: (text: string) => text,
 } as never;
 
+const TEST_CAPACITY = { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 1, runSlotsLimit: 4 };
+
 function record(): AgentRecord {
   const now = new Date().toISOString();
   return {
@@ -42,6 +44,7 @@ describe("dashboard rendering", () => {
       agents: [record()],
       unanswered: 1,
       queuedMail: 2,
+      capacity: TEST_CAPACITY,
     };
     const component = new DashboardComponent(
       () => snapshot,
@@ -61,7 +64,7 @@ describe("dashboard rendering", () => {
   it("discloses the enforced lifecycle in agent detail", () => {
     const agent = record();
     const component = new DashboardComponent(
-      () => ({ mainAddress: "main@gpt-5.4-mini.com", agents: [agent], unanswered: 0, queuedMail: 0 }),
+      () => ({ mainAddress: "main@gpt-5.4-mini.com", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY }),
       () => [],
       () => undefined,
       () => undefined,
@@ -91,13 +94,84 @@ describe("dashboard rendering", () => {
       agents: [record()],
       unanswered: 0,
       queuedMail: 0,
-    });
+      capacity: { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 1, runSlotsLimit: 4 },
+    } as any);
 
     assert.deepEqual(statuses, [undefined]);
     assert.deepEqual(widgets, [{
-      lines: ["Agents: 1 running · 0 queued · 0 idle · 0 unanswered"],
+      lines: ["Agents: 1 running · 0 queued · 0 idle · 0 unanswered · identity capacity 1/8 · run slots 1/4"],
       placement: "belowEditor",
     }]);
+  });
+
+  it("shows bounded global capacity and exact selected recovery facts without private mail leakage", () => {
+    const agent = record();
+    agent.state = "stopped";
+    const snapshot = {
+      mainAddress: "main@test",
+      agents: [agent],
+      unanswered: 2,
+      queuedMail: 0,
+      capacity: { identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1 },
+    } as BrokerSnapshot;
+    const inspection = {
+      state: "stopped",
+      holdsActivationLease: true,
+      capacity: snapshot.capacity,
+      queued: 0,
+      unanswered: 1,
+      outgoingUnanswered: 1,
+      pendingReplies: 0,
+      archiveEligible: false,
+      archiveBlockers: {
+        active: false,
+        cleanupQuarantine: false,
+        queued: { count: 0, requestIds: [], omitted: 0 },
+        incomingUnanswered: { count: 1, requestIds: ["mail_incoming"], omitted: 0 },
+        outgoingUnanswered: { count: 1, requestIds: ["mail_outgoing"], omitted: 0 },
+        pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+      },
+    };
+    const component = new DashboardComponent(
+      () => snapshot,
+      () => [{
+        id: "mail_private", from: "worker.unrelated@gpt-5.4.com", to: agent.address,
+        subject: "PRIVATE SUBJECT", message: "PRIVATE BODY", priority: "low", kind: "request",
+        requiresResponse: true, createdAt: new Date().toISOString(), deliveryState: "delivered",
+      }],
+      () => undefined,
+      () => undefined,
+      fakeTheme,
+      undefined,
+      undefined,
+      24,
+      () => inspection as never,
+    );
+    for (const width of [20, 40, 80, 120]) {
+      const header = component.render(width).join("\n");
+      assert.match(header, /identity.*1\/1/i);
+      assert.match(header, /run.*0\/1/i);
+      assert.ok(component.render(width).every((line) => visibleWidth(line) <= width));
+    }
+    assert.match(component.render(120).join("\n"), /FULL.*reuse|reuse.*FULL/i);
+    component.handleInput("\r");
+    component.handleInput("\t");
+    component.handleInput("\t");
+    component.handleInput("\t");
+    const profile = component.render(120).join("\n");
+    assert.match(profile, /internal state: stopped/i);
+    assert.match(profile, /activation lease: held/i);
+    assert.match(profile, /identity capacity: 1\/1.*run slots: 0\/1/i);
+    assert.match(profile, /1 incoming unanswered.*1 outgoing unanswered/i);
+    assert.match(profile, /archive eligible: no/i);
+    assert.match(profile, /restart.*real obligations|cancel only.*explicitly abandoned/i);
+    assert.doesNotMatch(profile, /PRIVATE SUBJECT|PRIVATE BODY|worker\.unrelated/i);
+    component.handleInput("i");
+    const inbox = component.render(120).join("\n");
+    assert.match(inbox, /PRIVATE SUBJECT/);
+    assert.match(inbox, /PRIVATE BODY/);
+    assert.match(inbox, /worker\.unrelated/);
+    component.dispose();
   });
 
   it("renders paused, stopped, and archived as closed without changing their internal states", () => {
@@ -106,7 +180,7 @@ describe("dashboard rendering", () => {
       const agent = record();
       agent.state = state;
       const component = new DashboardComponent(
-        () => ({ mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0 }),
+        () => ({ mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY }),
         () => [],
         () => undefined,
         () => undefined,
@@ -132,8 +206,10 @@ describe("dashboard rendering", () => {
       agents: closedStates.map((state) => { const agent = record(); agent.state = state; return agent; }),
       unanswered: 0,
       queuedMail: 0,
+      capacity: { identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1 },
     });
     assert.match((widgets.at(-1) ?? []).join("\n"), /3 closed/);
+    assert.match((widgets.at(-1) ?? []).join("\n"), /identity capacity 1\/1 FULL.*run slots 0\/1/);
     assert.doesNotMatch((widgets.at(-1) ?? []).join("\n"), /paused|stopped|archived/);
     controller.clear();
   });
@@ -148,6 +224,7 @@ describe("dashboard rendering", () => {
         agents: [agent],
         unanswered: 0,
         queuedMail: 0,
+        capacity: TEST_CAPACITY,
       };
       let action: { kind: string; address?: string } | undefined;
       const component = new DashboardComponent(
@@ -172,7 +249,7 @@ describe("dashboard rendering", () => {
     first.work.active.push(activeEdit); second.work.active.push(activeWrite);
     const completed = finishWorkItem({ ...activeEdit, toolCallId: "done" }, { details: { patch: "--- a/src/ui.ts\n+++ b/src/ui.ts\n-old\n+new" } }, false);
     first.work.recent.push(completed);
-    const snapshot = { mainAddress: "main@test.com", agents: [first, second], unanswered: 0, queuedMail: 0 };
+    const snapshot = { mainAddress: "main@test.com", agents: [first, second], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY };
     let action: { kind: string; workItem?: unknown } | undefined;
     const component = new DashboardComponent(() => snapshot, () => [], (next) => { action = next; }, () => undefined, fakeTheme, undefined, undefined, 12);
     for (const width of [20, 40, 80, 120]) {
@@ -204,7 +281,7 @@ describe("dashboard rendering", () => {
     const agent = record(); agent.work = emptyWorkState();
     const unsafe = startWorkItem("unsafe", "edit", { path: "safe", edits: [] }, 1, "/work")!;
     unsafe.displayPath = "bad\u001b]0;title\u0007\n\u202efile"; unsafe.toolName = "edit\t\u001b[31m"; agent.work.active.push(unsafe);
-    const snapshot = { mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0 };
+    const snapshot = { mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY };
     const component = new DashboardComponent(() => snapshot, () => [], () => undefined, () => undefined, fakeTheme);
     const rendered = component.render(80).join("\n"); assert.doesNotMatch(rendered, /\u001b\]|\u0007|\u202e/); component.dispose();
     const widgets: Array<string[] | undefined> = [];
@@ -218,7 +295,7 @@ describe("dashboard rendering", () => {
   it("keeps long agent and work selections visible in short viewports", () => {
     const agents = Array.from({ length: 10 }, (_, index) => { const value = record(); value.address = `worker.task-${index}@gpt-5.4-mini.com`; return value; });
     let action: { kind: string; address?: string } | undefined;
-    const list = new DashboardComponent(() => ({ mainAddress: "main@test", agents, unanswered: 0, queuedMail: 0 }), () => [], (next) => { action = next; }, () => undefined, fakeTheme, undefined, undefined, 10);
+    const list = new DashboardComponent(() => ({ mainAddress: "main@test", agents, unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY }), () => [], (next) => { action = next; }, () => undefined, fakeTheme, undefined, undefined, 10);
     for (let index = 0; index < 9; index++) list.handleInput("\x1b[B");
     assert.match(list.render(80).join("\n"), /task-9/);
     list.handleInput("k"); assert.equal(action?.address, agents[9]!.address); list.dispose();
@@ -228,7 +305,7 @@ describe("dashboard rendering", () => {
       const start = startWorkItem(`id${index}`, "edit", { path: `file-${index}.ts`, edits: [] }, 1, "/work")!;
       agent.work.recent.push(finishWorkItem(start, { details: { patch: `@@ -1 +1 @@\n-${index}\n+${index + 1}` } }, false));
     }
-    const detail = new DashboardComponent(() => ({ mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0 }), () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 12);
+    const detail = new DashboardComponent(() => ({ mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY }), () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 12);
     detail.handleInput("\r"); for (let index = 0; index < 29; index++) detail.handleInput("\x1b[B");
     assert.match(detail.render(80).join("\n"), /file-0\.ts/); // recent visual order is newest to oldest
     detail.dispose();
@@ -243,14 +320,14 @@ describe("dashboard rendering", () => {
       }
       return agent;
     });
-    const component = new DashboardComponent(() => ({ mainAddress: "main", agents, unanswered: 0, queuedMail: 0 }), () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 12);
+    const component = new DashboardComponent(() => ({ mainAddress: "main", agents, unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY }), () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 12);
     const lines = component.render(80); assert.ok(lines.length <= 12); assert.ok(lines.every((line) => visibleWidth(line) <= 80)); component.dispose();
   });
 
   it("refreshes active durations and disposes its timer", async () => {
     const agent = record(); agent.work = emptyWorkState(); agent.work.active.push(startWorkItem("x", "edit", { path: "x", edits: [] }, 1, "/work")!);
     let renders = 0;
-    const component = new DashboardComponent(() => ({ mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0 }), () => [], () => undefined, () => { renders += 1; }, fakeTheme);
+    const component = new DashboardComponent(() => ({ mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY }), () => [], () => undefined, () => { renders += 1; }, fakeTheme);
     await new Promise((resolve) => setTimeout(resolve, 1_050)); assert.ok(renders >= 1);
     component.dispose(); const stopped = renders; await new Promise((resolve) => setTimeout(resolve, 1_050)); assert.equal(renders, stopped);
   });

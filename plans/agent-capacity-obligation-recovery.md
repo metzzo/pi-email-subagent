@@ -1,7 +1,7 @@
 # Agent Identity-Capacity and Obligation-Recovery Plan
 
 Date: 2026-08-23
-Status: proposed — test-first implementation not started
+Status: completed — derived capacity/blocker diagnostics and explicit recovery UX implemented and validated
 Priority: P3 operability / recovery UX
 Classification: recurring fail-closed safety friction and observability gap; **the capacity limit and archival refusal are deliberate, not correctness bugs**
 
@@ -17,6 +17,18 @@ Keep the existing safety model and defaults. Improve the surfaces operators and 
 
 Do not raise defaults blindly, auto-stop workers, auto-cancel substantive obligations, auto-archive identities, or build a new orchestration subsystem. The smallest defensible design is additive diagnostics plus bounded derived capacity/obligation summaries on existing tools and UI.
 
+## Implementation result
+
+Completed on 2026-08-23:
+
+- `BrokerSnapshot.capacity` and `AgentInspection.capacity` derive identity leases and run slots directly from authoritative broker sets; inspection also reports exact lease ownership, outgoing obligations, bounded archive blockers, and archive eligibility. None of these views is persisted.
+- One archive-blocker classifier now drives both inspection and archive refusal. It separates active work, queued mail, incoming/outgoing unanswered requests, and reply reservations; each category shows at most five real IDs plus an omitted count, without subjects, bodies, or counterparties.
+- Capacity-full errors are centralized, preserve pre-accept refusal, distinguish `maxAgents` from `maxConcurrent`, explain that stop retains the lease, and give role-safe main/downstream recovery without listing other identities.
+- Existing inspect/manage tools, main/shared prompts, `/agents` header/widget/Profile, and documentation implement the explicit reuse → restart → stop-to-inactivate → exact abandoned-request cancellation → clean archive → retry ladder.
+- Deterministic integration and real Pi RPC scenarios prove final-slot serialization, stop-retained capacity, explicit cancellation/archive/retry, no rejected request journal entry, and unchanged reply/cancel/archive safety.
+- Defaults, persistent schemas, tool/action schemas, main-only authority, cleanup quarantine, and restored-overflow behavior are unchanged. No automatic/bulk recovery, candidate ranking, or new orchestration subsystem was added.
+- The supplied historical recurrence audit was not rerun and no organic recovery-rate improvement is claimed.
+
 ## Audit evidence
 
 The structured audit supplied for this issue found native `Agent limit reached (8)` failures in at least five independent downstream parents. At the audit cutoff, some capacity holders or overflow identities were inactive while real response obligations remained assigned to them, making manual recovery difficult.
@@ -28,7 +40,7 @@ The audit also established the important distinction:
 
 Those are separate limits. Waiting for a run slot or stopping a worker does not, by itself, free an identity lease.
 
-The recurrence count is a supplied canonical-history result; this planning pass did not recalculate it. Current HEAD inspected for this plan is `6e869743957f8f5b8be99dc642af2345c9ce7ee7` (2026-08-17).
+The recurrence count is a supplied canonical-history result; this planning pass did not recalculate it. The original planning pass inspected HEAD `6e869743957f8f5b8be99dc642af2345c9ce7ee7` (2026-08-17).
 
 ## Problem statement
 

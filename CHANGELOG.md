@@ -20,6 +20,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Exact-ID administrative cancellation for intentionally abandoned requests to inactive recipients, with durable actor/reason audit metadata and no fabricated reply.
 - Initial-delegation `effort` overrides on `send_email`, including side-effect-free prospective previews through `inspect_agent` and crash-safe spawn-intent recovery.
 - Generation-bound worker cleanup leases with persisted fail-closed quarantine diagnostics, held capacity/address ownership, durable queued-mail preservation, late-settlement observation, and namespace-safe shutdown handoff.
+- Derived identity-lease/run-slot capacity and bounded archive-blocker views across inspection, management, and `/agents`, with explicit fail-closed recovery guidance.
 
 ### Changed
 
@@ -32,6 +33,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Active tool calls now disarm only the idle watchdog until the last exact parallel call ends; the finite absolute run deadline remains unchanged, and tool progress liveness carries no arguments or output.
 - Stop/restart/archive now require affirmative cleanup confidence instead of treating abort/dispose caller deadlines as cancellation. Pi 0.81.1 active-tool cleanup remains explicitly unknown because its public API exposes no process-quiescence receipt.
 - Timed-out `wait_for_replies` results, tool metadata, coordinator guidance, and documentation now explain that pending requests remain correlated and late replies arrive automatically; immediate keepalive-style rejoins are discouraged while deliberate synchronous rejoins remain supported.
+- Identity-capacity failures now distinguish `maxAgents` activation leases from `maxConcurrent` run slots and direct main/downstream callers through explicit reuse, restart, stop, exact cancellation, clean archive, and retry steps without automating destructive actions.
 
 ### Security
 
