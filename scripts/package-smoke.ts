@@ -3,9 +3,7 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-
-interface PackedFile { path: string }
-interface PackResult { filename: string; files: PackedFile[] }
+import { assertPackageMarkdownLinks, assertPackageSurface, type PackResult } from "./package-policy.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const pi = join(root, "node_modules", ".bin", process.platform === "win32" ? "pi.cmd" : "pi");
@@ -31,11 +29,8 @@ try {
   const packed = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", temp]);
   const pack = (JSON.parse(packed.stdout) as PackResult[])[0];
   assert.ok(pack, "npm pack returned no package metadata");
-  const paths = new Set(pack.files.map((file) => file.path));
-  for (const required of ["package.json", "README.md", "LICENSE", "CHANGELOG.md", "SECURITY.md", "CONTRIBUTING.md", "src/index.ts"]) {
-    assert.equal(paths.has(required), true, `packed artifact is missing ${required}`);
-  }
-  assert.equal([...paths].some((path) => path.startsWith("test/")), false, "tests must not ship in the package");
+  assertPackageSurface(pack);
+  await assertPackageMarkdownLinks(pack, root);
 
   const consumer = join(temp, "consumer");
   const agentDir = join(temp, "agent");

@@ -30,7 +30,6 @@
   "files": [
     "src",
     "docs",
-    "plans",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
@@ -44,6 +43,7 @@
     "test:integration": "tsx --test test/integration/**/*.test.ts",
     "test:e2e": "tsx --test test/e2e/**/*.test.ts",
     "test:package": "tsx scripts/package-smoke.ts",
+    "check:package": "tsx scripts/package-policy.ts",
     "test:live": "tsx scripts/live-e2e.ts",
     "check:secrets": "gitleaks git --config=.gitleaks.toml --redact --no-banner .",
     "check:licenses": "tsx scripts/check-dependency-licenses.ts",

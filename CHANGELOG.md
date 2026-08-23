@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-23
+
 ### Added
 
 - Persistent model-addressed Pi workers coordinated through virtual email.
@@ -12,7 +14,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Live `/agents` dashboard, conversation viewer, usage/cost display, and lifecycle controls.
 - Role/address profiles, tool enforcement, spawn control, capacity/rate/queue limits, retention, and configurable model policy.
 - Real scripted-provider Pi RPC E2E suite plus optional paid live-provider acceptance.
-- Single-writer filesystem lease per persistent parent-session namespace with owner diagnostics and stale-lock recovery, covered by a real child-process `SIGKILL` E2E.
+- Cooperative filesystem lease per persistent parent-session state namespace with owner diagnostics and stale-lock recovery, covered by a real child-process `SIGKILL` E2E; this is not a workspace or security fence.
 - Initial-delegation lifecycle policies with finite defaults/maxima, durable crash-safe spawn intent, runtime watchdogs, bounded cleanup/shutdown, and inspection/dashboard disclosure.
 - Work-first `/agents` telemetry and UI: correlated edit/write outcomes, patch statistics and bounded diffs, unverified shell/custom effects, inspection counters, exact-path active warnings, and session-backed crash recovery.
 - Required secret scanning and fail-closed production dependency-license checks with a generated release inventory.
@@ -33,7 +35,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Conversation rendering collapses mutation arguments and never dumps raw write/replacement content; edit results use bounded patch previews.
 - The dashboard and Agents widget label paused, stopped, and archived identities uniformly as `closed`; internal lifecycle/API states remain distinct.
 - New identities with globally duplicated model IDs use the current main provider only when it identifies exactly one candidate; existing identities now preserve their persisted exact provider/model across startup, main-model switches, stop/restart, archive/restore, provider removal/reintroduction, and later duplicates without cross-provider substitution.
-- Active tool calls now disarm only the idle watchdog until the last exact parallel call ends; the finite absolute run deadline remains unchanged, and tool progress liveness carries no arguments or output.
+- Active tool calls now disarm only the idle watchdog until the last exact parallel call ends; the finite absolute run deadline remains unchanged. Dead progress forwarding and unused lifecycle timestamps were removed, while start/end idle safety remains intact.
 - Stop/restart/archive now require affirmative cleanup confidence instead of treating abort/dispose caller deadlines as cancellation. Cleanup stays pending through real late abort settlement; a failed caller-visible restart releases only to paused and requires another explicit restart.
 - Cleanup confidence retains generation-level Bash/process risk after completed calls, and Pi 0.81.1 remains explicitly unknown because its public API exposes no process-quiescence receipt.
 - Settlement continuation and pending ownership are exact worker/generation state; lifecycle management invalidates and joins the old continuation before replacement.
@@ -42,11 +44,21 @@ All notable changes to this project are documented here. The format follows [Kee
 - Identity-capacity failures now distinguish `maxAgents` activation leases from `maxConcurrent` run slots and direct main/downstream callers through explicit reuse, restart, stop, exact cancellation, clean archive, and retry steps without automating destructive actions.
 - Isolated workers now load effective trusted Pi retry/provider-retry/transport/timeout settings with Pi's own `SettingsManager`; untrusted project settings remain ignored and Pi defaults are unchanged.
 - Final non-retrying assistant errors are committed through the existing worker failure path at full `agent_settled`, after Pi emits any unsuccessful retry-cycle end, so retry activity is preserved before bounded cleanup while the original mail obligation remains open.
+- The npm package excludes internal implementation plans and enforces one shared entry-count, tarball-size, required-file, forbidden-path, and package-local Markdown-link policy in local smoke and CI.
+- Conversation and persisted-diff readers use the supported `SessionManager.open(...).getBranch()` path instead of Pi test-only parsing exports.
+- The Pi RPC E2E client now decodes split UTF-8 safely and rejects malformed or unterminated JSONL stdout records.
+- Version 0.1.0 is supported and CI/load-tested against Pi 0.81.1; wildcard host peers do not imply compatibility with untested Pi versions.
 
 ### Security
 
 - XML framing escapes peer-controlled content; TUI rendering strips terminal controls.
 - State directories/files use restrictive permissions.
 - Workers remain trusted collaborators sharing the host Pi process and project workspace; see `SECURITY.md`.
+- Mail tail repair now writes a restrictive same-directory temporary journal and atomically replaces the old path, so a pre-rename failure leaves accepted events in the original journal intact; sudden-power-loss durability is still outside the contract.
+- Existing namespace directories are repaired to `0700` before locking, and newly persisted owner metadata safely replaces stale metadata at `0600`.
+- Direct mutation serialization is documented as best-effort, including upstream missing-target symlink and hard-link alias gaps.
 
-[Unreleased]: https://github.com/metzzo/pi-email-subagent/compare/HEAD...HEAD
+The initial release uses tag `v0.1.0`; subsequent changes remain under Unreleased until the next versioned tag.
+
+[Unreleased]: https://github.com/metzzo/pi-email-subagent/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/metzzo/pi-email-subagent/releases/tag/v0.1.0

@@ -14,7 +14,7 @@ The dashboard header and one-line Agents widget show current derived **identity 
 - **Unverified:** `bash` and custom tools show their bounded command/target hint and outcome, but their file effects are always unknown.
 - **Inspection:** reads, searches, and listings collapse into current-run counters.
 
-This is structural attribution only. Workers share a workspace, so the extension deliberately does not use git status, filesystem watchers, snapshots, or worktrees to guess ownership. A warning appears when two agents have active explicit mutation intent for the same normalized exact path. Existing targets and their nearest existing parents are canonicalized through realpath where possible; unresolved aliases make this warning best-effort. It is not a write-scope or semantic conflict detector.
+This is structural attribution only. Workers share a workspace, so the extension deliberately does not use git status, filesystem watchers, snapshots, or worktrees to guess ownership. A warning appears when two agents have active explicit mutation intent for the same normalized exact path. Existing targets and their nearest existing parents are canonicalized through realpath where possible. The warning and Pi's direct mutation serialization are best-effort: upstream missing-target symlink paths and hard-link aliases can bypass same-target recognition. This is not a write-scope, workspace fence, or semantic conflict detector.
 
 ## Navigation
 

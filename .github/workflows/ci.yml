@@ -15,11 +15,13 @@ concurrency:
 
 jobs:
   validate:
-    name: Node 22 · ${{ matrix.os }}
+    name: Node 22 · Pi ${{ matrix.pi }} · ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        # Wildcard peers are host-provided; 0.1.0 support is validated only on this Pi line.
+        pi: ["0.81.1"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -29,6 +31,24 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
+      - name: Verify the supported Pi development pins
+        env:
+          SUPPORTED_PI_VERSION: ${{ matrix.pi }}
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json');
+          const names = [
+            '@earendil-works/pi-agent-core',
+            '@earendil-works/pi-ai',
+            '@earendil-works/pi-coding-agent',
+            '@earendil-works/pi-tui',
+          ];
+          for (const name of names) {
+            if (pkg.devDependencies[name] !== process.env.SUPPORTED_PI_VERSION) {
+              throw new Error(`${name} must be pinned to supported Pi ${process.env.SUPPORTED_PI_VERSION}`);
+            }
+          }
+          NODE
       - run: npm run validate
       # Pi core packages are host-provided peers; audit only dependencies this package installs.
       - run: npm audit --omit=dev --omit=peer
@@ -45,16 +65,5 @@ jobs:
           node-version: 22.19.0
           cache: npm
       - run: npm ci
-      - name: Inspect packed artifact
-        run: |
-          npm pack --ignore-scripts --json > "$RUNNER_TEMP/pack.json"
-          node - <<'NODE'
-          const fs = require('node:fs');
-          const [pack] = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/pack.json', 'utf8'));
-          if (!pack || pack.entryCount > 50 || pack.size > 200000) {
-            throw new Error(`Unexpected package surface: ${JSON.stringify(pack)}`);
-          }
-          const forbidden = pack.files.filter(({ path }) => /^(test|scripts|\.github)\//.test(path));
-          if (forbidden.length) throw new Error(`Forbidden packed files: ${forbidden.map(x => x.path).join(', ')}`);
-          console.log(`${pack.entryCount} files, ${pack.size} bytes`);
-          NODE
+      - name: Enforce authoritative package surface policy
+        run: npm run check:package
