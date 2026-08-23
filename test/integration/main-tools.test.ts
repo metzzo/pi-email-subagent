@@ -145,7 +145,9 @@ it("previews an initial effort override without spawning", async () => {
     {} as never,
   );
   assert.deepEqual(call, { address: "worker.deep@gpt-5.6-sol.com", effort: "xhigh" });
-  assert.match((result.content[0] as { text: string }).text, /effort xhigh/);
+  const text = (result.content[0] as { text: string }).text;
+  assert.match(text, /effort xhigh/);
+  assert.match(text, /Selection: prospective provider\/model under the current main-provider preference.*first accepted mail persists it/i);
   const effort = (inspect.parameters as {
     properties: { effort: { anyOf?: unknown[]; enum?: string[] } };
   }).properties.effort;
@@ -195,6 +197,7 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
     "inspect-capacity", { address: inspection.address }, undefined, undefined, {} as never,
   );
   const text = (rendered.content[0] as { text: string }).text;
+  assert.match(text, /Binding: persisted exact provider\/model.*ignores current main-provider preference/i);
   assert.match(text, /Identity capacity: 2\/2 used.*holds a lease: yes.*available for this address: yes/i);
   assert.match(text, /Run concurrency: 1\/1 slots used/i);
   assert.match(text, /1 incoming unanswered.*1 outgoing unanswered/i);
@@ -207,6 +210,15 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
   assert.deepEqual(details.inspection.capacity, inspection.capacity);
   assert.equal(details.inspection.holdsActivationLease, true);
   assert.equal(details.inspection.archiveEligible, false);
+
+  inspection.providerReady = "unavailable";
+  const unavailable = await createMainCoordinationTools(() => broker)[0].execute(
+    "inspect-unavailable", { address: inspection.address }, undefined, undefined, {} as never,
+  );
+  assert.match(
+    (unavailable.content[0] as { text: string }).text,
+    /Binding: persisted exact provider\/model.*unavailable in current catalog.*no provider substitution/i,
+  );
 });
 
 it("renders terminal recovery from existing failure, mailbox, and current-batch work without private payloads", async () => {

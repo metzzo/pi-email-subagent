@@ -1,7 +1,7 @@
 # Provider-Aware Model Routing Plan
 
 Date: 2026-08-23
-Status: proposed — HEAD mitigation present; observed fix not live-verified
+Status: implemented — deterministic Pi 0.81.1 RPC acceptance complete; external/live providers not exercised
 Priority: P2 historical correctness and restore safety
 Classification: historical extension routing defect with a partial current-code mitigation and unresolved provider-binding semantics
 
@@ -679,6 +679,21 @@ Rejected. Two explicit catalog methods and existing-first broker resolution cove
 
 Rejected. Exact provider/model strings and stable record/mail identities are sufficient; hashes add migration and mismatch behavior without a requirement.
 
-## Not validated during planning
+## Implementation result (2026-08-23)
 
-No source/test files were changed, and no repository tests, real Pi RPC runs, provider calls, package builds, or TUI checks were performed while writing this plan. The historical count comes from the cited parsed audit artifact. HEAD mitigation and remaining gaps were established by current code inspection only.
+Implemented the smallest design described above:
+
+- `ModelCatalog` now separates prospective `resolveNew`, exact `resolveBound`, and global-unique legacy recovery; provider preference is passed at call time.
+- Broker routing is existing-first across startup, ordinary send/reuse, stopped restart, archived restoration, explicit restart, and late cleanup replacement. Persisted real provider/model strings are no longer overwritten by main preference.
+- The first accepted request for a new identity journals optional `modelBindingIntent` in the same `email.created` event as effort/lifecycle intent. Parsing, address consistency, duplicate equality, compaction, and crash recovery are covered.
+- Legacy orphan mail and historical synthetic `provider: "unavailable"` records migrate only with one global candidate. Known removed bindings remain named and unavailable, consume no ordinary worker/lease, reject send/restart before acceptance, and recover when the exact tuple returns.
+- Main address/provider preference is replaced synchronously as one broker value before registry persistence, including same-model-ID switches whose main address text does not change. Accepted mail retains the exact choice through its binding intent.
+- Send results add optional `recipientProvider`; inspect, tool text, renderer, prompts, and `/agents` Profile distinguish prospective selection, persisted binding, and unavailable/no-substitution state without provider-qualified addresses or override arguments.
+- Deterministic real Pi RPC providers `mock-alpha/shared` and `mock-beta/shared` prove new alpha/beta selection, same-ID switch, archive/reuse, exact process-start resume, removal/reintroduction, pre-accept unavailable rejection, crash-window intent recovery, ambiguous legacy failure, and unique legacy migration. Registry, mail, RPC, and session artifacts are parsed structurally by stable address/mail/session fields.
+- The preceding package parser was directly checked: it ignores the optional unknown field in memory and leaves the raw journal intact until old-package compaction, which drops it. Documentation therefore forbids downgrade across an unregistered-identity crash window without first materializing the registry or preserving the new journal.
+
+No provider-qualified address, provider override argument, silent failover, routing policy framework, live catalog mutation, provider rename heuristic, extension-owned retry, or persistent routing ledger was added. Historical audit counts were not recomputed and no improvement rate is claimed.
+
+## Planning-time validation boundary
+
+No source/test files were changed, and no repository tests, real Pi RPC runs, provider calls, package builds, or TUI checks were performed while writing the original plan. The historical count comes from the cited parsed audit artifact. HEAD mitigation and remaining gaps were established by code inspection at that planning cutoff. The implementation result above is supported by the later deterministic release artifacts, not by the original planning audit.

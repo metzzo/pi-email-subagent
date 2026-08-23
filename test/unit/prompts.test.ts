@@ -53,6 +53,11 @@ describe("mail prompts", () => {
     assert.match(prompt, /do not repeat completed side effects/i);
     assert.match(prompt, /Pi core owns automatic provider retries.*do not.*re-prompt.*restart.*re-send/is);
     assert.match(prompt, /retry activity.*wait for settlement.*not a terminal.*failure/is);
+    assert.match(prompt, /address domain is a model ID, not a provider ID/i);
+    assert.match(prompt, /unknown address.*globally unique.*duplicate ID.*current main provider.*exactly one candidate/is);
+    assert.match(prompt, /first accepted mail persists.*provider\/model binding/i);
+    assert.match(prompt, /existing address.*exact original provider\/model.*no same-ID cross-provider substitution/is);
+    assert.match(prompt, /catalog.*changes require.*reload/i);
     assert.doesNotMatch(prompt, /claude|anthropic/i);
   });
 
@@ -107,6 +112,8 @@ describe("mail prompts", () => {
     assert.match(prompt, /absence.*recorded work.*not proof.*pre-tool/is);
     assert.match(prompt, /explicitly restart.*same identity.*preserve.*session.*mail ID/is);
     assert.match(prompt, /never re-send.*accepted envelope.*provider error/i);
+    assert.match(prompt, /never put a provider ID in the address domain/i);
+    assert.match(prompt, /existing addresses keep.*exact provider\/model.*main switches provider/i);
   });
 
   it("renders effective role and exact-address tools instead of claiming built-in capabilities", () => {

@@ -106,7 +106,11 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       const recipient = sanitizeConversationLabel(sent.envelope.to);
       const envelopeId = sanitizeConversationLabel(sent.envelope.id);
       const disposition = sanitizeConversationLabel(sent.recipientDisposition);
-      const model = sanitizeConversationLabel(sent.recipientModel ?? "main");
+      const model = sanitizeConversationLabel(
+        sent.recipientProvider && sent.recipientModel
+          ? `${sent.recipientProvider}/${sent.recipientModel}`
+          : (sent.recipientModel ?? "main"),
+      );
       const effort = sent.recipientEffort ? ` · effort ${sanitizeConversationLabel(sent.recipientEffort)}` : "";
       let text = `${icon} ${theme.fg("accent", recipient)} ${theme.fg("muted", envelopeId)}`;
       text += `\n${theme.fg("dim", `${disposition} · ${model}${effort}`)}`;
@@ -356,7 +360,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       mainAliases.add(mainAddress);
       mainAliases.add(next);
       mainAddress = next;
-      await broker.updateMainAddress(next);
+      await broker.updateMainModel(next, event.model.provider);
     } catch (error) {
       currentContext?.ui.notify(`Could not update main email address: ${errorMessage(error)}`, "warning");
     }

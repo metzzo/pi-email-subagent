@@ -160,12 +160,17 @@ describe("dashboard rendering", () => {
     component.handleInput("\t");
     const profile = component.render(120).join("\n");
     assert.match(profile, /internal state: stopped/i);
+    assert.match(profile, /binding: persisted openai-codex\/gpt-5\.4.*preserved across main-provider changes/i);
     assert.match(profile, /activation lease: held/i);
     assert.match(profile, /identity capacity: 1\/1.*run slots: 0\/1/i);
     assert.match(profile, /1 incoming unanswered.*1 outgoing unanswered/i);
     assert.match(profile, /archive eligible: no/i);
     assert.match(profile, /restart.*real obligations|cancel only.*explicitly abandoned/i);
     assert.doesNotMatch(profile, /PRIVATE SUBJECT|PRIVATE BODY|worker\.unrelated/i);
+    (inspection as { providerReady?: string }).providerReady = "unavailable";
+    const unavailableProfile = component.render(120).join("\n");
+    assert.match(unavailableProfile, /binding: persisted openai-codex\/gpt-5\.4.*unavailable.*no provider substitution/i);
+    assert.doesNotMatch(unavailableProfile, /PRIVATE SUBJECT|PRIVATE BODY|worker\.unrelated/i);
     component.handleInput("i");
     const inbox = component.render(120).join("\n");
     assert.match(inbox, /PRIVATE SUBJECT/);

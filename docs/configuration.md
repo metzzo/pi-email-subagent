@@ -91,6 +91,18 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 - Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
+## Provider/model routing
+
+The email domain remains a model ID. Provider choice is not configured in `subagents.json` and there is no provider override argument:
+
+- a new globally unique model ID resolves directly;
+- a new duplicate ID resolves only when the current main provider owns exactly one candidate;
+- a main provider switch changes prospective selection immediately, including switches whose model ID (and therefore main address text) is unchanged;
+- an existing identity always resolves its persisted exact provider/model; and
+- a missing exact tuple remains unavailable and is never replaced by a same-ID candidate from another provider.
+
+The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Legacy accepted mail without that field migrates only when the model ID has one global candidate; duplicates remain unavailable because the original provider cannot be inferred. Provider definitions and the worker catalog are still immutable extension-start snapshots, so removal/reintroduction and metadata changes take effect only after reload. See [Provider-aware durable model routing](provider-aware-model-routing.md).
+
 ## Pi retry and transport settings
 
 Provider retry/transport policy is not duplicated in `subagents.json`. Each isolated worker loads Pi's ordinary effective `settings.json` values with the same `cwd`, agent directory, and project-trust decision as the parent runtime:
@@ -116,6 +128,6 @@ All default roles may spawn; set `canSpawn: false` on read-only roles to prevent
 ## Notes
 
 - A single formatted envelope must fit the smaller of `maxBatchBytes` and the context-safe tool payload budget (currently 48 KB with reserved result overhead), and at most 1952 lines. This ensures the same mail remains retrievable through `fetch_emails`; XML escaping counts toward the byte limit.
-- `modelPolicy` replaces the entire model-selection policy bullet list in both the main coordinator prompt and every subagent prompt. The available-model list itself always reflects the live catalog.
+- `modelPolicy` replaces the entire model-selection policy bullet list in both the main coordinator prompt and every subagent prompt. The available-model list reflects prospective IDs routable under the current main provider; existing exact bindings can remain usable even when a different provider is preferred.
 - Live-session journal maintenance compacts after more than 8192 excess transition events. It also prunes the oldest terminal mail above `maxRetainedEmails`; queued mail, open obligations, reservations, and retained request/reply pairs remain intact. The cap is soft when protected mail alone exceeds it.
 - Provider, model catalog, and credential changes require an extension reload; worker runtimes snapshot them at session start.

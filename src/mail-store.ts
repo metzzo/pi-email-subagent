@@ -1,8 +1,9 @@
 import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { parseSubagentAddressShape } from "./address.ts";
 import { isThinkingLevel, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
-import type { EmailEnvelope, LifecyclePolicy } from "./types.ts";
+import type { EmailEnvelope, LifecyclePolicy, ModelBinding } from "./types.ts";
 import { byteLength, clone, nowIso } from "./util.ts";
 
 type MailEvent =
@@ -27,6 +28,25 @@ function string(value: unknown, label: string): string {
 function optionalString(value: unknown, label: string): string | undefined {
   if (value === undefined) return undefined;
   return string(value, label);
+}
+
+function parseModelBinding(value: unknown, recipient: string): ModelBinding | undefined {
+  if (value === undefined) return undefined;
+  const raw = object(value, "email.modelBindingIntent");
+  const provider = string(raw.provider, "email.modelBindingIntent.provider");
+  const modelId = string(raw.modelId, "email.modelBindingIntent.modelId");
+  if (!provider.trim()) throw new Error("email.modelBindingIntent.provider must be a non-empty string.");
+  if (!modelId.trim()) throw new Error("email.modelBindingIntent.modelId must be a non-empty string.");
+  let recipientModelId: string;
+  try {
+    recipientModelId = parseSubagentAddressShape(recipient).modelId;
+  } catch {
+    throw new Error("email.modelBindingIntent is allowed only for a valid subagent recipient.");
+  }
+  if (recipientModelId.toLowerCase() !== modelId.toLowerCase()) {
+    throw new Error(`email.modelBindingIntent.modelId "${modelId}" does not match recipient model domain "${recipientModelId}".`);
+  }
+  return { provider, modelId };
 }
 
 function parseLifecycle(value: unknown, label: string): LifecyclePolicy | undefined {
@@ -83,6 +103,13 @@ function parseEmail(value: unknown): EmailEnvelope {
   }
   const lifecycleIntent = parseLifecycle(raw.lifecycleIntent, "email.lifecycleIntent");
   if (lifecycleIntent) email.lifecycleIntent = lifecycleIntent;
+  const modelBindingIntent = parseModelBinding(raw.modelBindingIntent, email.to);
+  if (modelBindingIntent) {
+    if (email.kind !== "request" || !email.requiresResponse) {
+      throw new Error("email.modelBindingIntent is allowed only on a response-required creation request.");
+    }
+    email.modelBindingIntent = modelBindingIntent;
+  }
   const effortIntent = optionalString(raw.effortIntent, "email.effortIntent");
   if (effortIntent !== undefined) {
     if (!isThinkingLevel(effortIntent)) throw new Error("email.effortIntent is invalid.");
@@ -153,7 +180,9 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && left.requiresResponse === right.requiresResponse
     && left.createdAt === right.createdAt
     && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent)
-    && left.effortIntent === right.effortIntent;
+    && left.effortIntent === right.effortIntent
+    && left.modelBindingIntent?.provider === right.modelBindingIntent?.provider
+    && left.modelBindingIntent?.modelId === right.modelBindingIntent?.modelId;
 }
 
 // Rewrite the journal as a snapshot once it grows past this many events.

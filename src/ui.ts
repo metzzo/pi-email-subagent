@@ -669,6 +669,10 @@ export class DashboardComponent {
           let inspection: AgentInspection | undefined;
           try { inspection = this.getInspection?.(agent.address); } catch { /* current snapshot remains renderable */ }
           if (inspection) {
+            lines.push(this.theme.fg(
+              inspection.providerReady === "unavailable" ? "error" : "dim",
+              `binding: persisted ${provider}/${modelId}${inspection.providerReady === "unavailable" ? " · unavailable · no provider substitution" : " · preserved across main-provider changes"}`,
+            ));
             lines.push(this.theme.fg("dim", `activation lease: ${inspection.holdsActivationLease ? "held" : "free"}`));
             lines.push(this.theme.fg("dim", `identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} · run slots: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit}`));
             lines.push(this.theme.fg("dim", `obligations: ${inspection.unanswered} incoming unanswered · ${inspection.outgoingUnanswered} outgoing unanswered · ${inspection.archiveBlockers.queued.count} queued · ${inspection.archiveBlockers.pendingReplies.count} reply delivery pending`));

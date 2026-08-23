@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Generation-bound worker cleanup leases with persisted fail-closed quarantine diagnostics, held capacity/address ownership, durable queued-mail preservation, late-settlement observation, and namespace-safe shutdown handoff.
 - Derived identity-lease/run-slot capacity and bounded archive-blocker views across inspection, management, and `/agents`, with explicit fail-closed recovery guidance.
 - Pi-managed provider retry start/recovery/end visibility through the existing bounded Activity/current-activity path, plus current-batch effect warnings and same-identity terminal recovery guidance without a new diagnostic schema.
+- Durable first-mail provider/model binding intent with exact crash-window recovery, legacy unique migration, bounded binding diagnostics, and additive provider visibility in send/inspect/dashboard surfaces.
 
 ### Changed
 
@@ -30,7 +31,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Mail and joined-reply tool output is bounded to Pi's context-safe byte/line recommendations.
 - Conversation rendering collapses mutation arguments and never dumps raw write/replacement content; edit results use bounded patch previews.
 - The dashboard and Agents widget label paused, stopped, and archived identities uniformly as `closed`; internal lifecycle/API states remain distinct.
-- When an enabled model ID exists under multiple providers, email routing prefers the main session's current provider and remains fail-closed when that does not uniquely resolve the model.
+- New identities with globally duplicated model IDs use the current main provider only when it identifies exactly one candidate; existing identities now preserve their persisted exact provider/model across startup, main-model switches, stop/restart, archive/restore, provider removal/reintroduction, and later duplicates without cross-provider substitution.
 - Active tool calls now disarm only the idle watchdog until the last exact parallel call ends; the finite absolute run deadline remains unchanged, and tool progress liveness carries no arguments or output.
 - Stop/restart/archive now require affirmative cleanup confidence instead of treating abort/dispose caller deadlines as cancellation. Pi 0.81.1 active-tool cleanup remains explicitly unknown because its public API exposes no process-quiescence receipt.
 - Timed-out `wait_for_replies` results, tool metadata, coordinator guidance, and documentation now explain that pending requests remain correlated and late replies arrive automatically; immediate keepalive-style rejoins are discouraged while deliberate synchronous rejoins remain supported.

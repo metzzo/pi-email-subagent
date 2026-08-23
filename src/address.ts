@@ -1,8 +1,10 @@
 import type { Model } from "@earendil-works/pi-ai";
-import type { ParsedAddress } from "./types.ts";
+import type { ModelBinding, ParsedAddress } from "./types.ts";
 
 const SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const MODEL_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$/;
+const MAX_DIAGNOSTIC_CANDIDATES = 8;
+const MAX_DIAGNOSTIC_IDENTIFIER_CHARS = 100;
 
 export class AddressError extends Error {
   constructor(message: string) {
@@ -11,13 +13,28 @@ export class AddressError extends Error {
   }
 }
 
+function boundedIdentifier(value: string): string {
+  return value.length <= MAX_DIAGNOSTIC_IDENTIFIER_CHARS
+    ? value
+    : `${value.slice(0, MAX_DIAGNOSTIC_IDENTIFIER_CHARS)}…`;
+}
+
+function renderBinding(binding: ModelBinding): string {
+  return `${boundedIdentifier(binding.provider)}/${boundedIdentifier(binding.modelId)}`;
+}
+
+function renderCandidates(models: readonly Model<any>[]): string {
+  const shown = models
+    .slice(0, MAX_DIAGNOSTIC_CANDIDATES)
+    .map((model) => renderBinding({ provider: model.provider, modelId: model.id }));
+  const omitted = models.length - shown.length;
+  return `${shown.join(", ") || "none"}${omitted > 0 ? `, +${omitted} omitted` : ""}`;
+}
+
 export class ModelCatalog {
   private readonly byId = new Map<string, Model<any>[]>();
 
-  constructor(
-    models: readonly Model<any>[],
-    private readonly preferredProvider?: string,
-  ) {
+  constructor(models: readonly Model<any>[]) {
     for (const model of models) {
       const key = model.id.toLowerCase();
       const entries = this.byId.get(key) ?? [];
@@ -26,34 +43,56 @@ export class ModelCatalog {
     }
   }
 
-  get routableModelIds(): string[] {
-    return [...this.byId.entries()]
-      .filter(([, models]) => this.preferredMatch(models) !== undefined)
-      .map(([, models]) => this.preferredMatch(models)!.id)
-      .sort();
+  routableModelIds(preferredProvider?: string): string[] {
+    const result: string[] = [];
+    for (const [modelId] of this.byId) {
+      try {
+        result.push(this.resolveNew(modelId, preferredProvider).id);
+      } catch { /* ambiguous for this prospective provider */ }
+    }
+    return result.sort();
   }
 
-  private preferredMatch(models: readonly Model<any>[]): Model<any> | undefined {
-    if (models.length === 1) return models[0];
-    if (!this.preferredProvider) return undefined;
-    const preferred = models.filter((model) => model.provider === this.preferredProvider);
-    return preferred.length === 1 ? preferred[0] : undefined;
-  }
-
-  resolve(modelId: string): Model<any> {
+  resolveNew(modelId: string, preferredProvider?: string): Model<any> {
     const matches = this.byId.get(modelId.toLowerCase()) ?? [];
     if (matches.length === 0) {
-      const available = this.routableModelIds.join(", ") || "none";
-      throw new AddressError(`Model \"${modelId}\" is not routable. Available email models: ${available}.`);
+      const available = this.routableModelIds(preferredProvider).join(", ") || "none";
+      throw new AddressError(`Model ID "${modelId}" is not routable. Available email models: ${available}. No email was accepted.`);
     }
-    const resolved = this.preferredMatch(matches);
-    if (!resolved) {
-      const providers = matches.map((model) => model.provider).join(", ");
+    if (matches.length === 1) return matches[0]!;
+    const preferred = preferredProvider
+      ? matches.filter((model) => model.provider === preferredProvider)
+      : [];
+    if (preferred.length === 1) return preferred[0]!;
+    throw new AddressError(
+      `Model ID "${boundedIdentifier(modelId)}" has candidates ${renderCandidates(matches)}. Current main provider "${boundedIdentifier(preferredProvider ?? "none")}" does not identify exactly one candidate; no email was accepted.`,
+    );
+  }
+
+  resolveBound(binding: ModelBinding): Model<any> {
+    const matches = (this.byId.get(binding.modelId.toLowerCase()) ?? [])
+      .filter((model) => model.provider === binding.provider);
+    if (matches.length === 1) return matches[0]!;
+    const alternatives = this.byId.get(binding.modelId.toLowerCase()) ?? [];
+    if (matches.length === 0) {
+      const alternativeText = alternatives.length > 0
+        ? ` Same-ID catalog candidates are ${renderCandidates(alternatives)}.`
+        : "";
       throw new AddressError(
-        `Model ID \"${modelId}\" is ambiguous across providers (${providers}) and cannot be encoded in an email address.`,
+        `Identity is bound to ${renderBinding(binding)}, which is absent from the current catalog.${alternativeText} The identity was not rebound. Restore the provider/model configuration and reload.`,
       );
     }
-    return resolved;
+    throw new AddressError(
+      `Identity is bound to ${renderBinding(binding)}, but the current catalog contains ${matches.length} exact candidates (${renderCandidates(matches)}). The binding is unavailable and was not selected by catalog order.`,
+    );
+  }
+
+  resolveLegacyUnique(modelId: string): Model<any> {
+    const matches = this.byId.get(modelId.toLowerCase()) ?? [];
+    if (matches.length === 1) return matches[0]!;
+    throw new AddressError(
+      `Accepted legacy mail has no durable provider binding and model ID "${boundedIdentifier(modelId)}" has ${matches.length === 0 ? "no catalog candidate" : `candidates ${renderCandidates(matches)}`}. The original provider cannot be inferred; the identity remains unavailable and no substitution was made.`,
+    );
   }
 }
 
@@ -84,25 +123,51 @@ export function parseSubagentAddressShape(input: string): SubagentAddressShape {
   }
   const name = local.slice(0, separator);
   const taskSlug = local.slice(separator + 1);
-  if (!SEGMENT.test(name)) throw new AddressError(`Invalid subagent name \"${name}\"; use lowercase kebab-case.`);
-  if (!SEGMENT.test(taskSlug)) throw new AddressError(`Invalid task slug \"${taskSlug}\"; use lowercase kebab-case.`);
+  if (!SEGMENT.test(name)) throw new AddressError(`Invalid subagent name "${name}"; use lowercase kebab-case.`);
+  if (!SEGMENT.test(taskSlug)) throw new AddressError(`Invalid task slug "${taskSlug}"; use lowercase kebab-case.`);
 
   const modelId = domain.slice(0, -4);
-  if (!MODEL_DOMAIN.test(modelId)) throw new AddressError(`Invalid model domain \"${modelId}\".`);
+  if (!MODEL_DOMAIN.test(modelId)) throw new AddressError(`Invalid model domain "${modelId}".`);
   return { address, name, taskSlug, modelId };
 }
 
-export function parseSubagentAddress(input: string, catalog: ModelCatalog): ParsedAddress {
-  const shape = parseSubagentAddressShape(input);
-  const model = catalog.resolve(shape.modelId);
+function parsedFrom(shape: SubagentAddressShape, model: Model<any>): ParsedAddress {
   const canonical = `${shape.name}.${shape.taskSlug}@${model.id.toLowerCase()}.com`;
   return { address: canonical, name: shape.name, taskSlug: shape.taskSlug, modelId: model.id, model };
+}
+
+export function parseNewSubagentAddress(
+  input: string,
+  catalog: ModelCatalog,
+  preferredProvider?: string,
+): ParsedAddress {
+  const shape = parseSubagentAddressShape(input);
+  return parsedFrom(shape, catalog.resolveNew(shape.modelId, preferredProvider));
+}
+
+export function parseBoundSubagentAddress(
+  input: string,
+  catalog: ModelCatalog,
+  binding: ModelBinding,
+): ParsedAddress {
+  const shape = parseSubagentAddressShape(input);
+  if (shape.modelId.toLowerCase() !== binding.modelId.toLowerCase()) {
+    throw new AddressError(
+      `Identity address model ID "${shape.modelId}" disagrees with persisted binding ${renderBinding(binding)}; no substitution was made.`,
+    );
+  }
+  return parsedFrom(shape, catalog.resolveBound(binding));
+}
+
+export function parseLegacySubagentAddress(input: string, catalog: ModelCatalog): ParsedAddress {
+  const shape = parseSubagentAddressShape(input);
+  return parsedFrom(shape, catalog.resolveLegacyUnique(shape.modelId));
 }
 
 export function makeMainAddress(modelId: string): string {
   const normalized = modelId.trim().toLowerCase();
   if (!MODEL_DOMAIN.test(normalized)) {
-    throw new AddressError(`Model \"${modelId}\" cannot be represented as a main email address.`);
+    throw new AddressError(`Model "${modelId}" cannot be represented as a main email address.`);
   }
   return `main@${normalized}.com`;
 }

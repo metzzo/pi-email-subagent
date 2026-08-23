@@ -11,9 +11,9 @@ Preview or inspect an agent address without spawning it. Main-thread only. Execu
 
 ## Behavior
 
-- Never spawns. For an unknown (but valid) address it computes the *effective* profile the agent would receive: model, provider, effort, role, tools, and instructions. A supplied `effort` previews the initial-send override; otherwise effort resolves exact address → role → default. Model capability clamping occurs only when the worker runtime is created.
-- Persisted identities whose model is no longer routable remain inspectable as failed/unavailable records; they do not prevent other agents from restoring or consume an activation lease.
-- The address must parse and reference a routable model; otherwise the tool returns an error result (no side effects).
+- Never spawns. For an unknown (but valid) address it computes the *effective* profile and prospective provider/model selection the agent would receive. One global model candidate resolves directly; duplicate IDs require exactly one match under the current main provider. A supplied `effort` previews the initial-send override; otherwise effort resolves exact address → role → default. Model capability clamping occurs only when the worker runtime is created.
+- Existing identities show their persisted exact provider/model and ignore current main preference. Persisted identities whose exact tuple is no longer available remain inspectable as failed/unavailable records, explicitly report no substitution, do not prevent unrelated restoration, and consume no ordinary activation lease (cleanup quarantine ownership remains fail-closed).
+- Every address must have valid syntax. A prospective address must also resolve under new-identity rules; otherwise the tool returns an error result with no side effects. An existing unavailable address remains inspectable from its record.
 - `effort` is rejected for an existing identity because inspection is read-only and later mail cannot mutate persisted effort. Use `/agents effort` or the dashboard while that agent is idle.
 - `writable` is derived from the effective tools: `true` when they include any of `bash`, `edit`, `write`. Role labels alone grant nothing.
 
@@ -23,6 +23,7 @@ Preview or inspect an agent address without spawning it. Main-thread only. Execu
 Existing agent: reviewer.audit@gpt-5.6-sol.com
 State: idle
 Model: openai/gpt-5.6-sol · effort high
+Binding: persisted exact provider/model · existing identity ignores current main-provider preference
 Role: reviewer · read-only · spawn disabled
 Tools: read, grep, find, ls, send_email, fetch_emails
 Identity capacity: 8/8 used · this address holds a lease: yes · capacity available for this address: yes
@@ -61,10 +62,10 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
 | `cleanup` | Optional persisted cleanup quarantine: pending/unknown state, worker generation, abort/dispose phases, unknown quiescence, held capacity, bounded active tool IDs/names, and non-sensitive detail |
-| `providerReady` | `available` when a live worker exists, else `unknown` |
+| `providerReady` | `available` for a live worker, `unavailable` when an existing exact binding is absent, otherwise `unknown` |
 | `lifecycle` | Exact persisted policy for an existing identity, or currently resolved configured defaults for a prospective one |
 
-Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true` — typically an invalid address shape, invalid effort, an effort override supplied for an existing identity, or an unroutable/ambiguous model ID.
+Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true` — typically an invalid address shape, invalid effort, an effort override supplied for an existing identity, or a prospective model ID that current provider preference cannot select uniquely. Existing unavailable identities remain inspectable instead of being resolved as new.
 
 ## Usage guidance
 
