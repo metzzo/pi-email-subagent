@@ -426,6 +426,72 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("settles after one timed-out wait and later handles the exact reply in an automatic main turn", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE SLOW 3000 WAIT TIMEOUT");
+      const sendEnd = await client.waitFor(toolEnd("send_email"), "timeout scenario send", 90_000, mark);
+      const sent = sendResult(sendEnd);
+      const requestId = sent.correlationId as string;
+      assert.match(requestId, /^mail_/);
+
+      const waitEnd = await client.waitFor(toolEnd("wait_for_replies"), "one timed-out wait", 90_000, mark);
+      const result = waitResult(waitEnd);
+      assert.equal(result.complete, false);
+      assert.equal(result.timedOut, true);
+      assert.deepEqual(result.items.map((item) => [item.requestId, item.state]), [[requestId, "pending"]]);
+      assert.match(toolText(waitEnd), /pending requests remain correlated/i);
+      assert.match(toolText(waitEnd), /later replies.*delivered automatically.*main/i);
+      assert.match(toolText(waitEnd), /no immediate.*wait_for_replies.*keep.*alive/i);
+
+      const mainCompletion = await client.waitFor(
+        assistantText("E2E WAIT WINDOW ENDED"),
+        "main completion after the finite wait",
+        90_000,
+        mark,
+      );
+      const completionIndex = client.events().indexOf(mainCompletion);
+      const startsBeforeCompletion = client.events().slice(mark, completionIndex + 1).filter((line) =>
+        line.type === "tool_execution_start" && line.toolName === "wait_for_replies");
+      assert.equal(startsBeforeCompletion.length, 1, "the settled main turn issued one wait, not an immediate rejoin");
+      const waitStart = startsBeforeCompletion[0]!;
+      assert.deepEqual((waitStart.args as { request_ids?: string[] }).request_ids, [requestId]);
+      assert.equal(waitStart.toolCallId, waitEnd.toolCallId, "canonical start/end events identify the same wait call");
+
+      const delivered = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as { customType?: string } | undefined)?.customType === "pi-email-subagent.email",
+        "late correlated reply delivery",
+        120_000,
+        mark,
+      );
+      const deliveryIndex = client.events().indexOf(delivered);
+      assert.ok(deliveryIndex > completionIndex, "late reply arrives after the first main turn completed");
+      const envelope = (delivered.message as { details?: any }).details;
+      assert.equal(envelope.kind, "reply");
+      assert.equal(envelope.from, WORKER_ADDRESS);
+      assert.equal(envelope.inReplyTo, requestId);
+      const waitsBeforeDelivery = client.events().slice(mark, deliveryIndex).filter((line) =>
+        line.type === "tool_execution_start" && line.toolName === "wait_for_replies");
+      assert.equal(waitsBeforeDelivery.length, 1, "no overlapping keepalive-style rejoin precedes late delivery");
+
+      await client.waitFor(assistantText("E2E REPLY SEEN"), "automatic late-reply main run", 90_000, mark);
+      await client.waitForSettlement(mark);
+      assert.equal(await client.close(), 0, client.stderr);
+
+      const journal = await readJournal(agentDir, sessionId);
+      const answered = journal.filter((event) => event.type === "email.answered" && event.id === requestId);
+      assert.equal(answered.length, 1, "the parsed journal has one authoritative answer transition");
+      const replyId = answered[0]?.replyId;
+      assert.equal(journal.filter((event) => event.type === "email.created"
+        && event.email?.id === replyId && event.email?.inReplyTo === requestId).length, 1);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("delivers an uncollected reply as an ordinary main mail turn", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {

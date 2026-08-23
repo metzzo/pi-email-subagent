@@ -13,6 +13,7 @@
  *
  * Main-thread script (system prompt contains "Main Agent Coordination"):
  *   user "E2E DELEGATE [SLOW <ms>] [HIGH] [NOWAIT]" → send_email to the scout
+ *   user "E2E DELEGATE SLOW <ms> WAIT TIMEOUT"       → one zero-second wait, then late-reply turn
  *   user "E2E DELEGATE REVIEWER ..."                → send_email to the reviewer
  *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
  *   user "E2E DELEGATE WORK"                        → writable worker performs edit/write/bash
@@ -129,22 +130,31 @@ function planMain(messages: readonly Message[]): Plan {
   // normal post-send turn), join them now — unless the instruction was NOWAIT
   // or the current message is a fresh instruction to execute first.
   const ids = correlationIds(messages);
+  const instruction = lastUserInstruction(messages);
   const lastIsInstruction = last?.role === "user" && lastText.includes("E2E");
   if (!lastIsInstruction
     && ids.length > 0
-    && !lastUserInstruction(messages).includes("NOWAIT")
+    && !instruction.includes("NOWAIT")
     && lastToolResultIndex(messages, "send_email") > lastToolResultIndex(messages, "wait_for_replies")) {
-    return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: ids, timeout_seconds: 90, collect: true } }] };
+    return { toolCalls: [{
+      name: "wait_for_replies",
+      arguments: { request_ids: ids, timeout_seconds: instruction.includes("WAIT TIMEOUT") ? 0 : 90, collect: true },
+    }] };
   }
 
   if (last?.role === "toolResult") {
     if (last.toolName === "send_email") {
-      if (lastUserInstruction(messages).includes("NOWAIT")) return { text: "E2E SENT" };
+      if (instruction.includes("NOWAIT")) return { text: "E2E SENT" };
       const ids = correlationIds(messages);
       if (ids.length === 0) return { text: "E2E NO REQUEST IDS" };
-      return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: ids, timeout_seconds: 90, collect: true } }] };
+      return { toolCalls: [{
+        name: "wait_for_replies",
+        arguments: { request_ids: ids, timeout_seconds: instruction.includes("WAIT TIMEOUT") ? 0 : 90, collect: true },
+      }] };
     }
-    if (last.toolName === "wait_for_replies") return { text: "E2E COMPLETE" };
+    if (last.toolName === "wait_for_replies") {
+      return { text: instruction.includes("WAIT TIMEOUT") ? "E2E WAIT WINDOW ENDED" : "E2E COMPLETE" };
+    }
     if (last.toolName === "cancel_request") return { text: "E2E CANCELLED" };
     if (last.toolName === "manage_agent") return { text: "E2E MANAGED" };
     if (last.toolName === "inspect_agent") return { text: "E2E INSPECTED" };

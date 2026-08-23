@@ -7,6 +7,7 @@ import type { AgentInspection, EmailEnvelope, WaitForRepliesResult } from "./typ
 import { byteLength, errorMessage } from "./util.ts";
 
 const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated. Later replies are delivered automatically to the main thread when they arrive (or after broker/session restoration). No immediate wait_for_replies rejoin is needed merely to keep requests alive. Rejoin only for a deliberate synchronous collection/status window.";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
@@ -92,11 +93,12 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
-      "Join already-sent response-required email requests. Waits until each is answered, failed, stopped, archived, paused without a live worker, or the bounded timeout expires; returns completed and pending results together. With collection enabled, correlated replies do not trigger separate model turns.",
-    promptSnippet: "Wait for and collect replies to delegated email request IDs.",
+      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. Returns completed and pending results together. With collection enabled, replies received during the window do not trigger separate model turns; after a pending timeout, late replies are delivered automatically to main.",
+    promptSnippet: "Open a bounded observation window for replies to delegated email request IDs.",
     promptGuidelines: [
       "Use request IDs returned by send_email; never invent IDs.",
       "Use wait_for_replies instead of polling registry files or sending progress mail.",
+      "Do not immediately rejoin merely to keep pending requests alive; late replies arrive automatically. Rejoin only for a deliberate synchronous collection/status window.",
     ],
     executionMode: "sequential" as const,
     parameters: Type.Object({
@@ -130,6 +132,9 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         }
         if (omitted.length > 0) {
           lines.push(`Re-fetch omitted reply bodies in smaller groups: ${omitted.join(", ")}`);
+        }
+        if (result.timedOut && result.items.some((item) => item.state === "pending")) {
+          lines.push("", PENDING_WAIT_GUIDANCE);
         }
         return textResult(lines.join("\n"), { result: compactWaitDetails(result) } satisfies WaitForRepliesToolDetails);
       } catch (error) {
