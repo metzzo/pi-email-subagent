@@ -226,11 +226,35 @@ export interface SendEmailResult {
   answeredEmailId?: string;
 }
 
+export interface AgentCapacitySnapshot {
+  identitiesUsed: number;
+  identitiesLimit: number;
+  runSlotsUsed: number;
+  runSlotsLimit: number;
+}
+
+export interface BoundedRequestIds {
+  count: number;
+  requestIds: string[];
+  omitted: number;
+}
+
+export interface AgentArchiveBlockers {
+  active: boolean;
+  cleanupQuarantine: boolean;
+  queued: BoundedRequestIds;
+  incomingUnanswered: BoundedRequestIds;
+  outgoingUnanswered: BoundedRequestIds;
+  pendingReplies: BoundedRequestIds;
+}
+
 export interface AgentInspection {
   address: string;
   exists: boolean;
   wouldSpawn: boolean;
   capacityAvailable: boolean;
+  capacity: AgentCapacitySnapshot;
+  holdsActivationLease: boolean;
   modelId: string;
   provider: string;
   effort: ThinkingLevel;
@@ -243,7 +267,10 @@ export interface AgentInspection {
   currentActivity?: string;
   queued: number;
   unanswered: number;
+  outgoingUnanswered: number;
   pendingReplies: number;
+  archiveEligible: boolean;
+  archiveBlockers: AgentArchiveBlockers;
   usage: UsageSnapshot;
   failure?: string;
   cleanup?: CleanupDiagnostic;
@@ -359,6 +386,8 @@ export interface BrokerSnapshot {
   agents: AgentRecord[];
   unanswered: number;
   queuedMail: number;
+  /** Current derived view; never persisted in the registry. */
+  capacity: AgentCapacitySnapshot;
 }
 
 export interface BrokerOptions {

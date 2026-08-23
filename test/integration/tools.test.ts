@@ -91,6 +91,30 @@ describe("worker mail tools", () => {
     );
   });
 
+  it("preserves bounded identity-capacity recovery diagnostics as a native send error", async () => {
+    const diagnostic = "Agent limit reached: identity capacity is full (1/1 activation leases). Run concurrency is separate (0/1 slots currently used); waiting or stopping does not free an identity lease. Reuse a known address or ask main to archive a clean identity.";
+    const [send] = createWorkerMailTools({
+      sendEmail: async () => { throw new Error(diagnostic); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    await assert.rejects(
+      send.execute(
+        "tool-capacity",
+        { to: "worker.new@gpt-5.4.com", subject: "Capacity", message: "No acceptance.", priority: "low" },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+      (error: Error) => {
+        assert.match(error.message, /identity capacity.*1\/1.*activation leases/i);
+        assert.match(error.message, /run concurrency.*0\/1/i);
+        assert.match(error.message, /stopping.*does not free.*identity lease/i);
+        assert.match(error.message, /ask main.*archive a clean identity/i);
+        return true;
+      },
+    );
+  });
+
   it("fetches only broker-provided unanswered mail", async () => {
     const [_, fetch] = createWorkerMailTools({
       sendEmail: async () => ({ envelope, spawned: false, recipientDisposition: "main", correlationId: envelope.id }),

@@ -13,6 +13,8 @@ import { looksLikeReply, makeReplySubject, parseReplySubject } from "./reply.ts"
 import { SlidingWindowRateLimiter } from "./rate-limit.ts";
 import { MAIL_TOOL_BATCH_BYTES, MAIL_TOOL_BATCH_LINES } from "./tool-result.ts";
 import type {
+  AgentArchiveBlockers,
+  AgentCapacitySnapshot,
   AgentInspection,
   AgentRecord,
   CleanupDiagnostic,
@@ -37,6 +39,7 @@ import { byteLength, clone, errorMessage, nowIso, truncateText } from "./util.ts
 import { emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
+const ARCHIVE_BLOCKER_ID_LIMIT = 5;
 
 function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
@@ -723,6 +726,97 @@ export class AgentBroker {
     return this.activationLeases.size;
   }
 
+  private capacitySnapshot(): AgentCapacitySnapshot {
+    return {
+      identitiesUsed: this.activationLeases.size,
+      identitiesLimit: this.options.config.maxAgents,
+      runSlotsUsed: this.active.size,
+      runSlotsLimit: this.options.config.maxConcurrent,
+    };
+  }
+
+  private capacityFullDiagnostic(mainCaller = true): string {
+    const capacity = this.capacitySnapshot();
+    const recovery = mainCaller
+      ? "Reuse a relevant existing address, or use inspect_agent or /agents to restart real work, resolve exact obligations, archive one clean identity, then retry."
+      : "Reuse a relevant existing address you already know, or ask main to resolve real obligations and archive one clean identity before retrying; only main can manage agents or cancel requests.";
+    return `Agent limit reached: identity capacity is full (${capacity.identitiesUsed}/${capacity.identitiesLimit} activation leases). Run concurrency is separate (${capacity.runSlotsUsed}/${capacity.runSlotsLimit} slots currently used); waiting for a run slot or stopping an agent does not free an identity lease. ${recovery}`;
+  }
+
+  private boundedRequestIds(ids: readonly string[]): AgentArchiveBlockers["queued"] {
+    return {
+      count: ids.length,
+      requestIds: ids.slice(0, ARCHIVE_BLOCKER_ID_LIMIT),
+      omitted: Math.max(0, ids.length - ARCHIVE_BLOCKER_ID_LIMIT),
+    };
+  }
+
+  private classifyArchiveBlockers(address: string, record?: AgentRecord, worker?: WorkerTransport): AgentArchiveBlockers {
+    const queued: string[] = [];
+    const incomingUnanswered: string[] = [];
+    const outgoingUnanswered: string[] = [];
+    const pendingReplies: string[] = [];
+    for (const email of this.mailStore.list()) {
+      if (email.to !== address && email.from !== address) continue;
+      if (email.deliveryState === "queued") {
+        queued.push(email.inReplyTo ?? email.id);
+        continue;
+      }
+      if (email.kind !== "request" || !email.requiresResponse || email.deliveryState !== "delivered" || email.answeredAt) continue;
+      if (email.replyReservedBy) {
+        pendingReplies.push(email.id);
+        continue;
+      }
+      if (email.to === address) incomingUnanswered.push(email.id);
+      if (email.from === address) outgoingUnanswered.push(email.id);
+    }
+    return {
+      active: record?.state === "running" || record?.state === "spawning" || Boolean(worker?.getSnapshot().isStreaming),
+      cleanupQuarantine: Boolean(record?.cleanup),
+      queued: this.boundedRequestIds(queued),
+      incomingUnanswered: this.boundedRequestIds(incomingUnanswered),
+      outgoingUnanswered: this.boundedRequestIds(outgoingUnanswered),
+      pendingReplies: this.boundedRequestIds(pendingReplies),
+    };
+  }
+
+  private archiveEligible(record: AgentRecord | undefined, blockers: AgentArchiveBlockers): boolean {
+    if (!record) return false;
+    if (record.state === "archived") return true;
+    return !blockers.active
+      && !blockers.cleanupQuarantine
+      && blockers.queued.count === 0
+      && blockers.incomingUnanswered.count === 0
+      && blockers.outgoingUnanswered.count === 0
+      && blockers.pendingReplies.count === 0;
+  }
+
+  private archiveBlockedDiagnostic(blockers: AgentArchiveBlockers): string {
+    const render = (label: string, value: AgentArchiveBlockers["queued"]): string | undefined => {
+      if (value.count === 0) return undefined;
+      const shown = value.requestIds.join(", ");
+      const omitted = value.omitted > 0 ? `${shown ? ", " : ""}+${value.omitted} omitted` : "";
+      return `${label}: ${value.count}${shown || omitted ? ` (${shown}${omitted})` : ""}`;
+    };
+    const categories = [
+      blockers.active ? "active worker" : undefined,
+      blockers.cleanupQuarantine ? "cleanup quiescence unknown" : undefined,
+      render("queued mail", blockers.queued),
+      render("incoming unanswered requests", blockers.incomingUnanswered),
+      render("outgoing unanswered requests", blockers.outgoingUnanswered),
+      render("reply deliveries pending", blockers.pendingReplies),
+    ].filter((value): value is string => Boolean(value));
+    const active = blockers.active
+      ? " Running agents must be stopped and settled first; stopping does not free identity capacity."
+      : "";
+    const obligationCount = blockers.queued.count
+      + blockers.incomingUnanswered.count
+      + blockers.outgoingUnanswered.count
+      + blockers.pendingReplies.count;
+    const obligations = obligationCount > 0 ? "; queued mail or unanswered obligations block archival" : "";
+    return `Agent cannot be archived: ${categories.join("; ")}${obligations}.${active} Restart or finish genuine work. If the user explicitly abandons a request and its recipient is inactive, cancel that exact request with a substantive reason; cancel_request performs final validation. Then retry archive.`;
+  }
+
   private async withAddressOperation<T>(address: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.addressTails.get(address) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(async () => {
@@ -906,7 +1000,7 @@ export class AgentBroker {
         throw new Error(`Agent ${sender} is not permitted to spawn new agents; reuse an existing address.`);
       }
       if (!this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
-        throw new Error(`Agent limit reached (${this.options.config.maxAgents}); archive or reuse an existing address.`);
+        throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
       }
     } else {
       if (input.effort !== undefined) {
@@ -941,7 +1035,7 @@ export class AgentBroker {
     let acquiredLease = false;
     if (parsed && !this.activationLeases.has(to)) {
       if (this.activeIdentityCount() >= this.options.config.maxAgents) {
-        throw new Error(`Agent limit reached (${this.options.config.maxAgents}); archive or reuse an existing address.`);
+        throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
       }
       this.activationLeases.add(to);
       acquiredLease = true;
@@ -1074,7 +1168,7 @@ export class AgentBroker {
       const restoringArchive = record?.state === "archived";
       if (!this.activationLeases.has(parsed.address)) {
         if (this.activeIdentityCount() >= this.options.config.maxAgents) {
-          throw new Error(`Agent limit reached (${this.options.config.maxAgents}).`);
+          throw new Error(this.capacityFullDiagnostic());
         }
         this.activationLeases.add(parsed.address);
       }
@@ -1162,6 +1256,7 @@ export class AgentBroker {
     delete record.failure;
     record.updatedAt = nowIso();
     this.records.set(record.address, record);
+    this.routableRecords.add(record.address);
     // A newly accepted identity (and its lifecycle) is durable before provider startup.
     // Restored records were already loaded from durable registry state.
     if (!restored) await this.persistRegistry(true);
@@ -1825,7 +1920,7 @@ export class AgentBroker {
       const parsed = parseSubagentAddress(address, this.catalog);
       if (!this.activationLeases.has(address)) {
         if (this.activeIdentityCount() >= this.options.config.maxAgents) {
-          throw new Error(`Agent limit reached (${this.options.config.maxAgents}).`);
+          throw new Error(this.capacityFullDiagnostic());
         }
         this.activationLeases.add(address);
       }
@@ -1911,16 +2006,8 @@ export class AgentBroker {
       this.assertNoCleanupQuarantine(address);
       if (record.state === "archived") return;
       const worker = this.workers.get(address);
-      if (record.state === "running" || record.state === "spawning" || worker?.getSnapshot().isStreaming) {
-        throw new Error("Running agents must be stopped and settled before archival.");
-      }
-      const obligated = this.mailStore.list().some((email) =>
-        (email.to === address && (email.deliveryState === "queued" || (email.deliveryState === "delivered" && email.requiresResponse && !email.answeredAt)))
-        || (email.from === address && (email.deliveryState === "queued"
-          || (email.deliveryState === "delivered" && email.requiresResponse && !email.answeredAt)
-          || Boolean(email.replyReservedBy))),
-      );
-      if (obligated) throw new Error("Agent has queued mail or unanswered obligations and cannot be archived.");
+      const blockers = this.classifyArchiveBlockers(address, record, worker);
+      if (!this.archiveEligible(record, blockers)) throw new Error(this.archiveBlockedDiagnostic(blockers));
       if (worker) {
         const lease = this.beginWorkerCleanup(address, worker, "MANUAL_ARCHIVE", "archived");
         await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
@@ -1989,14 +2076,18 @@ export class AgentBroker {
     const profile = resolveAgentProfile(this.options.config, address, name);
     const tools = record?.tools ?? profile.tools;
     const mail = this.mailStore.list();
+    const holdsActivationLease = this.activationLeases.has(address);
+    const archiveBlockers = this.classifyArchiveBlockers(address, record, this.workers.get(address));
     return {
       address,
       exists: Boolean(record),
       wouldSpawn: !record,
-      capacityAvailable: (!record || this.routableRecords.has(address))
+      capacityAvailable: (!record || holdsActivationLease || this.routableRecords.has(address))
         && !record?.cleanup
         && !this.mutationSchedulingQuarantined({ tools })
-        && (this.activationLeases.has(address) || this.activeIdentityCount() < this.options.config.maxAgents),
+        && (holdsActivationLease || this.activeIdentityCount() < this.options.config.maxAgents),
+      capacity: this.capacitySnapshot(),
+      holdsActivationLease,
       modelId: record?.modelId ?? parsed!.model.id,
       provider: record?.provider ?? parsed!.model.provider,
       effort: record?.effort ?? effortOverride ?? profile.effort,
@@ -2008,10 +2099,11 @@ export class AgentBroker {
       state: record?.state ?? "new",
       ...(record?.currentActivity ? { currentActivity: record.currentActivity } : {}),
       queued: this.mailStore.queued(address).length,
-      unanswered: mail.filter((email) =>
-        email.to === address && email.deliveryState === "delivered" && email.requiresResponse
-          && !email.answeredAt && !email.replyReservedBy).length,
+      unanswered: archiveBlockers.incomingUnanswered.count,
+      outgoingUnanswered: archiveBlockers.outgoingUnanswered.count,
       pendingReplies: mail.filter((email) => email.to === address && Boolean(email.replyReservedBy) && !email.answeredAt).length,
+      archiveEligible: this.archiveEligible(record, archiveBlockers),
+      archiveBlockers,
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
       ...(record?.cleanup ? { cleanup: clone(record.cleanup) } : {}),
@@ -2165,7 +2257,13 @@ export class AgentBroker {
     }).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     const unanswered = this.mailStore.list().filter((email) =>
       email.requiresResponse && !email.answeredAt && !email.replyReservedBy && email.deliveryState === "delivered").length;
-    return { mainAddress: this.mainAddress, agents, unanswered, queuedMail: this.mailStore.countQueued() };
+    return {
+      mainAddress: this.mainAddress,
+      agents,
+      unanswered,
+      queuedMail: this.mailStore.countQueued(),
+      capacity: this.capacitySnapshot(),
+    };
   }
 
   private scheduleMailMaintenance(): void {

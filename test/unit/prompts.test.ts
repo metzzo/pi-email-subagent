@@ -43,6 +43,11 @@ describe("mail prompts", () => {
     assert.match(prompt, /Use model ID `gpt-5\.6-terra`/);
     assert.match(prompt, /Never use any other model unless the user explicitly requests that specific model/);
     assert.match(prompt, /instead of silently substituting another model/);
+    assert.match(prompt, /maxAgents.*identity.*activation lease/i);
+    assert.match(prompt, /maxConcurrent.*run concurrency/i);
+    assert.match(prompt, /stopping.*does not free.*identity lease/i);
+    assert.match(prompt, /downstream.*reuse.*already know.*report.*main/i);
+    assert.match(prompt, /only main.*manage.*cancel/i);
     assert.match(prompt, /delivery is at least once across crash recovery/i);
     assert.match(prompt, /repeated stable email ID.*retry/i);
     assert.match(prompt, /do not repeat completed side effects/i);
@@ -89,6 +94,11 @@ describe("mail prompts", () => {
     assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
     assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
     assert.match(prompt, /continue useful work or end the turn/i);
+    assert.match(prompt, /identity-capacity recovery.*reuse.*relevant existing identity/is);
+    assert.match(prompt, /restart.*stopped or failed.*real assigned work/is);
+    assert.match(prompt, /stop.*only.*inactive.*does not free.*lease/is);
+    assert.match(prompt, /cancel.*exact request.*explicitly abandons.*inactive/is);
+    assert.match(prompt, /archive.*only after.*queued.*open obligations.*retry/is);
     assert.match(prompt, /archive clean.*identities/i);
   });
 

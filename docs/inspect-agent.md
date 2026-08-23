@@ -25,8 +25,12 @@ State: idle
 Model: openai/gpt-5.6-sol · effort high
 Role: reviewer · read-only · spawn disabled
 Tools: read, grep, find, ls, send_email, fetch_emails
-Capacity available: yes
-Mailbox: 0 queued · 1 unanswered · 0 pending replies
+Identity capacity: 8/8 used · this address holds a lease: yes · capacity available for this address: yes
+Run concurrency: 2/4 slots used
+Mailbox: 0 queued · 1 incoming unanswered · 1 outgoing unanswered · 0 pending replies
+Archive eligible: no
+Archive blockers: incoming unanswered 1 (mail_…) · outgoing unanswered 1 (mail_…)
+Recovery: restart this inactive identity to finish real obligations; cancel only an explicitly abandoned exact request; archive only after blockers are clear.
 Lifecycle: {"spawnTimeoutMs":30000,...}
 Cleanup: unknown · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved
 Cleanup phases: abort succeeded · dispose succeeded · generation 7
@@ -38,13 +42,17 @@ Last failure: …            (only when present)
 | Field | Meaning |
 |-------|---------|
 | `exists` / `wouldSpawn` | Whether a record exists; whether a send would create it |
-| `capacityAvailable` | Whether the address holds or could obtain an activation lease under `maxAgents` |
+| `capacityAvailable` | Compatibility boolean: whether the address holds or could obtain an activation lease under `maxAgents` |
+| `capacity` | Current derived identity leases used/limit and separate run slots used/limit; not persisted |
+| `holdsActivationLease` | Whether this exact address currently consumes identity capacity |
 | `modelId`, `provider`, `effort`, `role`, `tools`, `instructions` | Effective profile (record if live, resolved config otherwise) |
 | `writable` | Effective tools include a mutation tool |
 | `canSpawn` | Whether the agent may create new identities by mailing unknown addresses |
 | `state` | `new` for prospective addresses, otherwise the lifecycle state |
 | `currentActivity` | Latest activity summary, when present |
-| `queued` / `unanswered` / `pendingReplies` | Mailbox counts: queued inbound, open obligations to it, replies reserved but not yet delivered |
+| `queued` / `unanswered` / `outgoingUnanswered` / `pendingReplies` | Queued inbound, incoming open requests, requests sent by this identity that remain open, and replies reserved but not yet delivered |
+| `archiveEligible` | Current derived result of the same active/queued/open-blocker rules used by `archive`; the action still revalidates and cleanup can still fail closed |
+| `archiveBlockers` | Bounded counts and up to five real request/mail IDs per queued, incoming, outgoing, and pending-reply category; includes omitted counts and no subjects/bodies/counterparties |
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
 | `cleanup` | Optional persisted cleanup quarantine: pending/unknown state, worker generation, abort/dispose phases, unknown quiescence, held capacity, bounded active tool IDs/names, and non-sensitive detail |
@@ -56,5 +64,6 @@ Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true
 ## Usage guidance
 
 - Call before delegating when recipient capability is uncertain — in particular before authorizing repository changes, to confirm the address is actually writable.
-- Also useful before spawning to check `capacityAvailable` when several agents are already active.
+- Also useful before spawning to distinguish identity lease use from run concurrency, check whether this address already holds a lease, and inspect exact bounded blockers.
+- Follow the rendered recovery hint. Reuse a relevant leased identity first; restart real stopped/failed work; stop only to become inactive; cancel only a user-abandoned exact request after final validation; archive only when clean; then retry.
 - When `cleanup` is present, do not interpret a detached worker or elapsed deadline as safety. Restart, archive, and clear-failure remain blocked; accepted mail is queued until affirmative quiescence is available.

@@ -2,7 +2,9 @@
 
 `/agents` (or `Ctrl+Shift+A`) is a work-first view of persistent workers. It shows explicit file mutation intent and confirmed built-in edit/write outcomes without exposing hidden reasoning or written/replacement bodies.
 
-For a simpler operator-facing lifecycle, paused, stopped, and archived identities are all labeled **closed** in the dashboard and Agents widget. Their distinct internal states and management behavior remain unchanged in tools, persisted records, and APIs.
+For a simpler operator-facing lifecycle, paused, stopped, and archived identities are all labeled **closed** in the dashboard and Agents widget. Their distinct internal states and management behavior remain unchanged in tools, persisted records, and APIs. The Profile/Lifecycle tab shows the exact internal state needed for recovery.
+
+The dashboard header and one-line Agents widget show current derived **identity capacity** (activation leases used/`maxAgents`) separately from **run slots** (active runs/`maxConcurrent`). A full header warns to reuse/restart relevant work and archive only a clean identity; stop retains its lease. These values come from current broker sets and are not persisted as a second ledger.
 
 ## Confidence model
 
@@ -30,7 +32,7 @@ The third row prioritizes active edit/write intent, then unverified shell/custom
 
 ### Detail
 
-`Tab` cycles Work, Activity, Inbox, and Profile/Lifecycle. `i` jumps to Inbox and back. Inbox shows the exact request IDs needed by `cancel_request` or `/agents cancel`; cancellation requires an inactive recipient and a substantive audit reason. In Work, use `↑` / `↓` to select an item and `d` to open a successful edit patch. `Esc` returns to the list.
+`Tab` cycles Work, Activity, Inbox, and Profile/Lifecycle. `i` jumps to Inbox and back. Inbox shows the exact request IDs needed by `cancel_request` or `/agents cancel`; cancellation requires an inactive recipient, explicit abandonment, and a substantive audit reason. Profile/Lifecycle shows the selected identity's exact internal state, lease held/free, global identity/run use, incoming/outgoing/queued/pending counts, archive eligibility, and a safe recovery hint. In Work, use `↑` / `↓` to select an item and `d` to open a successful edit patch. `Esc` returns to the list.
 
 The diff view is scrollable with arrows, Page Up/Down, Home/End, and closes with `d` or `Esc`. The live event preview is bounded to 8 KB/200 lines; opening it upgrades from the persisted session result when available, bounded to 50 KB/2,000 lines. Truncation notes distinguish the two sources. Dashboard rows and every terminal line are viewport/width bounded.
 
@@ -38,7 +40,7 @@ The diff view is scrollable with arrows, Page Up/Down, Home/End, and closes with
 
 The registry keeps a derived cache of at most 48 completed items, 240-character commands, 500-character errors, and bounded patch previews. It never stores `write.content`, edit replacement bodies, or read/search results. On restart, stale active calls become interrupted and durable edit/write tool calls/results are reconstructed once from the active session branch. Recovery diagnostics are non-fatal.
 
-The visible conversation view collapses write/edit arguments and shows bounded edit patches. Thinking blocks, raw mutation bodies, and content beyond configured caps remain excluded.
+The visible conversation view collapses write/edit arguments and shows bounded edit patches. Thinking blocks, raw mutation bodies, and content beyond configured caps remain excluded. Capacity headers, the widget, and Profile contain only aggregate counts/state and never add mail subjects, bodies, or unrelated address lists; sensitive selected-mail excerpts remain confined to Inbox.
 
 ## Manual acceptance checklist
 

@@ -19,7 +19,7 @@ Cancellation is intentionally narrower than deleting mail:
 - Answered requests and requests with a reply reserved for delivery cannot be cancelled.
 - The first successful cancellation is idempotent and authoritative; retries do not replace its actor, timestamp, or reason.
 
-Use cancellation only when the user explicitly abandons the request or an inactive recipient cannot safely resume. Do not use it merely to hide an unanswered count. Cancellation closes the obligation but does not claim that work succeeded and does not create a reply.
+Use cancellation only when the user explicitly abandons the request or an inactive recipient cannot safely resume. Identity-capacity pressure alone is not abandonment and never authorizes cancellation. Stop may satisfy the inactive-recipient precondition but does not free the identity lease; only a later clean archive does that. Do not use cancellation merely to hide an unanswered count. Cancellation closes the obligation but does not claim that work succeeded and does not create a reply.
 
 ## Durability and observability
 

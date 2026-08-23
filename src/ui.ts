@@ -4,7 +4,7 @@ import { migrateSessionEntries, parseSessionEntries, renderDiff, truncateHead, t
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
 import { isThinkingLevel } from "./config.ts";
-import type { AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
+import type { AgentInspection, AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
 import { activePathConflicts, aggregateWork, capPatch, countWrite } from "./work-ledger.ts";
 import { errorMessage, truncateText } from "./util.ts";
 
@@ -510,6 +510,7 @@ export class DashboardComponent {
     initialAddress?: string,
     private readonly isConversationKey: (data: string) => boolean = (data) => matchesKey(data, Key.ctrl("o")),
     private readonly viewportRows: number | (() => number) = 24,
+    private readonly getInspection?: (address: string) => AgentInspection,
   ) {
     if (initialAddress) {
       const index = getSnapshot().agents.findIndex((agent) => agent.address === initialAddress);
@@ -556,13 +557,26 @@ export class DashboardComponent {
     lines.push(this.theme.fg("accent", this.theme.bold("Pi Email Subagents")));
     const mainAddress = sanitizeConversationLabel(snapshot.mainAddress);
     const conflicts = activePathConflicts(agents);
-    lines.push(this.theme.fg("dim", `main: ${mainAddress} · ${agents.length} agents · ${snapshot.unanswered} unanswered · ${snapshot.queuedMail} queued${conflicts.size ? ` · ⚠ ${conflicts.size} active path conflict${conflicts.size === 1 ? "" : "s"}` : ""}`));
+    const mainSummary = `main: ${mainAddress} · ${agents.length} agents · ${snapshot.unanswered} unanswered · ${snapshot.queuedMail} queued${conflicts.size ? ` · ⚠ ${conflicts.size} active path conflict${conflicts.size === 1 ? "" : "s"}` : ""}`;
+    const full = snapshot.capacity.identitiesUsed >= snapshot.capacity.identitiesLimit;
+    const identityCapacity = width < 28
+      ? `identity ${snapshot.capacity.identitiesUsed}/${snapshot.capacity.identitiesLimit}${full ? " FULL" : ""}`
+      : `identity capacity ${snapshot.capacity.identitiesUsed}/${snapshot.capacity.identitiesLimit}${full ? " FULL" : ""}`;
+    const runCapacity = `run slots ${snapshot.capacity.runSlotsUsed}/${snapshot.capacity.runSlotsLimit}`;
+    if (width < 48) {
+      lines.push(this.theme.fg(full ? "warning" : "dim", identityCapacity));
+      lines.push(this.theme.fg("dim", runCapacity));
+      lines.push(this.theme.fg("dim", mainSummary));
+    } else {
+      lines.push(this.theme.fg(full ? "warning" : "dim", `${identityCapacity} · ${runCapacity} · ${mainSummary}`));
+    }
+    if (full) lines.push(this.theme.fg("warning", "FULL: reuse/restart relevant work; stop retains its lease; archive only a clean identity."));
     lines.push(this.theme.fg("borderMuted", "─".repeat(Math.max(1, Math.min(width, 80)))));
 
     if (agents.length === 0) {
       lines.push(this.theme.fg("muted", "No subagents. send_email() to a valid unknown address to create one."));
     } else if (!this.detail) {
-      const visibleAgents = Math.max(1, Math.floor((this.rows() - 5) / 3));
+      const visibleAgents = Math.max(1, Math.floor((this.rows() - lines.length - 2) / 3));
       const agentStart = Math.max(0, Math.min(this.selected - Math.floor(visibleAgents / 2), agents.length - visibleAgents));
       for (let index = agentStart; index < Math.min(agents.length, agentStart + visibleAgents); index += 1) {
         const agent = agents[index]!;
@@ -651,6 +665,29 @@ export class DashboardComponent {
           }
         } else {
           lines.push(this.theme.fg("dim", `tools: ${agent.tools.map(sanitizeConversationLabel).join(", ")}`));
+          lines.push(this.theme.fg("dim", `internal state: ${agent.state}`));
+          let inspection: AgentInspection | undefined;
+          try { inspection = this.getInspection?.(agent.address); } catch { /* current snapshot remains renderable */ }
+          if (inspection) {
+            lines.push(this.theme.fg("dim", `activation lease: ${inspection.holdsActivationLease ? "held" : "free"}`));
+            lines.push(this.theme.fg("dim", `identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} · run slots: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit}`));
+            lines.push(this.theme.fg("dim", `obligations: ${inspection.unanswered} incoming unanswered · ${inspection.outgoingUnanswered} outgoing unanswered · ${inspection.archiveBlockers.queued.count} queued · ${inspection.archiveBlockers.pendingReplies.count} reply delivery pending`));
+            lines.push(this.theme.fg(inspection.archiveEligible ? "success" : "warning", `archive eligible: ${inspection.archiveEligible ? "yes" : "no"}`));
+            const obligations = inspection.archiveBlockers.queued.count
+              + inspection.archiveBlockers.incomingUnanswered.count
+              + inspection.archiveBlockers.outgoingUnanswered.count
+              + inspection.archiveBlockers.pendingReplies.count;
+            const recovery = inspection.cleanup
+              ? "wait for cleanup proof; capacity stays held"
+              : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
+                ? "restart real obligations; cancel only an explicitly abandoned exact request; then archive when clean"
+                : inspection.archiveEligible && inspection.holdsActivationLease
+                  ? "reuse if relevant, or archive this clean identity; stop alone does not free its lease"
+                  : inspection.state === "archived" || !inspection.holdsActivationLease
+                    ? "free identity capacity is required before restart/restoration"
+                    : "reuse this identity and finish real obligations before archival";
+            lines.push(this.theme.fg("warning", `recovery: ${recovery}`));
+          }
           if (agent.failure) lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
         }
       }
@@ -755,7 +792,8 @@ export class UIController {
       const conflicts = activePathConflicts(agents);
       const work = activeMutations.length ? ` · now ${activeMutations.slice(0, 2).join("; ")}${activeMutations.length > 2 ? ` +${activeMutations.length - 2}` : ""}` : "";
       const warning = conflicts.size ? ` · ⚠ ${conflicts.size} path conflict${conflicts.size === 1 ? "" : "s"}` : "";
-      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${work}${warning}`, 240);
+      const capacity = ` · identity capacity ${this.snapshot.capacity.identitiesUsed}/${this.snapshot.capacity.identitiesLimit}${this.snapshot.capacity.identitiesUsed >= this.snapshot.capacity.identitiesLimit ? " FULL" : ""} · run slots ${this.snapshot.capacity.runSlotsUsed}/${this.snapshot.capacity.runSlotsLimit}`;
+      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${capacity}${work}${warning}`, 240);
       // The below-editor widget is the canonical agents bar. Clear the legacy
       // footer status instead of rendering a redundant, unaligned `agents:0/1`.
       this.ctx.ui.setStatus("pi-email-subagent", undefined);
@@ -781,6 +819,7 @@ export class UIController {
           initial,
           (data) => keybindings.matches(data, "app.tools.expand") || matchesKey(data, Key.ctrl("o")),
           () => Math.max(8, tui.terminal.rows - 2),
+          (address) => broker.inspectAgent(address),
         );
       });
       this.requestDashboardRender = undefined;

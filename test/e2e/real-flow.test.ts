@@ -238,6 +238,12 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "second reply", 120_000, mark));
       assert.equal(wait.items.at(-1)?.state, "answered");
       await client.waitForSettlement(mark);
+      await eventuallyRegistry(
+        agentDir,
+        sessionId,
+        (candidate) => candidate.agents?.[0]?.state === "idle",
+        "with the reused worker settled before lifecycle control",
+      );
 
       // Lifecycle control through the main-only manage tool.
       mark = client.mark();
@@ -692,6 +698,80 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
 
       const registry = await readRegistry(agentDir, sessionId);
       assert.equal(registry.agents.length, 3, "only the accepted sends spawn identities");
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers identity capacity only through explicit stop-cancel-archive actions", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start({ config: { maxAgents: 1, maxConcurrent: 1 } });
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E CAPACITY RECOVERY");
+      const firstSendEnd = await client.waitFor(toolEnd("send_email"), "first capacity send", 30_000, mark);
+      assert.equal(isErrorResult(firstSendEnd), false);
+      const first = sendResult(firstSendEnd);
+      const firstId = first.correlationId as string;
+      assert.match(firstId, /^mail_/);
+
+      const rejected = await client.waitFor(
+        (line) => toolEnd("send_email")(line) && line.isError === true,
+        "pre-accept identity-capacity rejection",
+        30_000,
+        mark,
+      );
+      assert.match(toolText(rejected), /identity capacity.*1\/1.*activation leases/i);
+      assert.match(toolText(rejected), /run concurrency.*1\/1/i);
+      assert.match(toolText(rejected), /stopping.*does not free.*identity lease/i);
+      assert.doesNotMatch(toolText(rejected), /scout\.e2e|Capacity owner obligation|Keep this exact request open/i);
+      const journalAfterReject = await readJournal(agentDir, sessionId);
+      assert.equal(journalAfterReject.filter((event) => event.type === "email.created").length, 1);
+
+      await client.waitFor(assistantText("E2E CAPACITY RECOVERED"), "explicit recovery completion", 120_000, mark);
+      await client.waitForSettlement(mark);
+      const starts = client.events().slice(mark).filter((line) => line.type === "tool_execution_start"
+        && ["send_email", "manage_agent", "cancel_request"].includes(String(line.toolName)));
+      assert.deepEqual(starts.map((line) => [line.toolName, (line.args as any).action ?? (line.args as any).to ?? "cancel"]), [
+        ["send_email", WORKER_ADDRESS],
+        ["send_email", REVIEWER_ADDRESS],
+        ["manage_agent", "archive"],
+        ["manage_agent", "stop"],
+        ["cancel_request", "cancel"],
+        ["manage_agent", "archive"],
+        ["send_email", REVIEWER_ADDRESS],
+      ]);
+      const cancellationStart = starts.find((line) => line.toolName === "cancel_request")!;
+      assert.equal((cancellationStart.args as any).request_id, firstId);
+      assert.match(String((cancellationStart.args as any).reason), /explicitly abandoned/i);
+
+      const ends = client.events().slice(mark).filter((line) => line.type === "tool_execution_end"
+        && ["send_email", "manage_agent", "cancel_request"].includes(String(line.toolName)));
+      const archiveEnds = ends.filter((line) => line.toolName === "manage_agent");
+      assert.equal(archiveEnds[0]?.isError, true, "archive refuses active/open work");
+      assert.equal(archiveEnds[1]?.isError, false, "stop is an explicit separate action");
+      assert.equal(archiveEnds[2]?.isError, false, "archive succeeds only after exact cancellation");
+      const stoppedDetails = (archiveEnds[1]?.result as any)?.details;
+      assert.equal(stoppedDetails.holdsActivationLease, true);
+      assert.deepEqual(stoppedDetails.capacity, {
+        identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1,
+      });
+      const archivedDetails = (archiveEnds[2]?.result as any)?.details;
+      assert.equal(archivedDetails.holdsActivationLease, false);
+      assert.equal(archivedDetails.capacity.identitiesUsed, 0);
+      const sendEnds = ends.filter((line) => line.toolName === "send_email");
+      assert.deepEqual(sendEnds.map((line) => line.isError === true), [false, true, false]);
+      const retry = sendResult(sendEnds[2]!);
+      assert.equal(retry.spawned, true);
+      assert.notEqual(retry.correlationId, firstId);
+      assert.equal(await client.close(), 0, client.stderr);
+
+      const journal = await readJournal(agentDir, sessionId);
+      assert.equal(journal.filter((event) => event.type === "email.created" && event.email?.kind === "request").length, 2, "rejected send created no request envelope");
+      assert.equal(journal.filter((event) => event.type === "email.cancelled" && event.id === firstId).length, 1);
+      const firstCreated = journal.find((event) => event.type === "email.created" && event.email?.id === firstId)?.email;
+      assert.equal(firstCreated?.answeredAt, undefined);
+      assert.equal(journal.some((event) => event.type === "email.answered" && event.id === firstId), false);
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });

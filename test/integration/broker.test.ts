@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -7,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { AgentBroker, lightweightWorkItem } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { makeReplySubject } from "../../src/reply.ts";
-import type { SubagentConfig } from "../../src/types.ts";
+import type { SendEmailResult, SubagentConfig } from "../../src/types.ts";
 import { createWorkerFactory, eventually, FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
 import { activePathConflicts, appendRecent, emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
 
@@ -288,6 +288,12 @@ describe("AgentBroker end-to-end routing", () => {
       assert.equal(workers[1]!.prompts.length, 0);
       assert.equal(second.envelope.deliveryState, "queued");
       assert.equal(broker.getSnapshot().agents.find((agent) => agent.address.includes("second"))?.state, "queued");
+      assert.deepEqual(broker.getSnapshot().capacity, {
+        identitiesUsed: 2, identitiesLimit: 8, runSlotsUsed: 1, runSlotsLimit: 1,
+      });
+      const queuedInspection = broker.inspectAgent(second.envelope.to);
+      assert.equal(queuedInspection.holdsActivationLease, true);
+      assert.equal(queuedInspection.capacityAvailable, true, "queued run concurrency does not consume another identity lease");
 
       await workers[0]!.send({
         to: broker.mainAddress,
@@ -390,6 +396,176 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
+  it("keeps identity leases distinct from run slots through explicit stop-cancel-archive recovery", async () => {
+    const { broker, workers, root } = await setup({ maxAgents: 1, maxConcurrent: 1 });
+    try {
+      assert.deepEqual((broker.getSnapshot() as any).capacity, {
+        identitiesUsed: 0, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1,
+      });
+      const first = await broker.send(broker.mainAddress, {
+        to: "worker.capacity-owner@gpt-5.4.com", subject: "First obligation", message: "Remain open.", priority: "low",
+      });
+      const reused = await broker.send(broker.mainAddress, {
+        to: first.envelope.to, subject: "Second obligation", message: "Reuse the same identity.", priority: "low",
+      });
+      assert.equal(reused.spawned, false);
+      assert.deepEqual((broker.getSnapshot() as any).capacity, {
+        identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 1, runSlotsLimit: 1,
+      });
+      await assert.rejects(workers[0]!.send({
+        to: "worker.downstream-new@gpt-5.4.com",
+        subject: "PRIVATE DOWNSTREAM SUBJECT",
+        message: "PRIVATE DOWNSTREAM BODY",
+        priority: "low",
+      }), (error: Error) => {
+        assert.match(error.message, /identity capacity.*1\/1/i);
+        assert.match(error.message, /ask main.*only main.*manage.*cancel/i);
+        assert.doesNotMatch(error.message, /capacity-owner|PRIVATE DOWNSTREAM/);
+        return true;
+      });
+
+      await broker.stop(first.envelope.to);
+      assert.equal(workers[0]?.disposed, true);
+      assert.deepEqual((broker.getSnapshot() as any).capacity, {
+        identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1,
+      });
+      const prospective = broker.inspectAgent("worker.capacity-retry@gpt-5.4.com");
+      assert.equal(prospective.exists, false);
+      assert.equal(prospective.holdsActivationLease, false);
+      assert.equal(prospective.capacityAvailable, false);
+      assert.equal(prospective.archiveEligible, false);
+      assert.deepEqual(prospective.capacity, {
+        identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1,
+      });
+      const mailBeforeReject = broker.mailStore.list().map((email) => email.id);
+      await assert.rejects(
+        broker.send(broker.mainAddress, {
+          to: "worker.capacity-retry@gpt-5.4.com", subject: "Rejected before acceptance", message: "No obligation.", priority: "low",
+        }),
+        (error: Error) => {
+          assert.match(error.message, /identity capacity.*1\/1.*activation leases/i);
+          assert.match(error.message, /run concurrency.*0\/1/i);
+          assert.match(error.message, /stopping.*does not free.*identity lease/i);
+          assert.match(error.message, /inspect_agent|\/agents/i);
+          assert.doesNotMatch(error.message, /capacity-owner|First obligation|Remain open/);
+          return true;
+        },
+      );
+      assert.deepEqual(broker.mailStore.list().map((email) => email.id), mailBeforeReject);
+      assert.equal(broker.getSnapshot().agents.some((agent) => agent.address === "worker.capacity-retry@gpt-5.4.com"), false);
+
+      const stopped = broker.inspectAgent(first.envelope.to) as any;
+      assert.equal(stopped.holdsActivationLease, true);
+      assert.equal(stopped.outgoingUnanswered, 0);
+      assert.equal(stopped.archiveEligible, false);
+      assert.equal(stopped.archiveBlockers.incomingUnanswered.count, 1);
+      assert.deepEqual(stopped.archiveBlockers.incomingUnanswered.requestIds, [first.correlationId]);
+      assert.deepEqual(stopped.archiveBlockers.queued, {
+        count: 1, requestIds: [reused.correlationId], omitted: 0,
+      });
+
+      await broker.cancelRequest(first.correlationId, "The test owner explicitly abandoned the first capacity request.");
+      await broker.cancelRequest(reused.correlationId, "The test owner explicitly abandoned the second capacity request.");
+      for (const id of [first.correlationId, reused.correlationId]) {
+        const cancelled = broker.mailStore.get(id)!;
+        assert.equal(cancelled.deliveryState, "cancelled");
+        assert.equal(cancelled.answeredAt, undefined);
+      }
+      const journal = (await readFile(join(root, "state", "mail.jsonl"), "utf8"))
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; id?: string });
+      for (const id of [first.correlationId, reused.correlationId]) {
+        assert.equal(journal.filter((event) => event.type === "email.cancelled" && event.id === id).length, 1);
+        assert.equal(journal.some((event) => event.type === "email.answered" && event.id === id), false);
+      }
+      assert.equal((broker.inspectAgent(first.envelope.to) as any).archiveEligible, true);
+      await broker.archive(first.envelope.to);
+      assert.deepEqual((broker.getSnapshot() as any).capacity, {
+        identitiesUsed: 0, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1,
+      });
+      const archived = broker.inspectAgent(first.envelope.to);
+      assert.equal(archived.state, "archived");
+      assert.equal(archived.holdsActivationLease, false);
+      assert.equal(archived.capacityAvailable, true);
+      assert.equal(archived.archiveEligible, true);
+
+      const retried = await broker.send(broker.mainAddress, {
+        to: "worker.capacity-retry@gpt-5.4.com", subject: "Accepted after archive", message: "Lease is now available.", priority: "low",
+      });
+      assert.equal(retried.spawned, true);
+      assert.deepEqual((broker.getSnapshot() as any).capacity, {
+        identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 1, runSlotsLimit: 1,
+      });
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("reports bounded directional archive blockers without private mail content", async () => {
+    const { broker, workers } = await setup({ maxAgents: 2, maxConcurrent: 2 });
+    try {
+      const incoming = await broker.send(broker.mainAddress, {
+        to: "worker.blocker-owner@gpt-5.4.com", subject: "PRIVATE INCOMING SUBJECT", message: "PRIVATE INCOMING BODY", priority: "low",
+      });
+      const outgoing = await workers[0]!.send({
+        to: "worker.blocker-peer@gpt-5.4.com", subject: "PRIVATE OUTGOING SUBJECT", message: "PRIVATE OUTGOING BODY", priority: "low",
+      });
+      await broker.stop(incoming.envelope.to);
+      const inspection = broker.inspectAgent(incoming.envelope.to) as any;
+      assert.equal(inspection.unanswered, 1);
+      assert.equal(inspection.outgoingUnanswered, 1);
+      assert.equal(inspection.archiveEligible, false);
+      assert.deepEqual(inspection.archiveBlockers.incomingUnanswered, {
+        count: 1, requestIds: [incoming.correlationId], omitted: 0,
+      });
+      assert.deepEqual(inspection.archiveBlockers.outgoingUnanswered, {
+        count: 1, requestIds: [outgoing.correlationId], omitted: 0,
+      });
+      await assert.rejects(broker.archive(incoming.envelope.to), (error: Error) => {
+        assert.match(error.message, new RegExp(incoming.correlationId));
+        assert.match(error.message, new RegExp(outgoing.correlationId));
+        assert.match(error.message, /incoming unanswered requests: 1/i);
+        assert.match(error.message, /outgoing unanswered requests: 1/i);
+        assert.match(error.message, /finish|restart.*genuine work/i);
+        assert.match(error.message, /explicitly abandon.*cancel.*exact/i);
+        assert.doesNotMatch(error.message, /PRIVATE|blocker-peer|blocker-owner/);
+        return true;
+      });
+      assert.equal((broker.getSnapshot() as any).capacity.identitiesUsed, 2);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("bounds archive blocker request IDs and reports the omitted count", async () => {
+    const { broker } = await setup({ maxAgents: 1 });
+    try {
+      const requests: SendEmailResult[] = [];
+      for (let index = 0; index < 7; index += 1) {
+        requests.push(await broker.send(broker.mainAddress, {
+          to: "worker.many-blockers@gpt-5.4.com",
+          subject: `PRIVATE SUBJECT ${index}`,
+          message: `PRIVATE BODY ${index}`,
+          priority: "low",
+        }));
+      }
+      await broker.mailStore.markDelivered(requests.map((request) => request.correlationId));
+      await broker.stop("worker.many-blockers@gpt-5.4.com");
+      const inspection = broker.inspectAgent("worker.many-blockers@gpt-5.4.com") as any;
+      assert.equal(inspection.archiveBlockers.incomingUnanswered.count, 7);
+      assert.equal(inspection.archiveBlockers.incomingUnanswered.requestIds.length, 5);
+      assert.equal(inspection.archiveBlockers.incomingUnanswered.omitted, 2);
+      await assert.rejects(broker.archive("worker.many-blockers@gpt-5.4.com"), (error: Error) => {
+        for (const request of requests.slice(0, 5)) assert.match(error.message, new RegExp(request.correlationId));
+        for (const request of requests.slice(5)) assert.doesNotMatch(error.message, new RegExp(request.correlationId));
+        assert.match(error.message, /\+2 omitted/i);
+        assert.doesNotMatch(error.message, /PRIVATE SUBJECT|PRIVATE BODY/);
+        return true;
+      });
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("rejects invalid recipients and foreign reply IDs before changing obligations", async () => {
     const { broker, workers } = await setup();
     try {
@@ -452,8 +628,13 @@ describe("AgentBroker end-to-end routing", () => {
       };
       await broker.mailStore.reserveReply(pendingReply, request.envelope.id);
       assert.equal(broker.getSnapshot().unanswered, 0, "a reply reservation is not still labelled unanswered");
-      assert.equal(broker.inspectAgent(request.envelope.to).unanswered, 0);
-      assert.equal(broker.inspectAgent(request.envelope.to).pendingReplies, 1);
+      const reservedInspection = broker.inspectAgent(request.envelope.to);
+      assert.equal(reservedInspection.unanswered, 0);
+      assert.equal(reservedInspection.pendingReplies, 1);
+      assert.equal(reservedInspection.archiveEligible, false);
+      assert.deepEqual(reservedInspection.archiveBlockers.pendingReplies, {
+        count: 1, requestIds: [request.correlationId], omitted: 0,
+      });
       await assert.rejects(broker.cancelRequest(request.correlationId, "Cannot beat a reply reservation."), /pending delivery/);
       await broker.mailStore.markFailed(pendingReply.id, "Simulated reply delivery rollback.");
       assert.equal(broker.getSnapshot().unanswered, 1);
