@@ -296,6 +296,13 @@ export class SdkWorker implements WorkerTransport {
         this.activity("status", "Agent run started");
         break;
       case "tool_execution_start": {
+        this.emit({
+          type: "tool_lifecycle",
+          phase: "start",
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          at: nowIso(),
+        });
         const work = this.record.work ??= emptyWorkState();
         const toolClass = classifyTool(event.toolName);
         if (toolClass === "inspection") {
@@ -312,7 +319,23 @@ export class SdkWorker implements WorkerTransport {
         } else if (toolClass === "mailbox") this.activity("tool", `${event.toolName} started`);
         break;
       }
+      case "tool_execution_update":
+        this.emit({
+          type: "tool_lifecycle",
+          phase: "progress",
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          at: nowIso(),
+        });
+        break;
       case "tool_execution_end": {
+        this.emit({
+          type: "tool_lifecycle",
+          phase: "end",
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          at: nowIso(),
+        });
         const work = this.record.work ??= emptyWorkState();
         const index = work.active.findIndex((candidate) => candidate.toolCallId === event.toolCallId);
         let item = index >= 0 ? work.active[index] : startWorkItem(event.toolCallId, event.toolName, undefined, work.currentBatchId ?? 0, this.cwd);

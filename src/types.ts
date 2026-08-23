@@ -243,7 +243,7 @@ export interface WaitForRepliesResult {
   items: ReplyWaitItem[];
 }
 
-export interface WorkerEvent {
+export interface WorkerStatusEvent {
   type: "state" | "activity" | "work" | "settled" | "failure";
   state?: AgentStatus;
   activity?: ActivityItem;
@@ -252,6 +252,17 @@ export interface WorkerEvent {
   completionText?: string;
   error?: string;
 }
+
+/** Ephemeral, content-free tool execution liveness for the broker watchdog. */
+export interface WorkerToolLifecycleEvent {
+  type: "tool_lifecycle";
+  phase: "start" | "progress" | "end";
+  toolCallId: string;
+  toolName: string;
+  at: string;
+}
+
+export type WorkerEvent = WorkerStatusEvent | WorkerToolLifecycleEvent;
 
 export interface WorkerSnapshot {
   record: AgentRecord;

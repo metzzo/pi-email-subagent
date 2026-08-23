@@ -197,6 +197,117 @@ describe("broker lifecycle races", () => {
     await restoring.shutdown();
   });
 
+  it("ignores lifecycle events retained from a replaced worker", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-stale-worker-"));
+    const workers: FakeWorker[] = [];
+    const broker = makeBroker(root, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    await broker.init();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.stale-tool@gpt-5.4.com", subject: "Run", message: "Keep the obligation open.", priority: "low",
+      });
+      const staleListener = [...workers[0]!.listeners][0]!;
+      await broker.restart(request.envelope.to);
+      const currentWatchdog = (broker as any).watchdogs.get(request.envelope.to);
+      assert.ok(currentWatchdog?.idle);
+      staleListener({
+        type: "tool_lifecycle", phase: "start", toolCallId: "stale", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      assert.equal((broker as any).watchdogs.get(request.envelope.to)?.generation, currentWatchdog.generation);
+      assert.equal((broker as any).watchdogs.get(request.envelope.to)?.idle, currentWatchdog.idle);
+      assert.equal((broker as any).toolLifecycles.get(request.envelope.to)?.worker, workers[1]);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("rejects an already-invalidated idle callback after a tool start wins the race", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-idle-race-"));
+    const worker = new FakeWorker();
+    const broker = makeBroker(root, () => worker);
+    await broker.init();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.idle-race@gpt-5.4.com",
+        subject: "Race",
+        message: "Start at the idle boundary.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 4_000, idleTimeoutMs: 2_000 },
+      });
+      const entry = (broker as any).watchdogs.get(request.envelope.to);
+      worker.emit({
+        type: "tool_lifecycle", phase: "start", toolCallId: "boundary", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      await (broker as any).expireWorker(
+        request.envelope.to,
+        entry.generation,
+        "LIFECYCLE_IDLE_TIMEOUT",
+        worker,
+        entry.idleGeneration,
+      );
+      assert.equal(broker.inspectAgent(request.envelope.to).state, "running");
+      assert.equal((broker as any).watchdogs.get(request.envelope.to)?.idle, undefined);
+      worker.emit({
+        type: "tool_lifecycle", phase: "end", toolCallId: "boundary", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      assert.ok((broker as any).watchdogs.get(request.envelope.to)?.idle);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("keeps a claimed run timeout terminal when a tool end arrives during cleanup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-run-race-"));
+    const abortEntered = deferred();
+    const releaseAbort = deferred();
+    class BlockingAbortWorker extends FakeWorker {
+      override async abort(): Promise<void> {
+        abortEntered.resolve();
+        await releaseAbort.promise;
+        await super.abort();
+      }
+    }
+    const worker = new BlockingAbortWorker();
+    const broker = makeBroker(root, () => worker);
+    await broker.init();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.run-race@gpt-5.4.com",
+        subject: "Race",
+        message: "End after timeout claim.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 10_000, idleTimeoutMs: 5_000 },
+      });
+      worker.emit({
+        type: "tool_lifecycle", phase: "start", toolCallId: "boundary", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      const entry = (broker as any).watchdogs.get(request.envelope.to);
+      const expiring = (broker as any).expireWorker(
+        request.envelope.to,
+        entry.generation,
+        "LIFECYCLE_RUN_TIMEOUT",
+        worker,
+      );
+      await abortEntered.promise;
+      worker.emit({
+        type: "tool_lifecycle", phase: "end", toolCallId: "boundary", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      assert.equal(broker.inspectAgent(request.envelope.to).state, "failed");
+      assert.match(broker.inspectAgent(request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
+      releaseAbort.resolve();
+      await expiring;
+      assert.match(broker.inspectAgent(request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
+      assert.equal((broker as any).watchdogs.has(request.envelope.to), false);
+    } finally {
+      releaseAbort.resolve();
+      await broker.shutdown();
+    }
+  });
+
   it("finishes stop bookkeeping even when worker abort rejects", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
     class RejectingAbortWorker extends FakeWorker {

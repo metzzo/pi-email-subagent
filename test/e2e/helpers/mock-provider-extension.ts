@@ -16,6 +16,7 @@
  *   user "E2E DELEGATE REVIEWER ..."                → send_email to the reviewer
  *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
  *   user "E2E DELEGATE WORK"                        → writable worker performs edit/write/bash
+ *   user "E2E WATCHDOG IDLE|RUN PATH <path>"         → writable worker runs a real silent Bash child
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
  *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
@@ -193,6 +194,23 @@ function planMain(messages: readonly Message[]): Plan {
       ],
     };
   }
+  if (lastText.includes("E2E WATCHDOG")) {
+    const mode = lastText.includes(" WATCHDOG RUN ") ? "RUN" : "IDLE";
+    const path = / PATH (\S+)/.exec(lastText)?.[1] ?? "/tmp/pi-email-watchdog-missing.json";
+    const lifecycle = mode === "RUN"
+      ? { runTimeoutMs: 2_500, idleTimeoutMs: 700 }
+      : { runTimeoutMs: 10_000, idleTimeoutMs: 700 };
+    return { toolCalls: [{
+      name: "send_email",
+      arguments: {
+        to: MOCK_WRITER_ADDRESS,
+        subject: `Verify ${mode.toLowerCase()} watchdog`,
+        message: `WATCHDOG ${mode} PATH ${path}`,
+        priority: "low",
+        lifecycle,
+      },
+    }] };
+  }
   if (lastText.includes("E2E RATE")) {
     return {
       toolCalls: RATE_ADDRESSES.map((to) => ({
@@ -235,6 +253,26 @@ function planWorker(messages: readonly Message[]): Plan {
 
   if (last?.role === "toolResult") {
     if (last.toolName === "fetch_emails") {
+      if (lastText.includes("WATCHDOG") && lastToolResultIndex(messages, "bash") < 0) {
+        const match = /WATCHDOG (IDLE|RUN) PATH ([^\s<]+)/.exec(lastText);
+        if (!match) return { text: "WORKER MISSING WATCHDOG PATH" };
+        const durationMs = match[1] === "RUN" ? 5_000 : 1_600;
+        const script = [
+          "const fs = require('node:fs');",
+          "const path = process.argv[1];",
+          "const durationMs = Number(process.argv[2]);",
+          "const startedMs = Date.now();",
+          "fs.writeFileSync(path, JSON.stringify({ startedMs }));",
+          "setTimeout(() => fs.writeFileSync(path, JSON.stringify({ startedMs, finishedMs: Date.now() })), durationMs);",
+        ].join("");
+        return { toolCalls: [{
+          name: "bash",
+          arguments: {
+            command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)} ${JSON.stringify(match[2])} ${durationMs}`,
+            timeout: 8,
+          },
+        }] };
+      }
       if (lastText.includes("WORK") && lastToolResultIndex(messages, "bash") < 0) {
         const paths = /WORK PATH ([^\s<]+) WRITE ([^\s<]+)/.exec(lastText);
         if (!paths) return { text: "WORKER MISSING PATHS" };

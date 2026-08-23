@@ -157,6 +157,154 @@ describe("initial delegation lifecycle", () => {
     }
   });
 
+  it("disarms idle while a known tool is active and rearms a full interval after its end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-active-tool-"));
+    const workers: FakeWorker[] = [];
+    const broker = await brokerWith(root, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.active-tool@gpt-5.4.com",
+        subject: "Long tool",
+        message: "Run a silent tool.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 500 },
+      });
+      workers[0]!.emit({
+        type: "tool_lifecycle", phase: "start", toolCallId: "bash-1", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      const watchdog = (broker as any).watchdogs.get(sent.envelope.to);
+      assert.ok(watchdog?.run, "absolute run timer remains armed");
+      assert.equal(watchdog?.idle, undefined, "active tool disarms only idle");
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
+
+      const endedAt = Date.now();
+      workers[0]!.emit({
+        type: "tool_lifecycle", phase: "end", toolCallId: "bash-1", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      assert.ok((broker as any).watchdogs.get(sent.envelope.to)?.idle, "last tool end rearms idle");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "last end receives a fresh idle interval");
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      assert.ok(Date.now() - endedAt >= 450, "idle expiry is measured from the last tool end");
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("waits for the last exact parallel tool-call ID and ignores duplicate or orphan boundaries", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-parallel-tools-"));
+    const workers: FakeWorker[] = [];
+    const broker = await brokerWith(root, () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    });
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.parallel-tools@gpt-5.4.com",
+        subject: "Parallel tools",
+        message: "Run two tools.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 4_000, idleTimeoutMs: 500 },
+      });
+      const emit = (phase: "start" | "progress" | "end", toolCallId: string) => workers[0]!.emit({
+        type: "tool_lifecycle", phase, toolCallId, toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      emit("start", "call-a");
+      emit("start", "call-a");
+      emit("start", "call-b");
+      emit("progress", "orphan");
+      emit("end", "orphan");
+      emit("end", "call-a");
+      emit("end", "call-a");
+      assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "remaining exact call keeps idle disarmed");
+      emit("end", "call-b");
+      assert.ok((broker as any).watchdogs.get(sent.envelope.to)?.idle);
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("captures a tool start emitted before watchdog installation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-pre-watchdog-tool-"));
+    class ImmediateToolWorker extends FakeWorker {
+      override async prompt(message: string): Promise<void> {
+        this.emit({
+          type: "tool_lifecycle", phase: "start", toolCallId: "early", toolName: "bash", at: new Date().toISOString(),
+        } as never);
+        await super.prompt(message);
+      }
+    }
+    const worker = new ImmediateToolWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.pre-watchdog@gpt-5.4.com",
+        subject: "Immediate tool",
+        message: "Start immediately.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 500 },
+      });
+      const watchdog = (broker as any).watchdogs.get(sent.envelope.to);
+      assert.ok(watchdog?.run);
+      assert.equal(watchdog?.idle, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
+      worker.emit({
+        type: "tool_lifecycle", phase: "end", toolCallId: "early", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("does not persist or publish content-free tool progress updates", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-progress-"));
+    const worker = new FakeWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.tool-progress@gpt-5.4.com",
+        subject: "Progress",
+        message: "Stream progress.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 500 },
+      });
+      worker.emit({
+        type: "tool_lifecycle", phase: "start", toolCallId: "stream", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      const adapter = (broker as any).options.mainAdapter as FakeMainAdapter;
+      let saves = 0;
+      const originalSave = broker.registryStore.save.bind(broker.registryStore);
+      broker.registryStore.save = async (registry) => { saves += 1; await originalSave(registry); };
+      const snapshots = adapter.snapshots.length;
+      for (let index = 0; index < 100; index += 1) {
+        worker.emit({
+          type: "tool_lifecycle",
+          phase: "progress",
+          toolCallId: "stream",
+          toolName: "bash",
+          at: new Date().toISOString(),
+        } as never);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(saves, 0);
+      assert.equal(adapter.snapshots.length, snapshots);
+      assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("fails and releases a hanging run at the absolute run deadline", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-run-"));
     const workers: FakeWorker[] = [];
@@ -173,6 +321,10 @@ describe("initial delegation lifecycle", () => {
         priority: "low",
         lifecycle: { runTimeoutMs: 300, idleTimeoutMs: 2_000 },
       });
+      workers[0]!.emit({
+        type: "tool_lifecycle", phase: "start", toolCallId: "hung-tool", toolName: "bash", at: new Date().toISOString(),
+      } as never);
+      assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
       await eventually(() => {
         const inspection = broker.inspectAgent(sent.envelope.to);
         assert.equal(inspection.state, "failed");
