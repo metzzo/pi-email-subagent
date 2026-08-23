@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { lock } from "proper-lockfile";
 import { errorMessage, nowIso } from "./util.ts";
@@ -47,6 +47,14 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+async function restrictMode(path: string, mode: number): Promise<void> {
+  try {
+    await chmod(path, mode);
+  } catch (error) {
+    if (process.platform === "linux") throw error;
+  }
+}
+
 async function ownerStillLive(owner: NamespaceOwner): Promise<boolean> {
   if (owner.bootId && owner.processStartTime) {
     try {
@@ -87,6 +95,19 @@ async function readOwner(path: string): Promise<NamespaceOwner | undefined> {
   }
 }
 
+async function replaceOwner(path: string, owner: NamespaceOwner): Promise<void> {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    await restrictMode(temp, 0o600);
+    await rename(temp, path);
+    await restrictMode(path, 0o600);
+  } catch (error) {
+    await unlink(temp).catch(() => undefined);
+    throw error;
+  }
+}
+
 export class NamespaceLock {
   private released = false;
 
@@ -103,6 +124,7 @@ export class NamespaceLock {
     onCompromised: (error: Error) => void,
   ): Promise<NamespaceLock> {
     await mkdir(namespaceDir, { recursive: true, mode: 0o700 });
+    await restrictMode(namespaceDir, 0o700);
     const ownerPath = join(namespaceDir, OWNER_FILE);
     const token = randomUUID();
     const [priorOwner, priorLockExists] = await Promise.all([
@@ -159,7 +181,7 @@ export class NamespaceLock {
       ...(identity ?? {}),
     };
     try {
-      await writeFile(ownerPath, `${JSON.stringify(owner, null, 2)}\n`, { mode: 0o600 });
+      await replaceOwner(ownerPath, owner);
       return new NamespaceLock(namespaceDir, abandonedOwner, ownerPath, owner, releaseLock);
     } catch (error) {
       await releaseLock().catch(() => undefined);

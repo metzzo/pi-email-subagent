@@ -1,4 +1,5 @@
-import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { appendFile, chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseSubagentAddressShape } from "./address.ts";
@@ -224,7 +225,7 @@ export class MailStore {
       }
     }
     if (repairedTrailingWrite) {
-      await writeFile(this.path, validLines.length > 0 ? `${validLines.join("\n")}\n` : "", { encoding: "utf8", mode: 0o600 });
+      await this.replaceJournal(validLines.length > 0 ? `${validLines.join("\n")}\n` : "");
     }
     try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
 
@@ -541,13 +542,26 @@ export class MailStore {
     return all.filter((email) => keep.has(email.id)).map(clone);
   }
 
+  protected async beforeJournalReplace(): Promise<void> {}
+
+  private async replaceJournal(payload: string): Promise<void> {
+    const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temp, payload, { encoding: "utf8", mode: 0o600, flag: "wx" });
+      try { await chmod(temp, 0o600); } catch { /* unsupported platform */ }
+      await this.beforeJournalReplace();
+      await rename(temp, this.path);
+      try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+    } catch (error) {
+      await unlink(temp).catch(() => undefined);
+      throw error;
+    }
+  }
+
   private async rewriteSnapshot(emails: readonly EmailEnvelope[]): Promise<void> {
     const events: MailEvent[] = emails.map((email) => ({ type: "email.created", email: clone(email) }));
     const payload = events.length > 0 ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
-    const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temp, payload, { encoding: "utf8", mode: 0o600 });
-    await rename(temp, this.path);
-    try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+    await this.replaceJournal(payload);
     this.emails.clear();
     for (const email of emails) this.emails.set(email.id, clone(email));
     this.eventCount = events.length;
