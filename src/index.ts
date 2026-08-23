@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Box, Key, Text } from "@earendil-works/pi-tui";
+import * as PiTui from "@earendil-works/pi-tui";
 import { makeMainAddress } from "./address.ts";
 import { AgentBroker } from "./broker.ts";
 import { isThinkingLevel, loadConfig } from "./config.ts";
@@ -22,6 +22,8 @@ import {
 } from "./ui.ts";
 import { errorMessage, truncateText } from "./util.ts";
 
+const { getAgentDir } = PiCodingAgent;
+const { Box, Key, Text } = PiTui;
 const MESSAGE_TYPE = "pi-email-subagent.email";
 const ALERT_TYPE = "pi-email-subagent.alert";
 

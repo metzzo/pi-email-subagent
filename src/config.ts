@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { parseSubagentAddressShape } from "./address.ts";
 import type { AddressConfig, LifecycleOverride, LifecyclePolicy, RoleConfig, SubagentConfig } from "./types.ts";
 
@@ -326,7 +326,7 @@ export function loadConfig(
   agentDir: string,
   cwd: string,
   projectTrusted: boolean,
-  configDirName = CONFIG_DIR_NAME,
+  configDirName = PiCodingAgent.CONFIG_DIR_NAME,
 ): LoadConfigResult {
   const warnings: string[] = [];
   let config = structuredClone(DEFAULT_CONFIG);
