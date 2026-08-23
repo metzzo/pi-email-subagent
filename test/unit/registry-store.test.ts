@@ -67,6 +67,38 @@ describe("registry schema", () => {
     assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);
   });
 
+  it("round-trips bounded cleanup quarantine and rejects malformed diagnostics", () => {
+    const base = record();
+    const now = new Date().toISOString();
+    (base as any).cleanup = {
+      state: "unknown",
+      reasonCode: "LIFECYCLE_RUN_TIMEOUT",
+      workerGeneration: 7,
+      startedAt: now,
+      updatedAt: now,
+      abort: "succeeded",
+      dispose: "succeeded",
+      quiescence: "unknown",
+      heldCapacity: true,
+      activeTools: [{ toolCallId: "call-1", toolName: "bash" }],
+      detail: "Pi 0.81.1 exposes no process-quiescence receipt.",
+    };
+    const parsed = parseRegistry({ ...registry(), agents: [base] });
+    assert.deepEqual((parsed.agents[0] as any).cleanup, (base as any).cleanup);
+
+    for (const cleanup of [
+      { ...(base as any).cleanup, state: "verified" },
+      { ...(base as any).cleanup, workerGeneration: -1 },
+      { ...(base as any).cleanup, startedAt: "not-a-time" },
+      { ...(base as any).cleanup, abort: "maybe" },
+      { ...(base as any).cleanup, heldCapacity: false },
+      { ...(base as any).cleanup, activeTools: [{ toolCallId: "x".repeat(201), toolName: "bash" }] },
+      { ...(base as any).cleanup, detail: "x".repeat(2_001) },
+    ]) {
+      assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, cleanup }] }), /cleanup/i);
+    }
+  });
+
   it("bounds registry work caches and rejects malformed or duplicate work IDs", () => {
     const base = record();
     const item = {

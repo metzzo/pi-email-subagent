@@ -76,6 +76,10 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} unanswered · ${inspection.pendingReplies} pending replies`,
           `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
         ];
+        if (inspection.cleanup) {
+          lines.push(`Cleanup: ${inspection.cleanup.state} · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved`);
+          lines.push(`Cleanup phases: abort ${inspection.cleanup.abort} · dispose ${inspection.cleanup.dispose} · generation ${inspection.cleanup.workerGeneration}`);
+        }
         if (inspection.failure) lines.push(`Last failure: ${inspection.failure}`);
         return textResult(lines.join("\n"), { inspection } satisfies InspectAgentToolDetails);
       } catch (error) {
@@ -175,7 +179,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "manage_agent",
     label: "Manage agent",
     description:
-      "Control an existing email agent without assigning work. Main-thread only. Stop, restart, safely archive a clean identity to free capacity, or clear a stale failure diagnostic. Sending email remains the only way to create agents or assign tasks.",
+      "Control an existing email agent without assigning work. Main-thread only. Stop, restart, safely archive a clean identity to free capacity, or clear a stale failure diagnostic. Unknown cleanup remains quarantined: restart/archive/clear-failure stay blocked, capacity is held, and queued mail is preserved. Sending email remains the only way to create agents or assign tasks.",
     promptSnippet: "Stop, restart, archive, or clear a failure on an existing subagent.",
     promptGuidelines: ["Archive clean completed identities instead of creating unlimited replacement addresses."],
     executionMode: "sequential" as const,

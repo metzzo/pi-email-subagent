@@ -301,14 +301,15 @@ describe("broker lifecycle races", () => {
       releaseAbort.resolve();
       await expiring;
       assert.match(broker.inspectAgent(request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
+      assert.equal(broker.inspectAgent(request.envelope.to).cleanup?.state, "unknown");
       assert.equal((broker as any).watchdogs.has(request.envelope.to), false);
     } finally {
       releaseAbort.resolve();
-      await broker.shutdown();
+      await broker.shutdown().catch(() => undefined);
     }
   });
 
-  it("finishes stop bookkeeping even when worker abort rejects", async () => {
+  it("quarantines stop when worker abort rejects", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
     class RejectingAbortWorker extends FakeWorker {
       override async abort(): Promise<void> { throw new Error("abort rejected"); }
@@ -324,15 +325,18 @@ describe("broker lifecycle races", () => {
       const request = await broker.send(broker.mainAddress, {
         to: "worker.abort-reject@gpt-5.4.com", subject: "Run", message: "Remain active.", priority: "low",
       });
-      await assert.rejects(broker.stop(request.envelope.to), /was stopped.*abort rejected/i);
+      await assert.rejects(broker.stop(request.envelope.to), /cleanup.*quarantin|quiescence.*unknown/i);
       assert.equal(workers[0]?.disposed, true);
-      assert.equal(broker.inspectAgent(request.envelope.to).state, "stopped");
+      const inspection = broker.inspectAgent(request.envelope.to);
+      assert.equal(inspection.state, "failed");
+      assert.equal(inspection.cleanup?.state, "unknown");
+      assert.equal((broker as any).active.has(request.envelope.to), true);
     } finally {
-      await broker.shutdown();
+      await broker.shutdown().catch(() => undefined);
     }
   });
 
-  it("restarts with consistent bookkeeping when prior worker disposal reports an error", async () => {
+  it("blocks restart when prior worker disposal reports an error", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-"));
     class RejectingDisposeWorker extends FakeWorker {
       override async dispose(): Promise<void> {
@@ -351,12 +355,14 @@ describe("broker lifecycle races", () => {
       const request = await broker.send(broker.mainAddress, {
         to: "worker.restart-cleanup@gpt-5.4.com", subject: "Run", message: "Restart safely.", priority: "low",
       });
-      await broker.restart(request.envelope.to);
-      assert.equal(workers.length, 2);
+      await assert.rejects(broker.restart(request.envelope.to), /cleanup.*quarantin|quiescence.*unknown/i);
+      assert.equal(workers.length, 1);
       assert.equal(workers[0]?.disposed, true);
-      assert.equal(broker.inspectAgent(request.envelope.to).state, "running");
+      const inspection = broker.inspectAgent(request.envelope.to);
+      assert.equal(inspection.state, "failed");
+      assert.equal(inspection.cleanup?.state, "unknown");
     } finally {
-      await broker.shutdown();
+      await broker.shutdown().catch(() => undefined);
     }
   });
 

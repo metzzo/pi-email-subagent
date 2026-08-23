@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_LIFECYCLE, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
-import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, LifecyclePolicy, UsageSnapshot, WorkItem } from "./types.ts";
+import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem } from "./types.ts";
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
 import { clone, nowIso } from "./util.ts";
 
@@ -13,6 +13,10 @@ const ACTIVITY_KINDS = new Set<ActivityItem["kind"]>(["status", "tool", "text", 
 const WORK_KINDS = new Set<WorkItem["kind"]>(["edit", "write", "shell", "custom"]);
 const WORK_STATUSES = new Set<WorkItem["status"]>(["running", "succeeded", "failed", "interrupted"]);
 const WORK_ATTRIBUTIONS = new Set<WorkItem["attribution"]>(["explicit", "unverified"]);
+const CLEANUP_STATES = new Set<CleanupDiagnostic["state"]>(["pending", "unknown"]);
+const CLEANUP_PHASES = new Set<CleanupDiagnostic["abort"]>(["pending", "succeeded", "failed", "timed-out"]);
+const MAX_CLEANUP_DETAIL_CHARS = 2_000;
+const MAX_CLEANUP_TOOLS = 64;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -162,6 +166,48 @@ function parseWork(value: unknown, label: string): AgentWorkState {
   return work;
 }
 
+function parseCleanup(value: unknown, label: string): CleanupDiagnostic | undefined {
+  if (value === undefined) return undefined;
+  const raw = object(value, label);
+  const state = string(raw.state, `${label}.state`) as CleanupDiagnostic["state"];
+  const abort = string(raw.abort, `${label}.abort`) as CleanupDiagnostic["abort"];
+  const dispose = string(raw.dispose, `${label}.dispose`) as CleanupDiagnostic["dispose"];
+  if (!CLEANUP_STATES.has(state)) throw new Error(`${label}.state is invalid.`);
+  if (!CLEANUP_PHASES.has(abort) || !CLEANUP_PHASES.has(dispose)) throw new Error(`${label} has an invalid cleanup phase.`);
+  if (raw.quiescence !== "unknown") throw new Error(`${label}.quiescence must be unknown while persisted.`);
+  if (raw.heldCapacity !== true) throw new Error(`${label}.heldCapacity must be true while cleanup is quarantined.`);
+  if (!Number.isSafeInteger(raw.workerGeneration) || (raw.workerGeneration as number) < 1) {
+    throw new Error(`${label}.workerGeneration must be a positive safe integer.`);
+  }
+  const reasonCode = string(raw.reasonCode, `${label}.reasonCode`);
+  if (reasonCode.length > 100) throw new Error(`${label}.reasonCode exceeds 100 characters.`);
+  if (!Array.isArray(raw.activeTools) || raw.activeTools.length > MAX_CLEANUP_TOOLS) {
+    throw new Error(`${label}.activeTools must be an array of at most ${MAX_CLEANUP_TOOLS} items.`);
+  }
+  const activeTools = raw.activeTools.map((item, index) => {
+    const tool = object(item, `${label}.activeTools[${index}]`);
+    const toolCallId = string(tool.toolCallId, `${label}.activeTools[${index}].toolCallId`);
+    const toolName = string(tool.toolName, `${label}.activeTools[${index}].toolName`);
+    if (toolCallId.length > 200 || toolName.length > 100) throw new Error(`${label}.activeTools identifiers exceed bounds.`);
+    return { toolCallId, toolName };
+  });
+  const detail = optionalString(raw.detail, `${label}.detail`);
+  if (detail && detail.length > MAX_CLEANUP_DETAIL_CHARS) throw new Error(`${label}.detail exceeds ${MAX_CLEANUP_DETAIL_CHARS} characters.`);
+  return {
+    state,
+    reasonCode,
+    workerGeneration: raw.workerGeneration as number,
+    startedAt: timestamp(raw.startedAt, `${label}.startedAt`),
+    updatedAt: timestamp(raw.updatedAt, `${label}.updatedAt`),
+    abort,
+    dispose,
+    quiescence: "unknown",
+    heldCapacity: true,
+    activeTools,
+    ...(detail ? { detail } : {}),
+  };
+}
+
 function parseRecord(value: unknown, index: number): AgentRecord {
   const label = `registry.agents[${index}]`;
   const raw = object(value, label);
@@ -195,6 +241,8 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     activity: parseActivity(raw.activity, `${label}.activity`),
     work: parseWork(raw.work, `${label}.work`),
   };
+  const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`);
+  if (cleanup) record.cleanup = cleanup;
   for (const [key, fieldLabel] of [
     ["instructions", `${label}.instructions`],
     ["sessionFile", `${label}.sessionFile`],

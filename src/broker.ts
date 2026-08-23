@@ -15,6 +15,7 @@ import { MAIL_TOOL_BATCH_BYTES, MAIL_TOOL_BATCH_LINES } from "./tool-result.ts";
 import type {
   AgentInspection,
   AgentRecord,
+  CleanupDiagnostic,
   BrokerOptions,
   BrokerRegistry,
   BrokerSnapshot,
@@ -25,6 +26,7 @@ import type {
   SendEmailResult,
   LifecyclePolicy,
   WaitForRepliesResult,
+  WorkerCleanupReport,
   WorkerEvent,
   WorkerToolLifecycleEvent,
   WorkerTransport,
@@ -89,6 +91,13 @@ function swallow(promise: Promise<unknown>): void {
   promise.catch(() => undefined);
 }
 
+class CleanupQuarantineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CleanupQuarantineError";
+  }
+}
+
 class LifecycleTimeoutError extends Error {
   constructor(readonly code: string, readonly timeoutMs: number, detail?: string) {
     super(`${code}: lifecycle deadline exceeded after ${timeoutMs}ms${detail ? ` (${detail})` : ""}`);
@@ -114,6 +123,11 @@ function containsLifecycleTimeout(error: unknown): boolean {
   return error instanceof AggregateError && error.errors.some(containsLifecycleTimeout);
 }
 
+function containsCleanupQuarantine(error: unknown): boolean {
+  if (error instanceof CleanupQuarantineError) return true;
+  return error instanceof AggregateError && error.errors.some(containsCleanupQuarantine);
+}
+
 interface WatchdogEntry {
   generation: number;
   worker: WorkerTransport;
@@ -122,6 +136,23 @@ interface WatchdogEntry {
   idleGeneration: number;
   run?: ReturnType<typeof setTimeout>;
   idle?: ReturnType<typeof setTimeout>;
+}
+
+interface WorkerCleanupLease {
+  address: string;
+  worker: WorkerTransport;
+  workerGeneration: number;
+  reasonCode: string;
+  startedAt: string;
+  activeToolsAtStart: ReadonlyArray<{ toolCallId: string; toolName: string }>;
+  heldActive: boolean;
+  mutationCapable: boolean;
+  targetState: "failed" | "stopped" | "paused" | "archived";
+  resumeAfterVerified: boolean;
+  callerDeadlineReached: boolean;
+  alerted: boolean;
+  operation: Promise<WorkerCleanupReport>;
+  settled: Promise<WorkerCleanupReport>;
 }
 
 interface ActiveToolCall {
@@ -154,6 +185,11 @@ export class AgentBroker {
   private readonly workers = new Map<string, WorkerTransport>();
   private readonly workerUnsubscribers = new Map<string, () => void>();
   private readonly provisionalWorkers = new Set<WorkerTransport>();
+  private readonly workerGenerations = new WeakMap<WorkerTransport, number>();
+  private readonly workerAddresses = new WeakMap<WorkerTransport, string>();
+  private readonly cleanupLeases = new Map<WorkerTransport, WorkerCleanupLease>();
+  private readonly cleanupQuarantines = new Map<string, WorkerCleanupLease>();
+  private nextWorkerGeneration = 0;
   private readonly addressTails = new Map<string, Promise<void>>();
   private readonly inFlightOperations = new Set<Promise<unknown>>();
   private readonly operationLabels = new WeakMap<Promise<unknown>, string>();
@@ -230,6 +266,19 @@ export class AgentBroker {
         const shape = parseSubagentAddressShape(loaded.address);
         const record = clone(loaded);
         record.address = shape.address;
+        if (record.cleanup) {
+          record.cleanup.state = "unknown";
+          record.cleanup.updatedAt = nowIso();
+          if (record.cleanup.abort === "pending") record.cleanup.abort = "timed-out";
+          if (record.cleanup.dispose === "pending") record.cleanup.dispose = "timed-out";
+          record.cleanup.detail = "Cleanup promise owner was lost across process restart; authoritative quiescence remains unknown.";
+          record.state = "failed";
+          const cleanupFailure = `Cleanup quarantine restored for worker generation ${record.cleanup.workerGeneration}; capacity held.`;
+          if (!record.failure) record.failure = cleanupFailure;
+          else if (!record.failure.includes("Cleanup quarantine")) record.failure = truncateText(`${record.failure}; ${cleanupFailure}`, 1_500);
+          record.currentActivity = cleanupFailure;
+          record.updatedAt = nowIso();
+        }
         record.name = shape.name;
         record.taskSlug = shape.taskSlug;
         try {
@@ -256,6 +305,7 @@ export class AgentBroker {
           record.updatedAt = nowIso();
           if (priorState !== "archived") startupFailures.push(`${record.address}: ${record.failure}`);
         }
+        if (record.cleanup) startupFailures.push(`${record.address}: cleanup quiescence unknown; capacity held and restoration blocked.`);
         this.records.set(record.address, record);
       }
 
@@ -305,7 +355,14 @@ export class AgentBroker {
       const registered = [...this.records.values()].filter((record) =>
         record.state !== "archived" && this.routableRecords.has(record.address));
       for (const record of registered.slice(0, this.options.config.maxAgents)) this.activationLeases.add(record.address);
+      for (const record of registered) {
+        if (record.cleanup) {
+          this.activationLeases.add(record.address);
+          this.active.add(record.address);
+        }
+      }
       for (const record of registered.slice(this.options.config.maxAgents)) {
+        if (record.cleanup) continue;
         record.state = "paused";
         this.interruptRecordWork(record);
         record.currentActivity = `Paused by maxAgents capacity (${this.options.config.maxAgents})`;
@@ -354,14 +411,18 @@ export class AgentBroker {
         this.disposed = true;
         this.lifecycleGeneration += 1;
       }
-      await this.disposeOwnedWorkers();
+      let cleanupError: unknown;
+      try { await this.disposeOwnedWorkers(); } catch (cleanupFailure) { cleanupError = cleanupFailure; }
       let releaseError: unknown;
-      if (!cancelled) {
-        try { await this.releaseNamespaceLock(); } catch (cleanupError) { releaseError = cleanupError; }
+      if (!cancelled && !cleanupError) {
+        try { await this.releaseNamespaceLock(); } catch (lockError) { releaseError = lockError; }
         this.lifecycle = "closed";
       }
-      if (releaseError) {
-        throw new AggregateError([error, releaseError], `Broker initialization and namespace-lock cleanup both failed.`);
+      if (cleanupError || releaseError) {
+        throw new AggregateError(
+          [error, ...(cleanupError ? [cleanupError] : []), ...(releaseError ? [releaseError] : [])],
+          `Broker initialization failed and cleanup could not prove safe namespace release.`,
+        );
       }
       throw error;
     }
@@ -369,6 +430,259 @@ export class AgentBroker {
 
   private interruptRecordWork(record: AgentRecord): void {
     if (record.work?.active.length) interruptActive(record.work);
+  }
+
+  private isMutationCapable(record: Pick<AgentRecord, "tools">): boolean {
+    return record.tools.some((tool) => tool === "bash" || tool === "edit" || tool === "write");
+  }
+
+  private mutationSchedulingQuarantined(record: Pick<AgentRecord, "tools">): boolean {
+    if (!this.isMutationCapable(record)) return false;
+    if ([...this.cleanupQuarantines.values()].some((lease) => lease.mutationCapable)) return true;
+    return [...this.records.values()].some((candidate) => candidate.cleanup && this.isMutationCapable(candidate));
+  }
+
+  private cleanupError(address: string): CleanupQuarantineError {
+    return new CleanupQuarantineError(
+      `${address} cleanup quiescence is unknown; cleanup quarantine holds capacity and blocks restart/archive and new mutable scheduling while queued mail is preserved.`,
+    );
+  }
+
+  private assertNoCleanupQuarantine(address: string): void {
+    if (this.cleanupQuarantines.has(address) || this.records.get(address)?.cleanup) throw this.cleanupError(address);
+  }
+
+  private workerGeneration(worker: WorkerTransport, address: string): number {
+    let generation = this.workerGenerations.get(worker);
+    if (!generation) {
+      generation = ++this.nextWorkerGeneration;
+      this.workerGenerations.set(worker, generation);
+      this.workerAddresses.set(worker, address);
+    }
+    return generation;
+  }
+
+  private cleanupDiagnostic(lease: WorkerCleanupLease): CleanupDiagnostic {
+    return {
+      state: "pending",
+      reasonCode: truncateText(lease.reasonCode.replace(/\s+/g, " "), 100),
+      workerGeneration: lease.workerGeneration,
+      startedAt: lease.startedAt,
+      updatedAt: lease.startedAt,
+      abort: "pending",
+      dispose: "pending",
+      quiescence: "unknown",
+      heldCapacity: true,
+      activeTools: lease.activeToolsAtStart.map((tool) => ({ ...tool })),
+    };
+  }
+
+  private beginWorkerCleanup(
+    address: string,
+    worker: WorkerTransport,
+    reasonCode: string,
+    targetState: WorkerCleanupLease["targetState"],
+    resumeAfterVerified = false,
+  ): WorkerCleanupLease {
+    const existing = this.cleanupLeases.get(worker);
+    if (existing) return existing;
+    const addressLease = this.cleanupQuarantines.get(address);
+    if (addressLease && addressLease.worker !== worker) throw this.cleanupError(address);
+    const record = this.records.get(address);
+    const tools = this.toolLifecycles.get(address);
+    const activeToolsAtStart = tools?.worker === worker
+      ? [...tools.calls].slice(0, 64).map(([toolCallId, call]) => ({
+        toolCallId: truncateText(toolCallId.replace(/\s+/g, " "), 200),
+        toolName: truncateText(call.toolName.replace(/\s+/g, " "), 100),
+      }))
+      : [];
+    const workerGeneration = this.workerGeneration(worker, address);
+    const lease: WorkerCleanupLease = {
+      address,
+      worker,
+      workerGeneration,
+      reasonCode,
+      startedAt: nowIso(),
+      activeToolsAtStart,
+      heldActive: this.active.has(address),
+      mutationCapable: record ? this.isMutationCapable(record) : true,
+      targetState,
+      resumeAfterVerified,
+      callerDeadlineReached: false,
+      alerted: false,
+      operation: undefined as never,
+      settled: undefined as never,
+    };
+
+    this.clearWatchdog(address);
+    this.clearToolLifecycle(address, worker);
+    if (this.workers.get(address) === worker) {
+      this.workerUnsubscribers.get(address)?.();
+      this.workerUnsubscribers.delete(address);
+      this.workers.delete(address);
+    }
+    if (record) {
+      this.syncWorker(address, worker);
+      this.interruptRecordWork(record);
+      record.cleanup = this.cleanupDiagnostic(lease);
+      record.currentActivity = `Cleanup pending; capacity held (generation ${workerGeneration})`;
+      record.updatedAt = nowIso();
+    }
+
+    const operation = Promise.resolve().then(() => worker.cleanup({
+      abortTimeoutMs: record?.lifecycle.abortTimeoutMs ?? this.options.config.lifecycle.abortTimeoutMs,
+    }));
+    lease.operation = operation;
+    this.cleanupLeases.set(worker, lease);
+    this.cleanupQuarantines.set(address, lease);
+    lease.settled = operation.then(
+      async (report) => {
+        const activeToolsVerified = lease.activeToolsAtStart.every((active) => report.tools.some((tool) =>
+          tool.toolCallId === active.toolCallId
+          && tool.toolName === active.toolName
+          && (tool.quiescence === "verified" || tool.quiescence === "not-applicable")));
+        if (report.quiescence === "verified" && activeToolsVerified) await this.releaseCleanupLease(lease, report);
+        else {
+          const toolCodes = [...new Set(report.tools.map((tool) => tool.detailCode).filter(Boolean))].slice(0, 8);
+          await this.markCleanupUnknown(
+            lease,
+            report.abort,
+            report.dispose,
+            `WORKER_CLEANUP_REPORT_UNKNOWN${toolCodes.length > 0 ? `: ${toolCodes.join(",")}` : ""}`,
+          );
+        }
+        return report;
+      },
+      async (error) => {
+        await this.markCleanupUnknown(lease, "failed", "failed", "WORKER_CLEANUP_REJECTED");
+        throw error;
+      },
+    );
+    lease.settled.catch(() => undefined);
+    if (!this.disposed) {
+      this.persistRegistry().catch((error) => {
+        this.options.mainAdapter.notifyFailure(`${address}: cleanup-pending persistence failed; in-memory safety lease remains held: ${errorMessage(error)}`);
+      });
+      this.publish();
+    }
+    return lease;
+  }
+
+  private async markCleanupUnknown(
+    lease: WorkerCleanupLease,
+    abort: CleanupDiagnostic["abort"],
+    dispose: CleanupDiagnostic["dispose"],
+    detail: string,
+  ): Promise<void> {
+    if (this.cleanupQuarantines.get(lease.address) !== lease) return;
+    const record = this.records.get(lease.address);
+    if (!record?.cleanup || record.cleanup.workerGeneration !== lease.workerGeneration) return;
+    record.cleanup = {
+      ...record.cleanup,
+      state: "unknown",
+      updatedAt: nowIso(),
+      abort,
+      dispose,
+      detail: truncateText(detail.replace(/\s+/g, " "), 500),
+    };
+    record.state = "failed";
+    const cleanupFailure = `Cleanup quarantine: quiescence unknown for worker generation ${lease.workerGeneration}; capacity held; ${truncateText(detail.replace(/\s+/g, " "), 500)}`;
+    if (!record.failure) record.failure = cleanupFailure;
+    else if (!record.failure.includes("Cleanup quarantine:")) record.failure = truncateText(`${record.failure}; ${cleanupFailure}`, 1_500);
+    record.currentActivity = cleanupFailure;
+    record.updatedAt = nowIso();
+    if (this.lifecycle !== "closed") await this.persistRegistry(this.lifecycle === "closing").catch((error) => {
+      this.options.mainAdapter.notifyFailure(`${lease.address}: cleanup quarantine persistence failed: ${errorMessage(error)}`);
+    });
+    if (!lease.alerted) {
+      lease.alerted = true;
+      this.options.mainAdapter.notifyFailure(`${lease.address}: ${cleanupFailure}`);
+    }
+    this.publish();
+  }
+
+  private async releaseCleanupLease(lease: WorkerCleanupLease, report: WorkerCleanupReport): Promise<void> {
+    if (report.quiescence !== "verified" || this.lifecycle === "closed" || this.cleanupQuarantines.get(lease.address) !== lease) return;
+    const record = this.records.get(lease.address);
+    if (!record?.cleanup || record.cleanup.workerGeneration !== lease.workerGeneration) return;
+    const previous = clone(record);
+    delete record.cleanup;
+    if (lease.targetState === "stopped") {
+      record.state = "stopped";
+      record.currentActivity = "Stopped after verified cleanup";
+      if (record.failure?.startsWith("Cleanup quarantine:")) delete record.failure;
+    } else if (lease.targetState === "archived") {
+      record.state = "archived";
+      record.currentActivity = "Archived after verified cleanup";
+    } else if (lease.targetState === "paused" && !["stopped", "archived"].includes(record.state)) {
+      record.state = "paused";
+      record.currentActivity = "Cleanup verified; worker paused";
+    }
+    if (lease.targetState !== "failed" && record.failure?.startsWith("Cleanup quarantine:")) delete record.failure;
+    record.updatedAt = nowIso();
+    try {
+      await this.persistRegistry(this.lifecycle === "closing");
+    } catch {
+      this.records.set(lease.address, previous);
+      await this.markCleanupUnknown(lease, "succeeded", "failed", "CLEANUP_RELEASE_PERSIST_FAILED");
+      throw this.cleanupError(lease.address);
+    }
+    this.cleanupQuarantines.delete(lease.address);
+    this.cleanupLeases.delete(lease.worker);
+    this.provisionalWorkers.delete(lease.worker);
+    if (lease.heldActive) this.active.delete(lease.address);
+    if (lease.targetState === "archived") {
+      this.activationLeases.delete(lease.address);
+      const pendingIndex = this.pendingStarts.indexOf(lease.address);
+      if (pendingIndex >= 0) this.pendingStarts.splice(pendingIndex, 1);
+    }
+    this.publish();
+    if (!this.disposed) this.pump();
+    if (lease.callerDeadlineReached && lease.resumeAfterVerified && !this.disposed) {
+      swallow(this.resumeReplacementAfterCleanup(lease.address));
+    }
+  }
+
+  private async resumeReplacementAfterCleanup(address: string): Promise<void> {
+    await this.withAddressOperation(address, async () => {
+      if (this.disposed || this.cleanupQuarantines.has(address) || this.workers.has(address)) return;
+      const record = this.records.get(address);
+      if (!record || record.cleanup || record.state !== "paused") return;
+      const parsed = parseSubagentAddress(address, this.catalog);
+      const worker = await this.createWorker(parsed, record, this.lifecycleGeneration);
+      if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
+      else if (this.mailStore.queued(address).length > 0) await this.schedule(address);
+      else this.syncWorker(address, worker);
+    });
+  }
+
+  private async waitForCleanup(lease: WorkerCleanupLease, timeoutMs: number): Promise<WorkerCleanupReport> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let outcome: { kind: "report"; report: WorkerCleanupReport } | { kind: "timeout" };
+    try {
+      outcome = await Promise.race([
+        lease.settled.then((report) => ({ kind: "report" as const, report })),
+        new Promise<{ kind: "timeout" }>((resolve) => {
+          timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+        }),
+      ]);
+    } catch {
+      throw this.cleanupError(lease.address);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (outcome.kind === "timeout") {
+      lease.callerDeadlineReached = true;
+      await this.markCleanupUnknown(
+        lease,
+        "timed-out",
+        "timed-out",
+        `LIFECYCLE_ABORT_TIMEOUT / LIFECYCLE_DISPOSE_TIMEOUT: cleanup operation remained unsettled after ${timeoutMs}ms; timeout did not cancel it.`,
+      );
+      throw new LifecycleTimeoutError("LIFECYCLE_DISPOSE_TIMEOUT", timeoutMs, "cleanup remains quarantined");
+    }
+    if (this.cleanupQuarantines.get(lease.address) === lease) throw this.cleanupError(lease.address);
+    return outcome.report;
   }
 
   private async restoreQueuedMainMail(generation: number): Promise<void> {
@@ -654,7 +968,11 @@ export class AgentBroker {
       this.validateDeliverySize(envelope);
       await this.withAddressOperation(to, async () => {
         const currentWorker = this.workers.get(to);
-        const steersImmediately = !toMain && input.priority === "high" && Boolean(currentWorker?.getSnapshot().isStreaming);
+        const currentRecord = this.records.get(to);
+        const steersImmediately = !toMain
+          && input.priority === "high"
+          && Boolean(currentWorker?.getSnapshot().isStreaming)
+          && !(currentRecord && this.mutationSchedulingQuarantined(currentRecord));
         if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
         this.takeRateQuota(sender);
         if (answeredEmailId) await this.mailStore.reserveReply(envelope, answeredEmailId);
@@ -686,8 +1004,11 @@ export class AgentBroker {
         recipientRecord = this.records.get(to);
       }
     } catch (error) {
-      // Lifecycle failures retain accepted queued/open mail for restart and diagnosis.
-      if (!(error instanceof LifecycleTimeoutError)) await this.failEnvelope(envelope, errorMessage(error));
+      // Lifecycle and cleanup-quarantine failures retain accepted queued/open
+      // mail for later verified recovery rather than fabricating terminal loss.
+      if (!(error instanceof LifecycleTimeoutError) && !(error instanceof CleanupQuarantineError)) {
+        await this.failEnvelope(envelope, errorMessage(error));
+      }
       this.scheduleMailMaintenance();
       this.publish();
       throw new Error(`Email ${envelope.id} was persisted but delivery failed: ${errorMessage(error)}`);
@@ -740,6 +1061,7 @@ export class AgentBroker {
     disposition: SendEmailResult["recipientDisposition"];
   }> {
     return this.withAddressOperation(parsed.address, async () => {
+      this.assertNoCleanupQuarantine(parsed.address);
       const existingWorker = this.workers.get(parsed.address);
       if (existingWorker) {
         await this.routeToWorker(envelope, existingWorker);
@@ -747,6 +1069,8 @@ export class AgentBroker {
       }
       const record = this.records.get(parsed.address);
       if (record?.state === "stopped") return { spawned: false, disposition: "stopped" as const };
+      const profile = record ?? { tools: resolveAgentProfile(this.options.config, parsed.address, parsed.name).tools };
+      if (this.mutationSchedulingQuarantined(profile)) throw this.cleanupError(parsed.address);
       const restoringArchive = record?.state === "archived";
       if (!this.activationLeases.has(parsed.address)) {
         if (this.activeIdentityCount() >= this.options.config.maxAgents) {
@@ -847,8 +1171,13 @@ export class AgentBroker {
     try {
       worker = await bounded(factoryPromise, record.lifecycle.spawnTimeoutMs, "LIFECYCLE_SPAWN_TIMEOUT");
     } catch (error) {
-      // If a timed-out factory eventually returns a worker, dispose it without reopening capacity.
-      swallow(factoryPromise.then((late) => bounded(late.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT")));
+      // A late factory result is still owned: register one cleanup lease rather
+      // than treating the factory deadline as cancellation.
+      swallow(factoryPromise.then(async (late) => {
+        this.workerGeneration(late, record.address);
+        const lease = this.beginWorkerCleanup(record.address, late, "LIFECYCLE_SPAWN_TIMEOUT", "failed");
+        await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
+      }));
       if (!this.cancelled(generation)) {
         record.state = "failed";
         record.failure = errorMessage(error);
@@ -858,8 +1187,10 @@ export class AgentBroker {
       }
       throw error;
     }
+    this.workerGeneration(worker, record.address);
     if (this.cancelled(generation)) {
-      await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT").catch(() => undefined);
+      const lease = this.beginWorkerCleanup(record.address, worker, "BROKER_START_CANCELLED", "paused");
+      await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs).catch(() => undefined);
       throw new Error("Worker creation was cancelled by broker shutdown.");
     }
     this.provisionalWorkers.add(worker);
@@ -903,7 +1234,11 @@ export class AgentBroker {
         record.failure = errorMessage(error);
         record.updatedAt = nowIso();
       }
-      await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT").catch(() => undefined);
+      const cleanupLease = this.beginWorkerCleanup(record.address, worker, "WORKER_START_FAILED", "failed");
+      await this.waitForCleanup(
+        cleanupLease,
+        record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs,
+      ).catch(() => undefined);
       if (!this.cancelled(generation)) {
         await this.persistRegistry();
         this.publish();
@@ -1043,16 +1378,11 @@ export class AgentBroker {
       }
     }
 
-    // Claim the generation synchronously before cleanup awaits. Later tool
-    // boundaries cannot revive a terminal timeout.
+    // Claim the generation synchronously before cleanup awaits. Routing is
+    // detached by the one cleanup lease, while active capacity remains held.
     this.clearWatchdog(address);
-    this.clearToolLifecycle(address, worker);
     const record = this.records.get(address);
     if (!record) return;
-    this.workerUnsubscribers.get(address)?.();
-    this.workerUnsubscribers.delete(address);
-    this.workers.delete(address);
-    this.active.delete(address);
     record.state = "failed";
     this.interruptRecordWork(record);
     const now = Date.now();
@@ -1064,15 +1394,15 @@ export class AgentBroker {
     record.failure = `${code}: lifecycle watchdog expired (generation=${generation}; ${elapsed}; activeToolCount=${activeCalls.size}${activeTools.length > 0 ? `; activeTools=${activeTools.join(",")}` : ""})`;
     record.currentActivity = record.failure;
     record.updatedAt = nowIso();
-    let cleanup = "";
-    try { await bounded(worker.abort(), record.lifecycle.abortTimeoutMs, "LIFECYCLE_ABORT_TIMEOUT"); }
-    catch (error) { cleanup = `; abort cleanup: ${errorMessage(error)}`; }
-    try { await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT"); }
-    catch (error) { cleanup += `; dispose cleanup: ${errorMessage(error)}`; }
-    if (cleanup) record.failure += cleanup;
+    const lease = this.beginWorkerCleanup(address, worker, code, "failed");
     await this.persistRegistry();
     this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
-    this.pump();
+    try {
+      await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
+    } catch {
+      // The cleanup observer persists a sticky quarantine and continues to own
+      // late settlement. Timeout is deliberately not treated as cancellation.
+    }
     this.publish();
   }
 
@@ -1108,8 +1438,6 @@ export class AgentBroker {
       record.state = event.state;
     }
     if (event.type === "failure" && event.error) {
-      this.clearWatchdog(address);
-      this.clearToolLifecycle(address, worker);
       const shouldNotify = record.state !== "failed" || record.failure !== event.error;
       record.state = "failed";
       this.interruptRecordWork(record);
@@ -1118,8 +1446,11 @@ export class AgentBroker {
       record.activity.push({ at: nowIso(), kind: "error", summary: event.error });
       record.activity = record.activity.slice(-40);
       record.updatedAt = nowIso();
-      this.active.delete(address);
-      this.persistRegistry().then(() => this.pump(), () => this.pump());
+      const lease = this.beginWorkerCleanup(address, worker, "WORKER_FAILURE", "failed");
+      swallow(this.waitForCleanup(
+        lease,
+        record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs,
+      ).catch(() => undefined));
       if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${event.error}`);
       this.publish();
       return;
@@ -1146,6 +1477,8 @@ export class AgentBroker {
   }
 
   private async routeToWorker(envelope: EmailEnvelope, worker: WorkerTransport): Promise<void> {
+    const record = this.records.get(envelope.to);
+    if (record && this.mutationSchedulingQuarantined(record)) return;
     const snapshot = worker.getSnapshot();
     if (snapshot.record.state === "stopped") return;
     if (snapshot.isStreaming) {
@@ -1215,9 +1548,14 @@ export class AgentBroker {
     if (this.pendingStarts.length === 0) return undefined;
     const ranked = this.pendingStarts
       .map((address, index) => ({ address, index, rank: this.pendingRank(address) }))
+      .filter(({ address }) => {
+        const record = this.records.get(address);
+        return !record || !this.mutationSchedulingQuarantined(record);
+      })
       .sort((left, right) => left.rank[0] - right.rank[0]
         || left.rank[1].localeCompare(right.rank[1])
-        || left.rank[2].localeCompare(right.rank[2]))[0]!;
+        || left.rank[2].localeCompare(right.rank[2]))[0];
+    if (!ranked) return undefined;
     this.pendingStarts.splice(ranked.index, 1);
     return ranked.address;
   }
@@ -1227,6 +1565,12 @@ export class AgentBroker {
     const worker = this.workers.get(address);
     const record = this.records.get(address);
     if (!worker || !record || ["stopped", "failed"].includes(record.state)) return;
+    if (this.mutationSchedulingQuarantined(record)) {
+      this.enqueueStart(address);
+      await this.persistRegistry();
+      this.publish();
+      return;
+    }
     const pending = this.mailStore.queued(address);
     const queued = this.selectBatch(pending);
     if (queued.length === 0) {
@@ -1303,6 +1647,12 @@ export class AgentBroker {
     const record = this.records.get(address);
     const outstanding = this.fetchUnanswered(address);
     if (!worker || !record || outstanding.length === 0 || ["stopped", "failed"].includes(record.state)) return;
+    if (this.mutationSchedulingQuarantined(record)) {
+      this.enqueueStart(address);
+      await this.persistRegistry();
+      this.publish();
+      return;
+    }
     if (this.active.size >= this.options.config.maxConcurrent) {
       this.enqueueStart(address);
       return;
@@ -1449,37 +1799,20 @@ export class AgentBroker {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
       if (record.state === "archived") throw new Error(`Agent ${address} is archived.`);
-      let cleanupError: unknown;
-      this.clearWatchdog(address);
-      this.clearToolLifecycle(address, worker);
-      if (worker) {
-        this.syncWorker(address, worker);
-        try {
-          await bounded(worker.abort(), record.lifecycle.abortTimeoutMs, "LIFECYCLE_ABORT_TIMEOUT");
-        } catch (error) {
-          cleanupError = error;
-        } finally {
-          this.workerUnsubscribers.get(address)?.();
-          this.workerUnsubscribers.delete(address);
-          this.workers.delete(address);
-          try {
-            await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT");
-          } catch (error) {
-            cleanupError ??= error;
-          }
-        }
+      if (!worker) {
+        this.assertNoCleanupQuarantine(address);
+        this.active.delete(address);
+        record.state = "stopped";
+        record.currentActivity = "Stopped by user";
+        record.updatedAt = nowIso();
+        await this.persistRegistry();
+        this.pump();
+        this.publish();
+        return;
       }
+      const lease = this.beginWorkerCleanup(address, worker, "MANUAL_STOP", "stopped");
+      await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
       this.assertActive();
-      this.active.delete(address);
-      record.state = "stopped";
-      this.interruptRecordWork(record);
-      if (cleanupError) record.failure = `Stop cleanup reported: ${errorMessage(cleanupError)}`;
-      record.currentActivity = cleanupError ? `Stopped after abort error: ${errorMessage(cleanupError)}` : "Stopped by user";
-      record.updatedAt = nowIso();
-      await this.persistRegistry();
-      this.pump();
-      this.publish();
-      if (cleanupError) throw new Error(`Agent was stopped, but cleanup reported: ${errorMessage(cleanupError)}`);
     });
   }
 
@@ -1488,6 +1821,7 @@ export class AgentBroker {
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
+      this.assertNoCleanupQuarantine(address);
       const parsed = parseSubagentAddress(address, this.catalog);
       if (!this.activationLeases.has(address)) {
         if (this.activeIdentityCount() >= this.options.config.maxAgents) {
@@ -1496,29 +1830,16 @@ export class AgentBroker {
         this.activationLeases.add(address);
       }
       const old = this.workers.get(address);
-      this.clearWatchdog(address);
-      this.clearToolLifecycle(address, old);
-      this.workerUnsubscribers.get(address)?.();
-      this.workerUnsubscribers.delete(address);
-      this.workers.delete(address);
-      let cleanupError: unknown;
       if (old) {
-        try { await bounded(old.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT"); } catch (error) { cleanupError = error; }
+        const lease = this.beginWorkerCleanup(address, old, "MANUAL_RESTART", "paused", true);
+        await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
       }
       this.assertActive();
-      this.active.delete(address);
       record.state = "paused";
       this.interruptRecordWork(record);
       delete record.failure;
       record.enforcementAttempts = 0;
       await this.createWorker(parsed, record, this.lifecycleGeneration);
-      if (cleanupError) {
-        const warning = `Previous worker cleanup reported during restart: ${errorMessage(cleanupError)}`;
-        record.activity.push({ at: nowIso(), kind: "error", summary: warning });
-        record.activity = record.activity.slice(-40);
-        await this.persistRegistry();
-        this.options.mainAdapter.notifyFailure(`${address}: ${warning}`);
-      }
       if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
       else if (this.mailStore.queued(address).length > 0) await this.schedule(address);
       this.publish();
@@ -1587,6 +1908,7 @@ export class AgentBroker {
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
+      this.assertNoCleanupQuarantine(address);
       if (record.state === "archived") return;
       const worker = this.workers.get(address);
       if (record.state === "running" || record.state === "spawning" || worker?.getSnapshot().isStreaming) {
@@ -1599,14 +1921,11 @@ export class AgentBroker {
           || Boolean(email.replyReservedBy))),
       );
       if (obligated) throw new Error("Agent has queued mail or unanswered obligations and cannot be archived.");
-      this.clearWatchdog(address);
-      this.clearToolLifecycle(address, worker);
-      this.workerUnsubscribers.get(address)?.();
-      this.workerUnsubscribers.delete(address);
-      this.workers.delete(address);
-      let cleanupError: unknown;
       if (worker) {
-        try { await bounded(worker.dispose(), record.lifecycle.disposeTimeoutMs, "LIFECYCLE_DISPOSE_TIMEOUT"); } catch (error) { cleanupError = error; }
+        const lease = this.beginWorkerCleanup(address, worker, "MANUAL_ARCHIVE", "archived");
+        await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
+        this.assertActive();
+        return;
       }
       this.assertActive();
       this.active.delete(address);
@@ -1620,7 +1939,6 @@ export class AgentBroker {
       await this.persistRegistry();
       this.pump();
       this.publish();
-      if (cleanupError) throw new Error(`Agent was archived, but cleanup reported: ${errorMessage(cleanupError)}`);
     });
   }
 
@@ -1629,6 +1947,7 @@ export class AgentBroker {
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
+      this.assertNoCleanupQuarantine(address);
       if (!["idle", "stopped", "archived"].includes(record.state)) {
         throw new Error("Failure can only be cleared while the agent is idle, stopped, or archived.");
       }
@@ -1675,6 +1994,8 @@ export class AgentBroker {
       exists: Boolean(record),
       wouldSpawn: !record,
       capacityAvailable: (!record || this.routableRecords.has(address))
+        && !record?.cleanup
+        && !this.mutationSchedulingQuarantined({ tools })
         && (this.activationLeases.has(address) || this.activeIdentityCount() < this.options.config.maxAgents),
       modelId: record?.modelId ?? parsed!.model.id,
       provider: record?.provider ?? parsed!.model.provider,
@@ -1693,6 +2014,7 @@ export class AgentBroker {
       pendingReplies: mail.filter((email) => email.to === address && Boolean(email.replyReservedBy) && !email.answeredAt).length,
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
+      ...(record?.cleanup ? { cleanup: clone(record.cleanup) } : {}),
       providerReady: this.workers.has(address) ? "available" : "unknown",
       lifecycle: clone(record?.lifecycle ?? resolveLifecycle(this.options.config, address, name)),
     };
@@ -1884,10 +2206,16 @@ export class AgentBroker {
 
   private async disposeOwnedWorkers(maximumTimeoutMs = Number.MAX_SAFE_INTEGER): Promise<void> {
     const committed = new Map(this.workers);
-    const allWorkers = new Set<WorkerTransport>([...committed.values(), ...this.provisionalWorkers]);
-    for (const [address, worker] of committed) {
-      this.clearWatchdog(address);
-      this.clearToolLifecycle(address, worker);
+    const allWorkers = new Set<WorkerTransport>([
+      ...committed.values(),
+      ...this.provisionalWorkers,
+      ...this.cleanupLeases.keys(),
+    ]);
+    const leases: WorkerCleanupLease[] = [];
+    for (const worker of allWorkers) {
+      const address = [...committed].find(([, candidate]) => candidate === worker)?.[0]
+        ?? this.workerAddresses.get(worker);
+      if (!address) continue;
       const record = this.records.get(address);
       if (record && !["stopped", "failed", "archived"].includes(record.state)) {
         this.syncWorker(address, worker);
@@ -1895,20 +2223,17 @@ export class AgentBroker {
         this.interruptRecordWork(record);
         record.updatedAt = nowIso();
       }
-      this.workerUnsubscribers.get(address)?.();
+      leases.push(this.beginWorkerCleanup(address, worker, "BROKER_SHUTDOWN", "paused"));
     }
-    this.workers.clear();
-    this.workerUnsubscribers.clear();
-    this.toolLifecycles.clear();
-    this.active.clear();
-    const results = await Promise.allSettled([...allWorkers].map((worker) => {
-      const address = [...committed].find(([, candidate]) => candidate === worker)?.[0];
-      const timeout = Math.min(maximumTimeoutMs, (address ? this.records.get(address)?.lifecycle.disposeTimeoutMs : undefined)
-        ?? this.options.config.lifecycle.disposeTimeoutMs);
-      return bounded(worker.dispose(), timeout, "LIFECYCLE_DISPOSE_TIMEOUT");
+    const results = await Promise.allSettled(leases.map((lease) => {
+      const record = this.records.get(lease.address);
+      const configured = (record?.lifecycle.abortTimeoutMs ?? this.options.config.lifecycle.abortTimeoutMs)
+        + (record?.lifecycle.disposeTimeoutMs ?? this.options.config.lifecycle.disposeTimeoutMs);
+      return this.waitForCleanup(lease, Math.max(1, Math.min(maximumTimeoutMs, configured)));
     }));
-    for (const worker of allWorkers) this.provisionalWorkers.delete(worker);
-    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map((result) => result.reason);
+    const failures = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
     if (failures.length > 0) throw new AggregateError(failures, failures.map(errorMessage).join("; "));
   }
 
@@ -1931,7 +2256,9 @@ export class AgentBroker {
     for (const operation of [...this.addressTails.values(), ...this.inFlightOperations]) operation.catch(() => undefined);
 
     const failures: unknown[] = [];
-    let quiescenceKnown = true;
+    const persistedCleanup = [...this.records.values()].find((record) => record.cleanup && !this.cleanupQuarantines.has(record.address));
+    let quiescenceKnown = !persistedCleanup;
+    if (persistedCleanup) failures.push(this.cleanupError(persistedCleanup.address));
     const shutdownMs = this.options.config.lifecycle.brokerShutdownTimeoutMs;
     const deadline = Date.now() + shutdownMs;
     const lockReleaseReserveMs = Math.min(50, Math.max(1, Math.floor(shutdownMs / 5)));
@@ -1959,6 +2286,7 @@ export class AgentBroker {
           }
           quiescenceKnown = false;
         }
+        if (containsCleanupQuarantine(error)) quiescenceKnown = false;
       }
     };
 

@@ -28,6 +28,8 @@ Tools: read, grep, find, ls, send_email, fetch_emails
 Capacity available: yes
 Mailbox: 0 queued · 1 unanswered · 0 pending replies
 Lifecycle: {"spawnTimeoutMs":30000,...}
+Cleanup: unknown · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved
+Cleanup phases: abort succeeded · dispose succeeded · generation 7
 Last failure: …            (only when present)
 ```
 
@@ -45,6 +47,7 @@ Last failure: …            (only when present)
 | `queued` / `unanswered` / `pendingReplies` | Mailbox counts: queued inbound, open obligations to it, replies reserved but not yet delivered |
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
+| `cleanup` | Optional persisted cleanup quarantine: pending/unknown state, worker generation, abort/dispose phases, unknown quiescence, held capacity, bounded active tool IDs/names, and non-sensitive detail |
 | `providerReady` | `available` when a live worker exists, else `unknown` |
 | `lifecycle` | Exact persisted policy for an existing identity, or currently resolved configured defaults for a prospective one |
 
@@ -54,3 +57,4 @@ Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true
 
 - Call before delegating when recipient capability is uncertain — in particular before authorizing repository changes, to confirm the address is actually writable.
 - Also useful before spawning to check `capacityAvailable` when several agents are already active.
+- When `cleanup` is present, do not interpret a detached worker or elapsed deadline as safety. Restart, archive, and clear-failure remain blocked; accepted mail is queued until affirmative quiescence is available.

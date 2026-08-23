@@ -459,7 +459,11 @@ describe("broker hardening", () => {
         to: "worker.clear-failure@gpt-5.4.com", subject: "Fail", message: "Simulate failure.", priority: "low",
       });
       workers[0]!.fail("provider unavailable");
-      await eventually(() => assert.equal(broker.inspectAgent(request.envelope.to).state, "failed"));
+      await eventually(() => {
+        const inspection = broker.inspectAgent(request.envelope.to);
+        assert.equal(inspection.state, "failed");
+        assert.equal(inspection.cleanup, undefined);
+      });
       await assert.rejects(broker.clearFailure(request.envelope.to), /idle, stopped, or archived/);
       await broker.stop(request.envelope.to);
       await broker.clearFailure(request.envelope.to);

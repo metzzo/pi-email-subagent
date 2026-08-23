@@ -27,6 +27,59 @@ describe("SDK worker failures", () => {
     assert.equal(effectiveWorkerModel(parent), parent);
   });
 
+  it("reuses one cleanup operation and reports active tool quiescence as unknown without a Pi receipt", async () => {
+    const worker = new SdkWorker({} as never);
+    let aborts = 0;
+    let disposals = 0;
+    let unsubscribes = 0;
+    const session = {
+      isStreaming: true,
+      abort: async () => { aborts += 1; },
+      dispose: () => { disposals += 1; },
+    };
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as {
+      session: typeof session;
+      record: typeof record;
+      cwd: string;
+      unsubscribeSession: () => void;
+      onSessionEvent(event: unknown): void;
+    };
+    internal.session = session;
+    internal.record = record;
+    internal.cwd = "/work";
+    internal.unsubscribeSession = () => { unsubscribes += 1; };
+    const observed: any[] = [];
+    worker.subscribe((event) => observed.push(event));
+    internal.onSessionEvent({
+      type: "tool_execution_start",
+      toolCallId: "bash-active",
+      toolName: "bash",
+      args: { command: "PRIVATE CLEANUP COMMAND" },
+    });
+
+    const first = (worker as any).cleanup({ abortTimeoutMs: 500 });
+    const second = (worker as any).cleanup({ abortTimeoutMs: 500 });
+    assert.equal(first, second, "repeated cleanup joins the exact same promise");
+    const report = await first;
+    assert.equal(aborts, 1);
+    assert.equal(disposals, 1);
+    assert.equal(unsubscribes, 1);
+    assert.equal(report.sessionDisposed, true);
+    assert.equal(report.providerQuiescent, true);
+    assert.equal(report.quiescence, "unknown");
+    assert.deepEqual(report.tools, [{
+      toolCallId: "bash-active",
+      toolName: "bash",
+      quiescence: "unknown",
+      detailCode: "PI_TOOL_QUIESCENCE_RECEIPT_UNAVAILABLE",
+    }]);
+    assert.doesNotMatch(JSON.stringify(report), /PRIVATE|command|args|output/i);
+    const before = observed.length;
+    internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "bash-active", toolName: "bash", result: {}, isError: false });
+    assert.equal(observed.length, before, "cleanup suppresses all later worker events");
+  });
+
   it("always unsubscribes and disposes a session when abort rejects", async () => {
     const worker = new SdkWorker({} as never);
     let unsubscribed = false;

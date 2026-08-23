@@ -8,6 +8,8 @@ import type {
   MainDelivery,
   SendEmailInput,
   SendEmailResult,
+  WorkerCleanupOptions,
+  WorkerCleanupReport,
   WorkerEvent,
   WorkerSnapshot,
   WorkerStartConfig,
@@ -63,6 +65,7 @@ export class FakeWorker implements WorkerTransport {
   streaming = false;
   idle = true;
   listeners = new Set<(event: WorkerEvent) => void>();
+  private cleanupPromise?: Promise<WorkerCleanupReport>;
 
   async start(config: WorkerStartConfig): Promise<void> {
     this.config = config;
@@ -95,6 +98,29 @@ export class FakeWorker implements WorkerTransport {
   }
 
   async dispose(): Promise<void> { this.disposed = true; this.listeners.clear(); }
+
+  cleanup(_options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
+    if (this.cleanupPromise) return this.cleanupPromise;
+    this.cleanupPromise = (async () => {
+      let abort: WorkerCleanupReport["abort"] = "succeeded";
+      let dispose: WorkerCleanupReport["dispose"] = "succeeded";
+      let detail: string | undefined;
+      try { await this.abort(); } catch (error) { abort = "failed"; detail = error instanceof Error ? error.message : String(error); }
+      try { await this.dispose(); } catch (error) { dispose = "failed"; detail ??= error instanceof Error ? error.message : String(error); }
+      const quiescence = abort === "succeeded" && dispose === "succeeded" ? "verified" as const : "unknown" as const;
+      return {
+        sessionDisposed: dispose === "succeeded",
+        providerQuiescent: abort === "succeeded",
+        tools: [],
+        quiescence,
+        source: "fake-worker-cleanup-receipt",
+        abort,
+        dispose,
+        ...(detail ? { detail } : {}),
+      };
+    })();
+    return this.cleanupPromise;
+  }
 
   setEffort(level: AgentRecord["effort"]): void {
     if (!this.idle) throw new Error("not idle");
