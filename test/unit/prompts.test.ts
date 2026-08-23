@@ -84,6 +84,11 @@ describe("mail prompts", () => {
     assert.match(prompt, /capability is uncertain.*inspect_agent/i);
     assert.match(prompt, /Never invent.*mail ID.*expected reply subject/i);
     assert.match(prompt, /wait_for_replies.*instead of polling/i);
+    assert.match(prompt, /bounded (observation|collection) window/i);
+    assert.match(prompt, /late replies.*delivered automatically/i);
+    assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
+    assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
+    assert.match(prompt, /continue useful work or end the turn/i);
     assert.match(prompt, /archive clean.*identities/i);
   });
 

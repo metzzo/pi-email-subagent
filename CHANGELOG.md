@@ -31,6 +31,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - When an enabled model ID exists under multiple providers, email routing prefers the main session's current provider and remains fail-closed when that does not uniquely resolve the model.
 - Active tool calls now disarm only the idle watchdog until the last exact parallel call ends; the finite absolute run deadline remains unchanged, and tool progress liveness carries no arguments or output.
 - Stop/restart/archive now require affirmative cleanup confidence instead of treating abort/dispose caller deadlines as cancellation. Pi 0.81.1 active-tool cleanup remains explicitly unknown because its public API exposes no process-quiescence receipt.
+- Timed-out `wait_for_replies` results, tool metadata, coordinator guidance, and documentation now explain that pending requests remain correlated and late replies arrive automatically; immediate keepalive-style rejoins are discouraged while deliberate synchronous rejoins remain supported.
 
 ### Security
 

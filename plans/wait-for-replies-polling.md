@@ -1,7 +1,7 @@
 # `wait_for_replies` Timeout and Immediate-Rejoin Plan
 
 Date: 2026-08-23
-Status: proposed — test-first implementation not started
+Status: completed — smallest messaging release implemented and deterministically validated
 Priority: P2 product guidance / coordination-efficiency improvement
 Classification: high-frequency, by-design UX friction; **not currently a correctness defect, lost-delivery defect, or extension-load failure**
 
@@ -16,6 +16,17 @@ Start with the smallest change that can address the observed behavior:
 
 Do **not** add a background waiter, unbounded join, polling loop, continuation token, new durable state, or new orchestration tool in the initial release. Consider new waiting machinery only if the messaging release passes its contract tests but a deterministic acceptance scenario still demonstrates a product requirement that automatic late delivery cannot satisfy.
 
+## Implementation result
+
+Completed on 2026-08-23 as the messaging-only first release:
+
+- `wait_for_replies` now adds one bounded paragraph only when `timedOut: true` still contains pending items. It states durable correlation, automatic late delivery (including after restoration), no keepalive need, and optional deliberate synchronous rejoin.
+- Tool metadata, the main coordinator prompt, detailed documentation, and the package overview use the same observation-window guidance.
+- Broker characterization covers zero-timeout and abort followed by one ordinary exact-correlated `triggerTurn: true` delivery, plus the existing in-flight claimed-commit no-duplicate race.
+- A real Pi 0.81.1 RPC scenario parses canonical tool/message events and the mail journal to prove one timed-out wait, main-turn completion without rejoin, one late reply-triggered turn, and one authoritative answer transition.
+- Tool schema, 120-second default, 300-second maximum, sequential execution, collector/journal semantics, and structured result shape are unchanged. No waiting machinery or runtime telemetry was added.
+- The supplied historical audit was not rerun, and no post-release organic improvement rate is claimed.
+
 ## Audit evidence
 
 The structured-history audit supplied for this issue found:
@@ -26,7 +37,7 @@ The structured-history audit supplied for this issue found:
 
 Those figures came from the canonical structured history rather than text matching. They are audit inputs to this plan; this planning pass did not rerun or recalculate the historical audit.
 
-Current HEAD inspected for this plan is `6e869743957f8f5b8be99dc642af2345c9ce7ee7` (2026-08-17). Current code confirms:
+The original planning pass inspected HEAD `6e869743957f8f5b8be99dc642af2345c9ce7ee7` (2026-08-17). It confirmed:
 
 - `src/main-tools.ts` declares `wait_for_replies` as `executionMode: "sequential"`;
 - the default is 120 seconds, the accepted range is 0–300 seconds, and each call accepts 1–32 request IDs;

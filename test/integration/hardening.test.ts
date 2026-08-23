@@ -463,6 +463,7 @@ describe("broker hardening", () => {
         const inspection = broker.inspectAgent(request.envelope.to);
         assert.equal(inspection.state, "failed");
         assert.equal(inspection.cleanup, undefined);
+        assert.equal(workers[0]?.disposed, true, "provider-failure cleanup has settled before lifecycle assertions");
       });
       await assert.rejects(broker.clearFailure(request.envelope.to), /idle, stopped, or archived/);
       await broker.stop(request.envelope.to);
@@ -519,6 +520,8 @@ describe("broker hardening", () => {
       assert.equal(result.timedOut, false);
       assert.equal(result.items[0]?.reply?.message, "Captured across timeout boundary.");
       assert.equal(main.deliveries.length, 0);
+      assert.equal((broker as unknown as { collectingRequestIds: Map<string, number> }).collectingRequestIds.size, 0);
+      assert.equal((broker as unknown as { collectionClaims: Map<string, number> }).collectionClaims.size, 0);
       assert.equal((broker as unknown as { addressTails: Map<string, unknown> }).addressTails.size, 0, "collector leaves no address tail");
       assert.equal((broker as unknown as { inFlightOperations: Set<unknown> }).inFlightOperations.size, 0, "collector leaves no tracked mutation");
     } finally {
@@ -548,22 +551,52 @@ describe("broker hardening", () => {
         priority: "low",
       });
       assert.equal(main.deliveries.length, 1);
+      assert.equal(main.deliveries[0]?.envelope.kind, "reply");
+      assert.equal(main.deliveries[0]?.envelope.inReplyTo, request.envelope.id);
       assert.equal(main.deliveries[0]?.triggerTurn, true);
+      assert.equal(broker.mailStore.get(request.envelope.id)?.answeredBy, main.deliveries[0]?.envelope.id);
+      assert.equal((broker as unknown as { collectingRequestIds: Map<string, number> }).collectingRequestIds.size, 0);
+      assert.equal((broker as unknown as { collectionClaims: Map<string, number> }).collectionClaims.size, 0);
     } finally {
       await broker.shutdown();
     }
   });
 
-  it("returns structured pending results when reply wait times out", async () => {
-    const { broker } = await setup();
+  it("releases a timed-out collector without losing or duplicating a later correlated reply", async () => {
+    const { root, broker, workers, main } = await setup();
     try {
       const request = await broker.send(broker.mainAddress, {
-        to: "worker.timeout@gpt-5.4.com", subject: "Timeout", message: "Stay pending.", priority: "low",
+        to: "worker.timeout@gpt-5.4.com", subject: "Timeout", message: "Reply after the wait.", priority: "low",
       });
       const result = await broker.waitForReplies([request.envelope.id], 0, true);
       assert.equal(result.timedOut, true);
       assert.equal(result.complete, false);
+      assert.equal(result.items[0]?.requestId, request.envelope.id);
       assert.equal(result.items[0]?.state, "pending");
+      assert.equal((broker as unknown as { collectingRequestIds: Map<string, number> }).collectingRequestIds.has(request.envelope.id), false);
+      assert.equal((broker as unknown as { collectionClaims: Map<string, number> }).collectionClaims.has(request.envelope.id), false);
+      assert.equal((broker as unknown as { changeListeners: Set<unknown> }).changeListeners.size, 0);
+
+      const reply = await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: request.expectedReplySubject!,
+        message: "Delivered after the timed-out collector released.",
+        priority: "low",
+      });
+      assert.equal(reply.answeredEmailId, request.envelope.id);
+      assert.equal(main.deliveries.length, 1);
+      assert.equal(main.deliveries[0]?.envelope.kind, "reply");
+      assert.equal(main.deliveries[0]?.envelope.inReplyTo, request.envelope.id);
+      assert.equal(main.deliveries[0]?.triggerTurn, true);
+      assert.equal(broker.mailStore.get(request.envelope.id)?.answeredBy, reply.envelope.id);
+      assert.equal(broker.mailStore.list().filter((email) => email.kind === "reply" && email.inReplyTo === request.envelope.id).length, 1);
+
+      const journal = (await readFile(join(root, "state", "mail.jsonl"), "utf8"))
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; id?: string; replyId?: string });
+      assert.equal(journal.filter((event) => event.type === "email.answered"
+        && event.id === request.envelope.id && event.replyId === reply.envelope.id).length, 1);
+      assert.equal((broker as unknown as { collectingRequestIds: Map<string, number> }).collectingRequestIds.size, 0);
+      assert.equal((broker as unknown as { collectionClaims: Map<string, number> }).collectionClaims.size, 0);
     } finally {
       await broker.shutdown();
     }
