@@ -510,7 +510,10 @@ describe("broker hardening", () => {
       };
 
       let waitSettled = false;
-      const waiting = broker.waitForReplies([request.envelope.id], 10, true).finally(() => { waitSettled = true; });
+      // Leave enough pre-claim time for journal reservation even when the full
+      // cross-file suite is busy, so this assertion exercises timeout during
+      // the gated delivery commit rather than scheduler latency before claim.
+      const waiting = broker.waitForReplies([request.envelope.id], 5_000, true).finally(() => { waitSettled = true; });
       const replying = workers[0]!.send({
         to: broker.mainAddress,
         subject: request.expectedReplySubject!,
@@ -518,7 +521,7 @@ describe("broker hardening", () => {
         priority: "low",
       });
       await enteredCommit.promise;
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      await new Promise((resolve) => setTimeout(resolve, 5_025));
       assert.equal(waitSettled, false, "timeout waits for the claimed delivery commit");
       releaseCommit.resolve();
       await replying;

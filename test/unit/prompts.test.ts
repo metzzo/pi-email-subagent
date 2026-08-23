@@ -51,6 +51,8 @@ describe("mail prompts", () => {
     assert.match(prompt, /delivery is at least once across crash recovery/i);
     assert.match(prompt, /repeated stable email ID.*retry/i);
     assert.match(prompt, /do not repeat completed side effects/i);
+    assert.match(prompt, /Pi core owns automatic provider retries.*do not.*re-prompt.*restart.*re-send/is);
+    assert.match(prompt, /retry activity.*wait for settlement.*not a terminal.*failure/is);
     assert.doesNotMatch(prompt, /claude|anthropic/i);
   });
 
@@ -100,6 +102,11 @@ describe("mail prompts", () => {
     assert.match(prompt, /cancel.*exact request.*explicitly abandons.*inactive/is);
     assert.match(prompt, /archive.*only after.*queued.*open obligations.*retry/is);
     assert.match(prompt, /archive clean.*identities/i);
+    assert.match(prompt, /live Pi-managed provider retry.*wait.*do not restart/is);
+    assert.match(prompt, /terminal worker failure.*open obligation.*inspect.*Work.*Conversation/is);
+    assert.match(prompt, /absence.*recorded work.*not proof.*pre-tool/is);
+    assert.match(prompt, /explicitly restart.*same identity.*preserve.*session.*mail ID/is);
+    assert.match(prompt, /never re-send.*accepted envelope.*provider error/i);
   });
 
   it("renders effective role and exact-address tools instead of claiming built-in capabilities", () => {

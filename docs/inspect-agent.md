@@ -35,7 +35,12 @@ Lifecycle: {"spawnTimeoutMs":30000,...}
 Cleanup: unknown · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved
 Cleanup phases: abort succeeded · dispose succeeded · generation 7
 Last failure: …            (only when present)
+Terminal worker run failure · openai/gpt-5.6-sol · provider/network cause may be external or unclear.
+1 delivered request remains unanswered. Current batch includes mutation/shell/custom work; effects may exist.
+Inspect Work and Conversation before explicit same-identity restart.
 ```
+
+The terminal recovery lines appear only when the existing activity/failure state identifies a completed failed agent run. They are derived at render time from the existing provider/model binding, incoming obligation count, and current-batch work cache; no provider-diagnostic field is added to `details.inspection`. If no current-batch mutation/shell/custom item is recorded, the tool explicitly says that this is not proof of pre-tool failure and directs the operator to the native Conversation before restart.
 
 `details.inspection` (`AgentInspection`) fields:
 
@@ -67,3 +72,6 @@ Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true
 - Also useful before spawning to distinguish identity lease use from run concurrency, check whether this address already holds a lease, and inspect exact bounded blockers.
 - Follow the rendered recovery hint. Reuse a relevant leased identity first; restart real stopped/failed work; stop only to become inactive; cancel only a user-abandoned exact request after final validation; archive only when clean; then retry.
 - When `cleanup` is present, do not interpret a detached worker or elapsed deadline as safety. Restart, archive, and clear-failure remain blocked; accepted mail is queued until affirmative quiescence is available.
+- Live retry activity is Pi-managed and non-terminal; wait for settlement rather than restarting. After terminal failure, inspect Work and Conversation, correct configuration/provider availability as needed, and explicitly restart the same identity only when possible effects have been accounted for. Never resend the accepted envelope merely because a provider attempt failed.
+
+See [Provider retry visibility and recovery](provider-retry-recovery.md) for event ordering, settings parity, attribution boundaries, and safe escalation artifacts.

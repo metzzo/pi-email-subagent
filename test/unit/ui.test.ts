@@ -174,6 +174,92 @@ describe("dashboard rendering", () => {
     component.dispose();
   });
 
+  it("warns on terminal failure that current-batch effects may exist without leaking mailbox content", () => {
+    const agent = record();
+    agent.state = "failed";
+    agent.failure = "fetch failed terminally";
+    agent.activity.push({ at: new Date().toISOString(), kind: "status", summary: "Agent run failed" });
+    agent.work = emptyWorkState();
+    agent.work.currentBatchId = 3;
+    agent.work.recent.push(finishWorkItem(
+      startWorkItem("effect", "bash", { command: "PRIVATE EFFECT COMMAND" }, 3, "/work")!,
+      {},
+      false,
+    ));
+    const snapshot = {
+      mainAddress: "main@test",
+      agents: [agent],
+      unanswered: 1,
+      queuedMail: 0,
+      capacity: { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 },
+    } as BrokerSnapshot;
+    const inspection = {
+      state: "failed",
+      holdsActivationLease: true,
+      capacity: snapshot.capacity,
+      queued: 0,
+      unanswered: 1,
+      outgoingUnanswered: 0,
+      pendingReplies: 0,
+      archiveEligible: false,
+      archiveBlockers: {
+        active: false,
+        cleanupQuarantine: false,
+        queued: { count: 0, requestIds: [], omitted: 0 },
+        incomingUnanswered: { count: 1, requestIds: ["mail_open"], omitted: 0 },
+        outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 },
+        pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+      },
+    };
+    const component = new DashboardComponent(
+      () => snapshot,
+      () => [{
+        id: "mail_open", from: "main@test", to: agent.address, subject: "PRIVATE SUBJECT", message: "PRIVATE BODY",
+        priority: "low", kind: "request", requiresResponse: true, createdAt: new Date().toISOString(), deliveryState: "delivered",
+      }],
+      () => undefined,
+      () => undefined,
+      fakeTheme,
+      undefined,
+      undefined,
+      40,
+      () => inspection as never,
+    );
+    for (const width of [20, 40, 80, 120]) assert.ok(component.render(width).every((line) => visibleWidth(line) <= width));
+    component.handleInput("\r");
+    component.handleInput("\t");
+    component.handleInput("\t");
+    component.handleInput("\t");
+    const profile = component.render(120).join("\n");
+    assert.match(profile, /terminal worker run failure.*openai-codex\/gpt-5\.4-mini/i);
+    assert.match(profile, /1 delivered request remains unanswered/i);
+    assert.match(profile, /current batch includes mutation\/shell\/custom work.*effects may exist/i);
+    assert.match(profile, /inspect Work and Conversation.*explicit same-identity restart/i);
+    assert.doesNotMatch(profile, /PRIVATE SUBJECT|PRIVATE BODY|PRIVATE EFFECT COMMAND/);
+    component.dispose();
+  });
+
+  it("says an empty current work ledger is not proof of pre-tool safety after failure", () => {
+    const agent = record(); agent.state = "failed"; agent.failure = "WebSocket error terminally";
+    agent.activity.push({ at: new Date().toISOString(), kind: "status", summary: "Agent run failed" }); agent.work = emptyWorkState();
+    const snapshot = { mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY };
+    const inspection = {
+      state: "failed", holdsActivationLease: true, capacity: TEST_CAPACITY, queued: 0, unanswered: 0,
+      outgoingUnanswered: 0, pendingReplies: 0, archiveEligible: false,
+      archiveBlockers: {
+        active: false, cleanupQuarantine: false,
+        queued: { count: 0, requestIds: [], omitted: 0 }, incomingUnanswered: { count: 0, requestIds: [], omitted: 0 },
+        outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 }, pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+      },
+    };
+    const component = new DashboardComponent(() => snapshot, () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 40, () => inspection as never);
+    component.handleInput("\r"); component.handleInput("\t"); component.handleInput("\t"); component.handleInput("\t");
+    const profile = component.render(120).join("\n");
+    assert.match(profile, /No mutation\/shell\/custom effect is recorded.*not proof of pre-tool failure/i);
+    assert.match(profile, /inspect Conversation.*explicit same-identity restart/i);
+    component.dispose();
+  });
+
   it("renders paused, stopped, and archived as closed without changing their internal states", () => {
     const closedStates = ["paused", "stopped", "archived"] as const;
     for (const state of closedStates) {

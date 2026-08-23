@@ -36,7 +36,7 @@ import type {
   AgentWorkState,
 } from "./types.ts";
 import { byteLength, clone, errorMessage, nowIso, truncateText } from "./util.ts";
-import { emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
+import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
 const ARCHIVE_BLOCKER_ID_LIMIT = 5;
@@ -1519,6 +1519,21 @@ export class AgentBroker {
     }
   }
 
+  private terminalFailureRecovery(record: AgentRecord): string {
+    const open = this.mailStore.list().filter((email) => email.to === record.address
+      && email.kind === "request"
+      && email.requiresResponse
+      && email.deliveryState === "delivered"
+      && !email.answeredAt).length;
+    const obligation = open === 0
+      ? "No delivered requests remain unanswered."
+      : `${open} delivered request${open === 1 ? "" : "s"} remain${open === 1 ? "s" : ""} unanswered.`;
+    const effects = currentBatchHasEffectfulWork(record.work)
+      ? "Current batch includes mutation/shell/custom work; effects may exist. Inspect Work and Conversation before explicit same-identity restart."
+      : "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure. Inspect Conversation before explicit same-identity restart.";
+    return `Terminal worker run failure · ${record.provider}/${record.modelId} · provider/network cause may be external or unclear. ${obligation} ${effects}`;
+  }
+
   private onWorkerEvent(address: string, worker: WorkerTransport, event: WorkerEvent): void {
     if (this.disposed || this.workers.get(address) !== worker) return;
     const record = this.records.get(address);
@@ -1546,7 +1561,7 @@ export class AgentBroker {
         lease,
         record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs,
       ).catch(() => undefined));
-      if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${event.error}`);
+      if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${event.error}\n${this.terminalFailureRecovery(record)}`);
       this.publish();
       return;
     }

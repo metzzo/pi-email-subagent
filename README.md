@@ -48,6 +48,8 @@ High-priority mail steers a running recipient at the next safe boundary. Low-pri
 
 `send_email` returns the allocated request/correlation ID, exact expected reply subject, effective recipient role/tools/model, finite persisted lifecycle policy, and delivery state. `inspect_agent` previews the same effective profile without spawning and reports derived identity-lease capacity separately from run concurrency. `wait_for_replies` opens a bounded collection window; after a pending timeout, requests remain correlated and late replies trigger main delivery automatically, so no keepalive-style rejoin is needed. `cancel_request` durably closes one intentionally abandoned obligation to an inactive recipient, recording the actor and reason without fabricating a reply. `manage_agent` is main-thread-only and supports `stop`, `restart`, `archive`, and `clear_failure`; stop retains the identity lease, while a successful clean archive releases it. Workers continue to receive only the two email tools. See the [safe capacity recovery order](docs/manage-agent.md#safe-identity-capacity-recovery).
 
+Pi remains the sole owner of automatic provider retries. Retry start/recovery/end is shown through the existing bounded Activity path without failing the worker or changing mail. A final non-retrying error uses the existing failure/alert path and keeps its original mail obligation open. Before explicit same-identity restart, inspect current-batch Work and native Conversation because effects may exist; an empty work ledger is not proof of pre-tool failure. See [provider retry visibility and recovery](docs/provider-retry-recovery.md).
+
 ## Model selection
 
 - Use `k3` (`k3.com` in an email address) for challenging, web-development-related, or creative tasks.
@@ -118,6 +120,8 @@ address always controls the model. Effective configured tools—not role
 labels—determine whether a recipient is writable.
 
 Provider definitions, the model catalog, and persistent credentials are snapshotted for workers when the extension starts. Provider/model/auth configuration changes take effect after an extension reload; workers are not continuously synchronized. Runtime-only credentials that are absent from Pi's persistent credential store cannot be transferred to an isolated worker; persist them before delegating worker tasks.
+
+Each isolated worker loads the same effective trusted Pi retry/transport settings as an ordinary session: global `settings.json`, plus project `.pi/settings.json` only when trusted. The extension does not raise Pi's retry defaults or enable provider/SDK retries; user-configured `retry`, `retry.provider`, `transport`, `httpIdleTimeoutMs`, and `websocketConnectTimeoutMs` values flow through Pi's own settings/session APIs.
 
 ## Persistence and limits
 

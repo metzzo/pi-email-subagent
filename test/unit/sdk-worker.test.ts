@@ -20,6 +20,76 @@ describe("SDK worker failures", () => {
     assert.equal(terminalAgentError(failedRun, true), undefined);
   });
 
+  it("maps Pi-managed retry lifecycle into bounded activity without a failure signal", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    const events: any[] = [];
+    worker.subscribe((event) => events.push(event));
+
+    internal.onSessionEvent({ type: "agent_end", messages: failedRun, willRetry: true });
+    internal.onSessionEvent({
+      type: "auto_retry_start",
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 4_000,
+      errorMessage: "WebSocket error\nPRIVATE SUMMARY",
+      headers: { authorization: "PRIVATE HEADER" },
+      rawPayload: "PRIVATE PAYLOAD",
+    });
+    internal.onSessionEvent({ type: "auto_retry_end", success: true, attempt: 2 });
+
+    assert.deepEqual(record.activity.map(({ kind, summary }: any) => ({ kind, summary })), [
+      { kind: "status", summary: "Provider retry 2/3 scheduled in 4000ms: WebSocket error PRIVATE SUMMARY" },
+      { kind: "status", summary: "Provider retry recovered after attempt 2" },
+    ]);
+    assert.equal(events.some((event) => event.type === "failure"), false);
+    assert.doesNotMatch(JSON.stringify(record.activity), /PRIVATE HEADER|PRIVATE PAYLOAD|authorization|rawPayload/);
+  });
+
+  it("records an unsuccessful retry end as activity while only the final non-retrying agent error fails once", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    const events: any[] = [];
+    worker.subscribe((event) => events.push(event));
+
+    internal.onSessionEvent({ type: "auto_retry_end", success: false, attempt: 3, finalError: "fetch failed finally" });
+    assert.equal(events.some((event) => event.type === "failure"), false);
+    internal.onSessionEvent({ type: "agent_end", messages: failedRun, willRetry: false });
+    internal.onSessionEvent({ type: "agent_settled" });
+
+    assert.equal(events.filter((event) => event.type === "failure").length, 1);
+    assert.equal(events.find((event) => event.type === "failure")?.error, "404 resource not found");
+    assert.equal(record.state, "failed");
+    assert.deepEqual(record.activity.map(({ kind, summary }: any) => ({ kind, summary })), [
+      { kind: "error", summary: "Provider retry ended after attempt 3: fetch failed finally" },
+      { kind: "error", summary: "404 resource not found" },
+      { kind: "status", summary: "Agent run failed" },
+    ]);
+  });
+
+  it("keeps retry activity within the existing 40-item and 500-character bounds", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    for (let attempt = 1; attempt <= 45; attempt += 1) {
+      internal.onSessionEvent({
+        type: "auto_retry_start",
+        attempt,
+        maxAttempts: 45,
+        delayMs: attempt,
+        errorMessage: `WebSocket error ${"x".repeat(1_000)}`,
+      });
+    }
+    assert.equal(record.activity.length, 40);
+    assert.ok(record.activity.every((item: any) => item.summary.length <= 500));
+    assert.match(record.activity[0]?.summary ?? "", /retry 6\/45/);
+  });
+
   it("uses the exact model object resolved by the worker runtime snapshot", () => {
     const parent = { provider: "custom", id: "model", baseUrl: "https://parent.invalid" } as never;
     const snapshot = { provider: "custom", id: "model", baseUrl: "https://worker.invalid" } as never;
@@ -76,8 +146,10 @@ describe("SDK worker failures", () => {
     }]);
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE|command|args|output/i);
     const before = observed.length;
+    const recordBefore = structuredClone(record);
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "bash-active", toolName: "bash", result: {}, isError: false });
     assert.equal(observed.length, before, "cleanup suppresses all later worker events");
+    assert.deepEqual(record, recordBefore, "cleanup also suppresses stale session mutation");
   });
 
   it("always unsubscribes and disposes a session when abort rejects", async () => {

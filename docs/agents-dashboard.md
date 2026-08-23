@@ -28,11 +28,11 @@ This is structural attribution only. Workers share a workspace, so the extension
 - `/agents cancel <request-id> <reason>`: durably close an intentionally abandoned Inbox obligation after its recipient is inactive
 - `Esc`: close
 
-The third row prioritizes active edit/write intent, then unverified shell/custom work, then runtime activity. Its run aggregate includes successful explicit mutations only.
+The third row prioritizes active edit/write intent, then unverified shell/custom work, then runtime activity. Its run aggregate includes successful explicit mutations only. Pi-managed provider retry scheduling and recovery appear as ordinary bounded runtime activity; they do not turn the row red, mark the identity failed, or change mail state.
 
 ### Detail
 
-`Tab` cycles Work, Activity, Inbox, and Profile/Lifecycle. `i` jumps to Inbox and back. Inbox shows the exact request IDs needed by `cancel_request` or `/agents cancel`; cancellation requires an inactive recipient, explicit abandonment, and a substantive audit reason. Profile/Lifecycle shows the selected identity's exact internal state, lease held/free, global identity/run use, incoming/outgoing/queued/pending counts, archive eligibility, and a safe recovery hint. In Work, use `↑` / `↓` to select an item and `d` to open a successful edit patch. `Esc` returns to the list.
+`Tab` cycles Work, Activity, Inbox, and Profile/Lifecycle. `i` jumps to Inbox and back. Inbox shows the exact request IDs needed by `cancel_request` or `/agents cancel`; cancellation requires an inactive recipient, explicit abandonment, and a substantive audit reason. Profile/Lifecycle shows the selected identity's exact internal state, lease held/free, global identity/run use, incoming/outgoing/queued/pending counts, archive eligibility, and a safe recovery hint. For a terminal agent-run failure, Profile also shows provider/model, the external-or-unclear attribution boundary, delivered unanswered count, and a current-batch effects warning. An empty work ledger is labeled not proven safe. In Work, use `↑` / `↓` to select an item and `d` to open a successful edit patch. `Esc` returns to the list.
 
 The diff view is scrollable with arrows, Page Up/Down, Home/End, and closes with `d` or `Esc`. The live event preview is bounded to 8 KB/200 lines; opening it upgrades from the persisted session result when available, bounded to 50 KB/2,000 lines. Truncation notes distinguish the two sources. Dashboard rows and every terminal line are viewport/width bounded.
 
@@ -40,7 +40,9 @@ The diff view is scrollable with arrows, Page Up/Down, Home/End, and closes with
 
 The registry keeps a derived cache of at most 48 completed items, 240-character commands, 500-character errors, and bounded patch previews. It never stores `write.content`, edit replacement bodies, or read/search results. On restart, stale active calls become interrupted and durable edit/write tool calls/results are reconstructed once from the active session branch. Recovery diagnostics are non-fatal.
 
-The visible conversation view collapses write/edit arguments and shows bounded edit patches. Thinking blocks, raw mutation bodies, and content beyond configured caps remain excluded. Capacity headers, the widget, and Profile contain only aggregate counts/state and never add mail subjects, bodies, or unrelated address lists; sensitive selected-mail excerpts remain confined to Inbox.
+The visible conversation view collapses write/edit arguments and shows bounded edit patches. Thinking blocks, raw mutation bodies, and content beyond configured caps remain excluded. Native assistant errors and tool call/result history remain the detailed provider-retry postmortem source. Capacity/retry headers, the widget, and Profile contain only aggregate counts/state and never add mail subjects, bodies, or unrelated address lists; sensitive selected-mail excerpts remain confined to Inbox.
+
+See [Provider retry visibility and recovery](provider-retry-recovery.md) before an explicit restart after terminal failure.
 
 ## Manual acceptance checklist
 

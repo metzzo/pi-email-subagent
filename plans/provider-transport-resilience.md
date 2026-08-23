@@ -1,7 +1,7 @@
 # Provider Transport Resilience Plan
 
 Date: 2026-08-23
-Status: proposed — not implemented or validated
+Status: implemented and validated on Pi 0.81.1 — 2026-08-23
 Priority: P2 operational resilience
 Classification: recurring provider/network failure signal; extension observability, settings-parity, and recovery-guidance scope; provider/core causation not established
 
@@ -21,6 +21,28 @@ The smallest first release should:
 All automatic retry ownership remains in Pi core/provider adapters. The extension must not automatically re-prompt, restart, re-send mail, or replay a batch after a provider error.
 
 A new durable provider-diagnostic schema, custom session entry, or focused persistence helper is explicitly deferred. It requires separate evidence that the existing session history plus bounded registry activity/failure cannot support a concrete crash-recovery or operator decision.
+
+## Implementation result
+
+Implemented the simplified first release without a new provider diagnostic type, cache, session entry, migration, recovery tool, or extension-owned retry loop.
+
+Characterization against real Pi 0.81.1 established:
+
+- recoverable ordering: assistant error → `agent_end(willRetry=true)` → `auto_retry_start`; a successful retry then emits its assistant message → `auto_retry_end(success=true)` → final `agent_end(willRetry=false)` → one `agent_settled`;
+- exhaustion ordering: final `agent_end(willRetry=false)` precedes `auto_retry_end(success=false)`, which precedes `agent_settled`;
+- aborted backoff: `auto_retry_start` → unsuccessful `auto_retry_end` with `Retry cancelled` → `agent_settled`, with no second provider call;
+- a completed tool turn is not replayed when only the following failed provider turn is retried; and
+- Pi's file-backed `SettingsManager` forwards trusted merged retry/provider-retry/transport/HTTP/WebSocket settings to provider options and excludes untrusted project settings.
+
+The worker characterization was red: its prior `SettingsManager.inMemory(...)` saw Pi defaults (`maxRetries: 3`, `baseDelayMs: 2000`) instead of the configured trusted policy. Workers now use `SettingsManager.create(cwd, agentDir, { projectTrusted })`, apply only steering/follow-up/effort overrides in memory, and share that manager with the loader/session. No default was raised. Settings load errors add only a bounded scope warning.
+
+`SdkWorker` now maps `auto_retry_start` and both retry-end branches through the existing 40-item/500-character activity path. A retrying `agent_end` remains non-terminal. Because observed Pi ordering places an exhausted cycle's `auto_retry_end` after its final `agent_end`, the worker records the final error at `agent_end` but emits the existing failure once at `agent_settled`; this preserves the retry-end activity before broker cleanup and never produces an idle-after-failure transition.
+
+Terminal alerts, `inspect_agent`, and `/agents` Profile derive recovery wording from the existing provider/model, delivered open-mail count, and current-batch work ledger. Any current-batch edit/write/shell/custom attempt warns that effects may exist. An empty ledger is explicitly not proof of pre-tool failure. Work and native Conversation remain the postmortem sources before explicit same-identity restart.
+
+Deterministic real Pi RPC scenarios prove retry recovery without an alert/new envelope, one completed write followed by retry with the effect exactly once, exhausted retry with one terminal alert and an open stable request, and explicit restart reusing the same address/session/mail ID/effort/lifecycle without repeating the write. Structured RPC events, registry JSON, mail journal events, and the active native session branch are parsed by schema/stable ID; no structured artifact is grepped.
+
+Provider/network causation remains external or unclear. Documentation defines a scrubbed Pi-core/provider escalation artifact and explicitly omits prompts, mail content, credentials, headers, environment values, hidden reasoning, raw payloads, and transport frames.
 
 ## Audit evidence and measurement boundary
 
@@ -663,6 +685,6 @@ Not expected:
 - crash-window cache reconstruction; or
 - any automatic retry/restart/re-prompt code.
 
-## Not validated during planning
+## Planning-time validation boundary
 
-No repository tests, live providers, mock-provider runs, TUI checks, package builds, or source changes were performed while writing or revising this plan. The historical counts come from the cited parsed audit artifact; the present plan inspection grounded current HEAD and installed Pi 0.81.1 semantics only.
+No repository tests, live providers, mock-provider runs, TUI checks, package builds, or source changes were performed while originally writing or revising this plan. Implementation subsequently added the deterministic validation summarized above. The historical counts still come only from the cited parsed audit artifact and were not recalculated as part of implementation.

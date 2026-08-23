@@ -5,6 +5,7 @@ import type { AgentBroker } from "./broker.ts";
 import { textResult } from "./tool-result.ts";
 import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
 import { byteLength, errorMessage } from "./util.ts";
+import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 
 const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
 const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated. Later replies are delivered automatically to the main thread when they arrive (or after broker/session restoration). No immediate wait_for_replies rejoin is needed merely to keep requests alive. Rejoin only for a deliberate synchronous collection/status window.";
@@ -122,7 +123,24 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           lines.push(`Cleanup: ${inspection.cleanup.state} · quiescence unknown · capacity held · restart/archive blocked · queued mail preserved`);
           lines.push(`Cleanup phases: abort ${inspection.cleanup.abort} · dispose ${inspection.cleanup.dispose} · generation ${inspection.cleanup.workerGeneration}`);
         }
-        if (inspection.failure) lines.push(`Last failure: ${inspection.failure}`);
+        if (inspection.failure) {
+          lines.push(`Last failure: ${inspection.failure}`);
+          const record = broker.getSnapshot().agents.find((agent) => agent.address === inspection.address);
+          if (record?.activity.some((item) => item.summary === "Agent run failed")) {
+            const open = broker.mailStore.list().filter((email) => email.to === inspection.address
+              && email.kind === "request"
+              && email.requiresResponse
+              && email.deliveryState === "delivered"
+              && !email.answeredAt).length;
+            const obligation = open === 0
+              ? "No delivered requests remain unanswered."
+              : `${open} delivered request${open === 1 ? "" : "s"} remain${open === 1 ? "s" : ""} unanswered.`;
+            const effects = currentBatchHasEffectfulWork(record.work)
+              ? "Current batch includes mutation/shell/custom work; effects may exist. Inspect Work and Conversation before explicit same-identity restart."
+              : "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure. Inspect Conversation before explicit same-identity restart.";
+            lines.push(`Terminal worker run failure · ${inspection.provider}/${inspection.modelId} · provider/network cause may be external or unclear. ${obligation} ${effects}`);
+          }
+        }
         return textResult(lines.join("\n"), { inspection } satisfies InspectAgentToolDetails);
       } catch (error) {
         throw new Error(`Could not inspect agent: ${errorMessage(error)}`);
@@ -230,6 +248,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     promptGuidelines: [
       "Stop only to make work inactive; it does not free maxAgents identity capacity.",
       "Cancel only explicitly abandoned exact requests after the recipient is inactive, then archive only when all blockers are clear.",
+      "Before restarting a failed agent, inspect its current-batch Work and native Conversation; explicitly restart the same identity only after accounting for possible effects.",
     ],
     executionMode: "sequential" as const,
     parameters: Type.Object({
