@@ -26,9 +26,9 @@ Extensions execute with the Pi user's permissions. In the current release:
 - A writable worker can use its effective `bash`, `edit`, and `write` tools anywhere those host tools permit.
 - Host credentials, environment variables, network access, symlink policy, and process isolation are not sandboxed by this extension.
 - Read-only role defaults reduce accidental mutation but are not an OS security boundary.
-- Parallel writable workers can create semantic conflicts even though Pi serializes direct mutations to one file.
+- Pi direct mutation serialization is best-effort. Upstream missing-target symlink paths and hard-link aliases can bypass same-target recognition, and parallel writable workers can still create semantic conflicts.
 - Durability covers ordinary process crashes with at-least-once delivery; it does not promise sudden-power-loss durability or exactly-once external side effects.
-- Persistence enforces one live broker per parent-session namespace through a filesystem lease. An abrupt exit can delay reacquisition for the 10-second stale threshold; this ownership lease prevents accidental concurrent brokers but is not protection from a malicious same-user process.
+- Persistence uses a cooperative lease scoped to one parent-session state namespace. An abrupt exit can delay reacquisition for the 10-second stale threshold; the lease reduces accidental concurrent state writers but is neither a workspace fence nor protection from a malicious same-user process.
 
 Only delegate to models/providers you trust with the project and credentials accessible to Pi. Use external sandboxing for untrusted tasks. Do not market the current `trusted` execution mode as isolation.
 
@@ -38,4 +38,4 @@ Mail bodies, subjects, agent activity, usage, and worker session transcripts are
 
 ## Security roadmap
 
-The tracked hardening roadmap is in `plans/top-1-percent-plan.md`. Priority work includes single-writer namespace locking, per-agent lifecycle deadlines, versioned migrations/repair, workspace scopes, subprocess transport, and fail-closed isolation policies.
+Future workspace isolation, subprocess boundaries, and stronger cross-parent coordination are not part of version 0.1.0. Track security work in the repository issue tracker; internal implementation plans are intentionally excluded from the npm artifact.

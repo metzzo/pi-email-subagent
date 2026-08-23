@@ -8,6 +8,7 @@ import { AgentBroker } from "./broker.ts";
 import { isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory } from "./model-runtime.ts";
+import { assertSupportedPiRuntime } from "./pi-compat.ts";
 import { formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
 import type { BrokerSnapshot, EmailEnvelope, MainAdapter, SubagentConfig } from "./types.ts";
@@ -37,6 +38,7 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 }
 
 export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
+  assertSupportedPiRuntime();
   const ui = new UIController();
   let broker: AgentBroker | undefined;
   let mainAddress = "";
