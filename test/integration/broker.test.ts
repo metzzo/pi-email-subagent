@@ -239,7 +239,35 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
-  it("surfaces terminal worker errors without issuing misleading mailbox reminders", async () => {
+  it("keeps retry activity non-terminal and leaves the delivered obligation open", async () => {
+    const { broker, workers, main } = await setup();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.provider-retrying@gpt-5.4.com",
+        subject: "PRIVATE RETRY SUBJECT",
+        message: "PRIVATE RETRY BODY",
+        priority: "low",
+      });
+      const worker = workers[0]!;
+      const activity = { at: new Date().toISOString(), kind: "status" as const, summary: "Provider retry 1/3 scheduled in 1ms: WebSocket error" };
+      worker.record!.activity.push(activity);
+      worker.record!.currentActivity = activity.summary;
+      worker.emit({ type: "activity", activity });
+
+      const record = broker.getSnapshot().agents[0]!;
+      assert.equal(record.state, "running");
+      assert.equal(record.currentActivity, activity.summary);
+      assert.equal(record.activity.at(-1)?.summary, activity.summary);
+      assert.equal(record.failure, undefined);
+      assert.equal(main.failures.length, 0);
+      assert.equal(broker.mailStore.get(request.envelope.id)?.deliveryState, "delivered");
+      assert.equal(broker.mailStore.get(request.envelope.id)?.answeredAt, undefined);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("surfaces terminal worker errors once with open-obligation and possible-effect recovery guidance", async () => {
     const { broker, workers, main } = await setup({ responseReminderLimit: 2 });
     try {
       await broker.send(broker.mainAddress, {
@@ -249,6 +277,13 @@ describe("AgentBroker end-to-end routing", () => {
         priority: "low",
       });
       const worker = workers[0]!;
+      worker.record!.work = emptyWorkState();
+      worker.record!.work.currentBatchId = 1;
+      appendRecent(worker.record!.work, finishWorkItem(
+        startWorkItem("shell-effect", "bash", { command: "touch possible-effect" }, 1, "/work")!,
+        {},
+        false,
+      ));
       worker.fail('404 {"error":{"type":"resource_not_found_error"}}');
       await eventually(() => {
         const record = broker.getSnapshot().agents[0]!;
@@ -262,7 +297,30 @@ describe("AgentBroker end-to-end routing", () => {
       assert.equal(worker.prompts.length, 1);
       assert.equal(broker.getSnapshot().agents[0]!.state, "failed");
       assert.match(main.failures[0]!, /resource_not_found_error/);
-      assert.doesNotMatch(main.failures[0]!, /unanswered email/);
+      assert.match(main.failures[0]!, /terminal worker run failure.*openai-codex\/gpt-5\.4.*external or unclear/is);
+      assert.match(main.failures[0]!, /1 delivered request remains unanswered/i);
+      assert.match(main.failures[0]!, /current batch includes mutation\/shell\/custom work.*effects may exist/is);
+      assert.match(main.failures[0]!, /Work and Conversation.*explicit same-identity restart/is);
+      assert.doesNotMatch(main.failures[0]!, /Run provider request|Return a result/);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("does not call an empty current work ledger proof of pre-tool safety", async () => {
+    const { broker, workers, main } = await setup();
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.no-recorded-effect@gpt-5.4.com",
+        subject: "PRIVATE NO-EFFECT SUBJECT",
+        message: "PRIVATE NO-EFFECT BODY",
+        priority: "low",
+      });
+      workers[0]!.fail("fetch failed terminally");
+      await eventually(() => assert.equal(main.failures.length, 1));
+      assert.match(main.failures[0]!, /No mutation\/shell\/custom effect is recorded in the current work ledger/i);
+      assert.match(main.failures[0]!, /not proof of pre-tool failure.*inspect Conversation.*same-identity restart/is);
+      assert.doesNotMatch(main.failures[0]!, /PRIVATE NO-EFFECT/);
     } finally {
       await broker.shutdown();
     }

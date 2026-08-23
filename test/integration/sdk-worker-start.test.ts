@@ -1,27 +1,76 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
 import type { AgentRecord } from "../../src/types.ts";
 
-it("constructs and disposes an isolated real AgentSession without recursively loading extensions", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-"));
-  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
-  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
-  assert.ok(model, "expected at least one built-in model");
+function successfulStream(
+  observed: SimpleStreamOptions[],
+): (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => ReturnType<typeof createAssistantMessageEventStream> {
+  return (model, _context, options) => {
+    if (options) observed.push(options);
+    const stream = createAssistantMessageEventStream();
+    const message = {
+      role: "assistant",
+      content: [{ type: "text", text: "settings observed" }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage: {
+        input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    } as AssistantMessage;
+    stream.push({ type: "start", partial: message });
+    stream.push({ type: "text_start", contentIndex: 0, partial: message });
+    stream.push({ type: "text_delta", contentIndex: 0, delta: "settings observed", partial: message });
+    stream.push({ type: "text_end", contentIndex: 0, content: "settings observed", partial: message });
+    stream.push({ type: "done", reason: "stop", message });
+    stream.end();
+    return stream;
+  };
+}
+
+function retryableErrorStream(model: Model<Api>) {
+  const stream = createAssistantMessageEventStream();
+  const message = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: "WebSocket error: deterministic cleanup backoff",
+    timestamp: Date.now(),
+  } as AssistantMessage;
+  stream.push({ type: "start", partial: message });
+  stream.push({ type: "error", reason: "error", error: message });
+  stream.end();
+  return stream;
+}
+
+function workerRecord(model: Model<any>, address = `scout.sdk-start@${model.id}.com`): AgentRecord {
   const now = new Date().toISOString();
-  const record: AgentRecord = {
-    address: `scout.sdk-start@${model.id}.com`,
+  return {
+    address,
     name: "scout",
     taskSlug: "sdk-start",
     provider: model.provider,
     modelId: model.id,
     effort: "low",
-    tools: ["read", "grep", "find", "ls", "not_a_real_tool", "send_email", "fetch_emails"],
+    tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
     canSpawn: true,
     state: "paused",
     createdAt: now,
@@ -31,6 +80,15 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     activity: [],
   };
+}
+
+it("constructs and disposes an isolated real AgentSession without recursively loading extensions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-"));
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
+  assert.ok(model, "expected at least one built-in model");
+  const record = workerRecord(model);
+  record.tools.splice(4, 0, "not_a_real_tool");
   const worker = new SdkWorker(runtime);
   await worker.start({
     record,
@@ -56,4 +114,180 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
   assert.ok(worker.getSessionFile());
   await worker.dispose();
   assert.equal(worker.getSessionFile(), snapshot.record.sessionFile);
+});
+
+it("reports settings load scope without leaking invalid file content", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-invalid-settings-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(join(agentDir, "settings.json"), "PRIVATE GLOBAL INVALID SETTINGS");
+  await writeFile(join(cwd, ".pi", "settings.json"), "PRIVATE PROJECT INVALID SETTINGS");
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
+  assert.ok(model);
+  const worker = new SdkWorker(runtime);
+  try {
+    await worker.start({
+      record: workerRecord(model, `scout.invalid-settings@${model.id}.com`),
+      model,
+      cwd,
+      agentDir,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: true,
+      systemPrompt: "Invalid settings must not leak.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const activity = worker.getSnapshot().record.activity.map((item) => item.summary);
+    assert.ok(activity.some((summary) => /Pi global settings could not be loaded; Pi fallback settings apply for that scope/.test(summary)));
+    assert.ok(activity.some((summary) => /Pi project settings could not be loaded; Pi fallback settings apply for that scope/.test(summary)));
+    assert.doesNotMatch(JSON.stringify(activity), /PRIVATE|INVALID SETTINGS/);
+  } finally {
+    await worker.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("bounds cleanup during real Pi retry backoff and suppresses every stale session update", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-retry-cleanup-"));
+  await writeFile(join(root, "settings.json"), JSON.stringify({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 } }));
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  runtime.registerProvider("worker-retry-cleanup", {
+    name: "Worker Retry Cleanup",
+    baseUrl: "http://127.0.0.1:9/worker-retry-cleanup",
+    apiKey: "deterministic-test-key",
+    api: "worker-retry-cleanup",
+    models: [{
+      id: "retry-cleanup-model", name: "Retry Cleanup Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000,
+    }],
+    streamSimple: retryableErrorStream,
+  });
+  const model = runtime.getModel("worker-retry-cleanup", "retry-cleanup-model");
+  assert.ok(model);
+  const worker = new SdkWorker(runtime, model);
+  try {
+    await worker.start({
+      record: workerRecord(model, "scout.retry-cleanup@retry-cleanup-model.com"),
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "Exercise deterministic retry cleanup.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const retryStarted = new Promise<void>((resolve) => {
+      const unsubscribe = worker.subscribe((event) => {
+        if (event.type === "activity" && event.activity?.summary.startsWith("Provider retry")) {
+          unsubscribe(); resolve();
+        }
+      });
+    });
+    await worker.prompt("enter retry backoff");
+    await retryStarted;
+    const beforeCleanup = worker.getSnapshot().record;
+    const report = await worker.cleanup({ abortTimeoutMs: 1_000 });
+    assert.equal(report.sessionDisposed, true);
+    assert.equal(report.providerQuiescent, true);
+    assert.equal(report.quiescence, "verified");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(worker.getSnapshot().record, beforeCleanup, "aborted retry settlement cannot update the disposed worker");
+  } finally {
+    await worker.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("loads effective global and only trusted project retry/transport settings into a real isolated worker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-settings-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(join(agentDir, "settings.json"), JSON.stringify({
+    retry: { enabled: true, maxRetries: 1, baseDelayMs: 3, provider: { timeoutMs: 1_111, maxRetries: 2, maxRetryDelayMs: 2_222 } },
+    transport: "sse",
+    httpIdleTimeoutMs: 3_333,
+    websocketConnectTimeoutMs: 4_444,
+  }));
+  await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({
+    retry: { maxRetries: 4, baseDelayMs: 5, provider: { timeoutMs: 5_555, maxRetries: 6, maxRetryDelayMs: 6_666 } },
+    transport: "websocket",
+    httpIdleTimeoutMs: 7_777,
+    websocketConnectTimeoutMs: 8_888,
+  }));
+
+  try {
+    for (const trusted of [true, false]) {
+      const observed: SimpleStreamOptions[] = [];
+      const runtime = await ModelRuntime.create({ authPath: join(root, `auth-${trusted}.json`), modelsPath: null });
+      const provider = `worker-settings-${trusted}`;
+      runtime.registerProvider(provider, {
+        name: "Worker Settings Characterization",
+        baseUrl: "http://127.0.0.1:9/worker-settings",
+        apiKey: "deterministic-test-key",
+        api: provider,
+        models: [{
+          id: "settings-model",
+          name: "Settings Model",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 32_000,
+          maxTokens: 2_000,
+        }],
+        streamSimple: successfulStream(observed),
+      });
+      const model = runtime.getModel(provider, "settings-model");
+      assert.ok(model);
+      const worker = new SdkWorker(runtime, model);
+      await worker.start({
+        record: workerRecord(model, `scout.settings-${trusted}@settings-model.com`),
+        model,
+        cwd,
+        agentDir,
+        sessionDir: join(root, `sessions-${trusted}`),
+        projectTrusted: trusted,
+        systemPrompt: "Observe deterministic settings.",
+        sendEmail: async () => { throw new Error("not called"); },
+        fetchEmails: () => ({ emails: [], total: 0 }),
+      });
+      try {
+        const internal = worker as unknown as { session: { settingsManager: {
+          getRetrySettings(): unknown;
+          getProviderRetrySettings(): unknown;
+          getTransport(): unknown;
+          getHttpIdleTimeoutMs(): unknown;
+          getWebSocketConnectTimeoutMs(): unknown;
+        } } };
+        assert.deepEqual(internal.session.settingsManager.getRetrySettings(), trusted
+          ? { enabled: true, maxRetries: 4, baseDelayMs: 5 }
+          : { enabled: true, maxRetries: 1, baseDelayMs: 3 });
+        const settled = new Promise<void>((resolve) => {
+          const unsubscribe = worker.subscribe((event) => {
+            if (event.type === "settled") { unsubscribe(); resolve(); }
+          });
+        });
+        await worker.prompt("observe effective settings");
+        await settled;
+        assert.deepEqual({
+          transport: observed[0]?.transport,
+          timeoutMs: observed[0]?.timeoutMs,
+          websocketConnectTimeoutMs: observed[0]?.websocketConnectTimeoutMs,
+          maxRetries: observed[0]?.maxRetries,
+          maxRetryDelayMs: observed[0]?.maxRetryDelayMs,
+        }, trusted
+          ? { transport: "websocket", timeoutMs: 5_555, websocketConnectTimeoutMs: 8_888, maxRetries: 6, maxRetryDelayMs: 6_666 }
+          : { transport: "sse", timeoutMs: 1_111, websocketConnectTimeoutMs: 4_444, maxRetries: 2, maxRetryDelayMs: 2_222 });
+      } finally {
+        await worker.dispose();
+      }
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

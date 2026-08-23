@@ -215,6 +215,12 @@ export function aggregateWork(state: AgentWorkState, batchId = state.currentBatc
   };
 }
 
+export function currentBatchHasEffectfulWork(state: AgentWorkState | undefined): boolean {
+  if (!state || state.currentBatchId === undefined) return false;
+  const batchId = state.currentBatchId;
+  return [...state.active, ...state.recent].some((item) => item.batchId === batchId);
+}
+
 export function activePathConflicts(records: readonly { address: string; work?: AgentWorkState }[]): Map<string, string[]> {
   const paths = new Map<string, string[]>();
   for (const record of records) for (const item of record.work?.active ?? []) {

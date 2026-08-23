@@ -5,7 +5,7 @@ import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-wo
 import type { AgentBroker } from "./broker.ts";
 import { isThinkingLevel } from "./config.ts";
 import type { AgentInspection, AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
-import { activePathConflicts, aggregateWork, capPatch, countWrite } from "./work-ledger.ts";
+import { activePathConflicts, aggregateWork, capPatch, countWrite, currentBatchHasEffectfulWork } from "./work-ledger.ts";
 import { errorMessage, truncateText } from "./util.ts";
 
 interface DashboardAction {
@@ -688,7 +688,24 @@ export class DashboardComponent {
                     : "reuse this identity and finish real obligations before archival";
             lines.push(this.theme.fg("warning", `recovery: ${recovery}`));
           }
-          if (agent.failure) lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
+          if (agent.failure) {
+            lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
+            if (inspection && agent.activity.some((item) => item.summary === "Agent run failed")) {
+              const obligation = inspection.unanswered === 0
+                ? "No delivered requests remain unanswered."
+                : `${inspection.unanswered} delivered request${inspection.unanswered === 1 ? "" : "s"} remain${inspection.unanswered === 1 ? "s" : ""} unanswered.`;
+              lines.push(this.theme.fg("warning", `Terminal worker run failure · ${provider}/${modelId}`));
+              lines.push(this.theme.fg("warning", "Provider/network cause may be external or unclear."));
+              lines.push(this.theme.fg("warning", obligation));
+              if (currentBatchHasEffectfulWork(agent.work)) {
+                lines.push(this.theme.fg("warning", "Current batch includes mutation/shell/custom work; effects may exist."));
+                lines.push(this.theme.fg("warning", "Inspect Work and Conversation before explicit same-identity restart."));
+              } else {
+                lines.push(this.theme.fg("warning", "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure."));
+                lines.push(this.theme.fg("warning", "Inspect Conversation before explicit same-identity restart."));
+              }
+            }
+          }
         }
       }
     }

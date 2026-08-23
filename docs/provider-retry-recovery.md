@@ -1,0 +1,75 @@
+# Provider retry visibility and recovery
+
+Pi core owns provider retry classification, attempt limits, backoff, and continuation. `pi-email-subagent` does not add another retry loop, re-prompt a failed run, resend an accepted envelope, restart a worker automatically, switch providers, or replay a prompt batch.
+
+## What the extension shows
+
+For Pi 0.81.1 retry events, the existing bounded Activity path records:
+
+```text
+Provider retry 1/3 scheduled in 2000ms: WebSocket error
+Provider retry recovered after attempt 1
+```
+
+If Pi exhausts the cycle, Activity records its end before the existing terminal worker failure is committed:
+
+```text
+Provider retry ended after attempt 3: WebSocket error
+```
+
+Retry activity uses the existing `ActivityItem` type, 40-item record limit, 500-character summary limit, registry snapshot, current-activity row, and terminal sanitization. It is attempt/cycle status, not a mail outcome. A retrying `agent_end.willRetry=true` does not fail the worker or alert main. Only the final non-retrying assistant error enters the existing `record.failure` path and generates one main alert.
+
+Pi 0.81.1's observed order is:
+
+- retryable attempt: assistant error → `agent_end(willRetry=true)` → `auto_retry_start`;
+- recovered attempt: successful assistant message → `auto_retry_end(success=true)` → final `agent_end(willRetry=false)` → `agent_settled`;
+- exhausted cycle: final `agent_end(willRetry=false)` → `auto_retry_end(success=false)` → `agent_settled`; and
+- aborted backoff: `auto_retry_start` → `auto_retry_end(success=false, Retry cancelled)` → `agent_settled`, with no second provider attempt.
+
+`agent_settled` is the one full-run boundary. The worker defers its existing terminal failure emission until that boundary so the preceding unsuccessful retry-end activity is not lost to cleanup.
+
+## Effective settings
+
+Isolated workers load Pi's effective settings with `SettingsManager.create(cwd, agentDir, { projectTrusted })`. The same manager is shared by the resource loader and worker session. This gives workers the ordinary Pi policy for:
+
+- `retry.enabled`, `retry.maxRetries`, and `retry.baseDelayMs`;
+- `retry.provider.timeoutMs`, `maxRetries`, and `maxRetryDelayMs`;
+- `transport`;
+- `httpIdleTimeoutMs`; and
+- `websocketConnectTimeoutMs`.
+
+Global settings apply. Project settings override them only when Pi marked the project trusted; untrusted project settings remain ignored. The extension overrides only worker steering/follow-up modes and the identity's persisted thinking effort. It does not raise Pi defaults. In particular, provider/SDK retries remain at Pi's default `0` unless the user explicitly configures them. A settings parse/read error adds only its `global` or `project` scope to bounded Activity and uses Pi's fallback behavior; file content and error payload are not copied.
+
+## Effects and explicit recovery
+
+Mail state remains authoritative. A terminal worker failure does not answer, cancel, expire, or replace a delivered request. The original stable mail ID and response obligation remain open.
+
+Before recovery, inspect:
+
+1. `/agents` **Work** for current-batch edit/write and unverified shell/custom attempts.
+2. `/agents` **Conversation** for the native session's assistant errors, tool calls, and tool results.
+3. **Profile/Lifecycle** or `inspect_agent` for provider/model, terminal failure, and open-mail count.
+
+If the current batch contains any mutation, shell, or custom work item—running, succeeded, failed, or interrupted—the UI warns that effects may exist. Shell/custom effects remain unverified. If no such item is recorded, the UI says only that no effect is recorded; this is **not proof of pre-tool failure**. Mailbox tools, restored history, or other external behavior can fall outside the current work summary.
+
+When configuration or provider availability is corrected and recovery is safe, explicitly restart the **same identity** with `manage_agent restart` or `/agents restart`. That reuses its persistent session, mailbox, lifecycle, effort, and original mail obligation. Do not resend the accepted envelope. If the user instead abandons the request, stop the recipient and cancel that exact request with a substantive audited reason.
+
+## Attribution and escalation
+
+`fetch failed`, `WebSocket error`, timeouts, and overload text do not establish an extension defect. The cause may be provider service, proxy/DNS/TLS, credentials, quota, endpoint reachability, a Pi provider adapter, or Pi retry lifecycle behavior.
+
+Escalate to Pi core/provider maintainers when a deterministic minimal SDK reproduction shows retry classification contrary to documented `willRetry`, settlement before retry completion, ignored effective settings/options, a repeated completed tool call, inconsistent lifecycle events, or the same transport failure without this extension.
+
+A useful scrubbed artifact contains:
+
+- Pi and `@earendil-works/pi-*` versions;
+- provider/model/API identifiers;
+- non-secret effective retry/transport/timeout settings;
+- ordered structured event types and timestamps;
+- `willRetry`, attempt/max/delay, stop reason, and bounded error summary;
+- stable session, tool-call, and tool-result IDs/outcomes; and
+- whether the mail obligation was answered, open, or explicitly cancelled.
+
+Omit prompts, mail subjects/bodies, credentials, request headers, environment values, hidden reasoning, raw provider payloads, and transport frames. Provider/network remediation is appropriate when the same minimal request fails because of external availability, local networking, credentials, quota, or endpoint behavior without a Pi contract violation.
+
+Retry Activity is persisted through ordinary settlement. A hard crash before settlement may omit a retry start/end from the bounded registry cache; the native worker session's assistant/tool history plus existing mail/failure/work state is the supported postmortem source for this release. No provider-specific durable schema, custom session entry, cache, or migration was added.

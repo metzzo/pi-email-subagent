@@ -19,6 +19,8 @@ Detaches routing immediately and joins the worker's one cleanup lease. State bec
 
 Joins verified cleanup of any old worker before creating a fresh one bound to the same persistent session file and mailbox. No replacement is created while cleanup is pending or unknown. A cleanup that verifies after the caller deadline may complete the requested replacement generation-safely; otherwise an explicit later restart is required. The replacement resumes enforcement for unanswered mail or scheduling for queued mail and clears `failure` and the reminder counter. Requires free capacity under `maxAgents` when the agent no longer holds an activation lease.
 
+A provider retry that is still live is not a reason to restart: Pi owns that automatic continuation. Before restarting a terminally failed worker, inspect `/agents` Work and Conversation. Current-batch edit/write/shell/custom attempts mean effects may exist; absence of a recorded item does not prove pre-tool safety. Restart is explicit same-identity recovery that preserves the existing session, mailbox, lifecycle, effort, and stable accepted mail ID. It does not resend the envelope and does not promise that replaying later model decisions is side-effect-free.
+
 ### `archive`
 
 Frees the agent's activation lease (capacity) while keeping its record, session, and mail. Guard rails:
@@ -50,7 +52,7 @@ Action-specific text reports that stop retains its lease, restart resumes the sa
 5. Archive only after queued mail and open obligations are clear.
 6. Retry the new/restored identity after archive releases the lease.
 
-No step is automatic or bulk. Capacity pressure alone authorizes neither cancellation nor archive.
+No step is automatic or bulk. Capacity pressure alone authorizes neither cancellation nor archive. Provider failure also authorizes no automatic restart, resend, provider switch, or cancellation; follow [provider retry visibility and recovery](provider-retry-recovery.md).
 
 ## Equivalents
 

@@ -224,10 +224,16 @@ export class SdkWorker implements WorkerTransport {
     this.cwd = config.cwd;
     this.setState("spawning");
 
-    const settings = SettingsManager.inMemory(
-      { steeringMode: "all", followUpMode: "all", defaultThinkingLevel: this.record.effort },
-      { projectTrusted: config.projectTrusted },
-    );
+    const settings = SettingsManager.create(config.cwd, config.agentDir, { projectTrusted: config.projectTrusted });
+    const settingsErrors = settings.drainErrors();
+    settings.applyOverrides({
+      steeringMode: "all",
+      followUpMode: "all",
+      defaultThinkingLevel: this.record.effort,
+    });
+    for (const { scope } of settingsErrors) {
+      this.activity("error", `Pi ${scope} settings could not be loaded; Pi fallback settings apply for that scope.`);
+    }
     const loader = new DefaultResourceLoader({
       cwd: config.cwd,
       agentDir: config.agentDir,
@@ -290,7 +296,7 @@ export class SdkWorker implements WorkerTransport {
   }
 
   private onSessionEvent(event: AgentSessionEvent): void {
-    if (!this.record) return;
+    if (this.disposed || !this.record) return;
     switch (event.type) {
       case "agent_start":
         this.runFailure = undefined;
@@ -380,12 +386,18 @@ export class SdkWorker implements WorkerTransport {
         }
         break;
       }
+      case "auto_retry_start":
+        this.activity("status", `Provider retry ${event.attempt}/${event.maxAttempts} scheduled in ${event.delayMs}ms: ${event.errorMessage}`);
+        break;
+      case "auto_retry_end":
+        if (event.success) this.activity("status", `Provider retry recovered after attempt ${event.attempt}`);
+        else this.activity("error", `Provider retry ended after attempt ${event.attempt}: ${event.finalError ?? "unknown error"}`);
+        break;
       case "agent_end": {
         const failure = terminalAgentError(event.messages, event.willRetry);
         if (failure) {
           this.runFailure = failure;
           this.activity("error", failure);
-          this.emit({ type: "failure", error: failure });
         }
         break;
       }
@@ -397,6 +409,7 @@ export class SdkWorker implements WorkerTransport {
         if (this.runFailure) {
           this.setState("failed");
           this.activity("status", "Agent run failed");
+          this.emit({ type: "failure", error: this.runFailure });
         } else {
           this.setState("idle");
           this.activity("status", "Agent run settled");

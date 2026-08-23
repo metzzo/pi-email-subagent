@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  activePathConflicts, aggregateWork, appendRecent, beginBatch, capPatch, capText, classifyTool, countWrite,
+  activePathConflicts, aggregateWork, appendRecent, beginBatch, capPatch, capText, classifyTool, countWrite, currentBatchHasEffectfulWork,
   displayWorkPath, emptyWorkState, finishWorkItem, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_PATCH_BYTES,
   MAX_PATCH_LINES, MAX_RECENT_WORK, noteInspection, patchStats, recoverMutationWork, startWorkItem,
 } from "../../src/work-ledger.ts";
@@ -88,6 +88,33 @@ describe("work ledger", () => {
     const next = beginBatch(state);
     assert.equal(next, 2);
     assert.deepEqual(state.inspection, { reads: 0, searches: 0, listings: 0 });
+  });
+
+  it("warns conservatively for any current-batch mutation, shell, or custom attempt only", () => {
+    const state = emptyWorkState();
+    beginBatch(state);
+    assert.equal(currentBatchHasEffectfulWork(state), false);
+    const prior = startWorkItem("prior", "bash", { command: "touch prior" }, 0, "/work")!;
+    appendRecent(state, finishWorkItem(prior, {}, false));
+    assert.equal(currentBatchHasEffectfulWork(state), false, "a prior batch does not contaminate the current warning");
+
+    for (const [index, toolName] of ["edit", "write", "bash", "custom_effect"].entries()) {
+      const item = startWorkItem(`current-${index}`, toolName, toolName === "edit"
+        ? { path: "a.ts", edits: [] }
+        : toolName === "write"
+          ? { path: "a.ts", content: "x" }
+          : toolName === "bash"
+            ? { command: "touch a" }
+            : { target: "external" }, state.currentBatchId!, "/work")!;
+      state.active = [item];
+      assert.equal(currentBatchHasEffectfulWork(state), true, `${toolName} running may have effects`);
+      state.active = [];
+      for (const status of ["succeeded", "failed", "interrupted"] as const) {
+        appendRecent(state, { ...item, toolCallId: `${item.toolCallId}-${status}`, status });
+        assert.equal(currentBatchHasEffectfulWork(state), true, `${toolName} ${status} may have effects`);
+        state.recent = state.recent.filter((entry) => entry.batchId !== state.currentBatchId);
+      }
+    }
   });
 
   it("interrupts stale active entries, caps history and detects exact-path active conflicts", () => {

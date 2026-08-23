@@ -41,6 +41,10 @@ A proper-lockfile lease allows only one live broker to own a parent-session name
 
 `queued` → `spawning` → `running` ⇄ `idle`, plus `failed`, `stopped`, `paused` (restored over capacity), and `archived` (capacity freed, context retained). See [`manage_agent`](manage-agent.md) for transitions and [Agent lifecycle deadlines](lifecycle.md) for initial-delegation policy, watchdog, recovery, and shutdown semantics.
 
+### Provider retry and terminal recovery
+
+Pi core remains the only automatic retry owner. Workers surface Pi retry lifecycle through existing bounded Activity; retrying attempts neither fail the worker nor change the mail obligation. A final failure keeps the accepted request open. Inspect current-batch Work and native Conversation before an explicit same-identity restart because recorded effects may exist and an empty ledger is not proof of pre-tool safety. See [Provider retry visibility and recovery](provider-retry-recovery.md) for effective trusted settings, event ordering, attribution limits, and scrubbed escalation artifacts.
+
 ## Configuration
 
 All limits, roles, address overrides, and the model-selection policy are configurable; see [configuration.md](configuration.md).

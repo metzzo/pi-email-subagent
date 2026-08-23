@@ -91,6 +91,18 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 - Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
+## Pi retry and transport settings
+
+Provider retry/transport policy is not duplicated in `subagents.json`. Each isolated worker loads Pi's ordinary effective `settings.json` values with the same `cwd`, agent directory, and project-trust decision as the parent runtime:
+
+- global retry/transport settings always apply;
+- `.pi/settings.json` overrides apply only for a trusted project;
+- untrusted project settings are ignored;
+- worker steering/follow-up modes and persisted effort are the only in-memory overrides made by this extension; and
+- Pi defaults are not raised. `retry.provider.maxRetries` remains `0` unless the user explicitly configures it.
+
+The relevant Pi keys are `retry.enabled`, `retry.maxRetries`, `retry.baseDelayMs`, `retry.provider.timeoutMs`, `retry.provider.maxRetries`, `retry.provider.maxRetryDelayMs`, `transport`, `httpIdleTimeoutMs`, and `websocketConnectTimeoutMs`. A global/project settings load error is reported by scope in bounded worker Activity without copying file content. See [Provider retry visibility and recovery](provider-retry-recovery.md).
+
 ## Default roles
 
 | Role | Effort | Tools | Intent |

@@ -86,6 +86,7 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   const manageGuidance = (tools[3].promptGuidelines ?? []).join("\n");
   assert.match(manageGuidance, /stop.*does not free.*maxAgents/i);
   assert.match(manageGuidance, /cancel only.*explicitly abandoned.*exact requests/i);
+  assert.match(manageGuidance, /restarting a failed agent.*inspect.*Work.*Conversation.*restart.*same identity/i);
 });
 
 it("previews an initial effort override without spawning", async () => {
@@ -206,6 +207,68 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
   assert.deepEqual(details.inspection.capacity, inspection.capacity);
   assert.equal(details.inspection.holdsActivationLease, true);
   assert.equal(details.inspection.archiveEligible, false);
+});
+
+it("renders terminal recovery from existing failure, mailbox, and current-batch work without private payloads", async () => {
+  const work = {
+    nextBatchId: 2,
+    currentBatchId: 1,
+    active: [],
+    recent: [{
+      toolCallId: "effect", batchId: 1, toolName: "bash", kind: "shell", attribution: "unverified", status: "succeeded",
+      startedAt: "2026-08-23T00:00:00.000Z", endedAt: "2026-08-23T00:00:01.000Z", commandPreview: "PRIVATE COMMAND",
+    }],
+    inspection: { reads: 0, searches: 0, listings: 0 },
+  };
+  const inspection = {
+    address: "worker.failed@gpt-5.4.com", exists: true, wouldSpawn: false, capacityAvailable: true,
+    capacity: { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 }, holdsActivationLease: true,
+    modelId: "gpt-5.4", provider: "openai-codex", effort: "medium", role: "worker",
+    tools: ["bash", "send_email", "fetch_emails"], writable: true, canSpawn: true, state: "failed",
+    queued: 0, unanswered: 1, outgoingUnanswered: 0, pendingReplies: 0, archiveEligible: false,
+    archiveBlockers: {
+      active: false, cleanupQuarantine: false,
+      queued: { count: 0, requestIds: [], omitted: 0 },
+      incomingUnanswered: { count: 1, requestIds: ["mail_open"], omitted: 0 },
+      outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 },
+      pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+    },
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    failure: "WebSocket error terminally",
+    providerReady: "unknown",
+    lifecycle: {
+      spawnTimeoutMs: 30_000, promptAcceptanceTimeoutMs: 30_000, runTimeoutMs: 10_000,
+      idleTimeoutMs: 5_000, abortTimeoutMs: 1_000, disposeTimeoutMs: 1_000, brokerShutdownTimeoutMs: 5_000,
+    },
+  };
+  const broker = {
+    inspectAgent: () => inspection,
+    mailStore: { list: () => [{
+      to: inspection.address, kind: "request", requiresResponse: true, deliveryState: "delivered", answeredAt: undefined,
+      subject: "PRIVATE MAIL SUBJECT", message: "PRIVATE MAIL BODY",
+    }] },
+    getSnapshot: () => ({ agents: [{
+      address: inspection.address,
+      provider: inspection.provider,
+      modelId: inspection.modelId,
+      work,
+      activity: [{ at: "2026-08-23T00:00:02.000Z", kind: "status", summary: "Agent run failed" }],
+    }] }),
+  } as unknown as AgentBroker;
+  const [inspect] = createMainCoordinationTools(() => broker);
+  const rendered = await inspect.execute("inspect-failure", { address: inspection.address }, undefined, undefined, {} as never);
+  const text = (rendered.content[0] as { text: string }).text;
+  assert.match(text, /Terminal worker run failure.*openai-codex\/gpt-5\.4.*external or unclear/is);
+  assert.match(text, /1 delivered request remains unanswered/i);
+  assert.match(text, /current batch includes mutation\/shell\/custom work.*effects may exist/is);
+  assert.match(text, /inspect Work and Conversation.*explicit same-identity restart/is);
+  assert.doesNotMatch(text, /PRIVATE COMMAND|PRIVATE MAIL SUBJECT|PRIVATE MAIL BODY/);
+
+  work.recent = [];
+  const cautious = await inspect.execute("inspect-empty-failure", { address: inspection.address }, undefined, undefined, {} as never);
+  const cautiousText = (cautious.content[0] as { text: string }).text;
+  assert.match(cautiousText, /No mutation\/shell\/custom effect is recorded.*not proof of pre-tool failure/is);
+  assert.match(cautiousText, /inspect Conversation.*same-identity restart/is);
 });
 
 it("reports actual post-action identity capacity in manage_agent results", async () => {
