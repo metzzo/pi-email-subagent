@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { assertPackageMarkdownLinks, assertPackageSurface, type PackResult } from "./package-policy.ts";
+import { SUPPORTED_PI_VERSION } from "../src/pi-compat.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const pi = join(root, "node_modules", ".bin", process.platform === "win32" ? "pi.cmd" : "pi");
@@ -65,7 +66,7 @@ try {
 
   const settings = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8")) as { packages?: unknown[] };
   assert.equal(settings.packages?.length, 1, "package install was not persisted in the isolated agent directory");
-  console.log(`package smoke passed: ${pack.files.length} files, /agents loaded from packed artifact`);
+  console.log(`package smoke passed on supported Pi ${SUPPORTED_PI_VERSION}: ${pack.files.length} files, /agents loaded from packed artifact`);
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

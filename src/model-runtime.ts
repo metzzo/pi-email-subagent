@@ -1,5 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { ModelRuntime, type CreateModelRuntimeOptions, type ModelRegistry } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import type { CreateModelRuntimeOptions, ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 /**
  * Copy extension-registered providers from the parent Pi session into the
@@ -42,7 +43,7 @@ export class WorkerRuntimeFactory {
   constructor(
     private readonly source: ModelRegistry,
     private readonly options: CreateModelRuntimeOptions,
-    private readonly createRuntime: RuntimeCreator = ModelRuntime.create,
+    private readonly createRuntime: RuntimeCreator = PiCodingAgent.ModelRuntime.create,
   ) {
     this.providers = source.getRegisteredProviderIds().flatMap((id): ProviderSnapshot[] => {
       const nativeProvider = source.getRegisteredNativeProvider(id);

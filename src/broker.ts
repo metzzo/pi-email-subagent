@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   AddressError,
   ModelCatalog,
@@ -412,7 +412,7 @@ export class AgentBroker {
         try {
           const info = await stat(record.sessionFile);
           if (info.size > 20 * 1024 * 1024) throw new Error("session exceeds 20 MB recovery bound");
-          const manager = SessionManager.open(record.sessionFile, join(this.options.namespaceDir, "sessions"), this.options.cwd);
+          const manager = PiCodingAgent.SessionManager.open(record.sessionFile, join(this.options.namespaceDir, "sessions"), this.options.cwd);
           record.work = recoverMutationWork(manager.getBranch(), this.options.cwd, record.work ?? emptyWorkState());
         } catch (error) {
           record.work ??= emptyWorkState();

@@ -1,12 +1,16 @@
 import { stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { renderDiff, SessionManager, truncateHead, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
 import { isThinkingLevel } from "./config.ts";
 import type { AgentInspection, AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
 import { activePathConflicts, aggregateWork, capPatch, countWrite, currentBatchHasEffectfulWork } from "./work-ledger.ts";
 import { errorMessage, truncateText } from "./util.ts";
+
+const { renderDiff, SessionManager, truncateHead } = PiCodingAgent;
+const { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } = PiTui;
 
 interface DashboardAction {
   kind: "close" | "compose" | "conversation" | "diff" | "stop" | "restart" | "archive" | "clear_failure" | "effort";

@@ -1,13 +1,13 @@
-import { StringEnum } from "@earendil-works/pi-ai";
-import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import * as PiAi from "@earendil-works/pi-ai";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import * as TypeBox from "typebox";
 import type { AgentBroker } from "./broker.ts";
 import { textResult } from "./tool-result.ts";
 import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
 import { byteLength, errorMessage } from "./util.ts";
 import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 
-const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+const { Type } = TypeBox;
 const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated. Later replies are delivered automatically to the main thread when they arrive (or after broker/session restoration). No immediate wait_for_replies rejoin is needed merely to keep requests alive. Rejoin only for a deliberate synchronous collection/status window.";
 
 export interface InspectAgentToolDetails {
@@ -77,7 +77,8 @@ function compactWaitDetails(result: WaitForRepliesResult): WaitForRepliesResult 
 }
 
 export function createMainCoordinationTools(getBroker: () => AgentBroker | undefined) {
-  const inspect = defineTool({
+  const EffortSchema = PiAi.StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+  const inspect = PiCodingAgent.defineTool({
     name: "inspect_agent",
     label: "Inspect agent",
     description:
@@ -151,7 +152,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     },
   });
 
-  const wait = defineTool({
+  const wait = PiCodingAgent.defineTool({
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
@@ -205,7 +206,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     },
   });
 
-  const cancel = defineTool({
+  const cancel = PiCodingAgent.defineTool({
     name: "cancel_request",
     label: "Cancel request",
     description:
@@ -242,7 +243,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     },
   });
 
-  const manage = defineTool({
+  const manage = PiCodingAgent.defineTool({
     name: "manage_agent",
     label: "Manage agent",
     description:
@@ -256,7 +257,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     executionMode: "sequential" as const,
     parameters: Type.Object({
       address: Type.String({ description: "Existing subagent address" }),
-      action: StringEnum(["stop", "restart", "archive", "clear_failure"] as const),
+      action: PiAi.StringEnum(["stop", "restart", "archive", "clear_failure"] as const),
     }, { additionalProperties: false }),
     async execute(_id, params) {
       try {

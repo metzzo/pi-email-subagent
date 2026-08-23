@@ -1,16 +1,10 @@
 import { existsSync } from "node:fs";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { StringEnum, type Model } from "@earendil-works/pi-ai";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  defineTool,
-  ModelRuntime,
-  SessionManager,
-  SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import * as PiAi from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import * as TypeBox from "typebox";
 import { MAX_TIMER_DELAY_MS } from "./config.ts";
 import type {
   ActivityItem,
@@ -30,16 +24,7 @@ import { textResult } from "./tool-result.ts";
 import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem } from "./work-ledger.ts";
 
-const PrioritySchema = StringEnum(["high", "low"] as const);
-const EffortSchema = StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
-const LifecycleSchema = Type.Object({
-  spawnTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-  promptAcceptanceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-  runTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-  idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-  abortTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-  disposeTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-}, { additionalProperties: false, description: "Optional finite deadlines for a newly created recipient only; configured administrative maxima apply" });
+const { Type } = TypeBox;
 
 export interface SendToolDetails {
   result?: SendEmailResult;
@@ -51,7 +36,17 @@ export interface FetchToolDetails {
 }
 
 export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail" | "fetchEmails">) {
-  const send = defineTool({
+  const PrioritySchema = PiAi.StringEnum(["high", "low"] as const);
+  const EffortSchema = PiAi.StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
+  const LifecycleSchema = Type.Object({
+    spawnTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+    promptAcceptanceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+    runTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+    idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+    abortTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+    disposeTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
+  }, { additionalProperties: false, description: "Optional finite deadlines for a newly created recipient only; configured administrative maxima apply" });
+  const send = PiCodingAgent.defineTool({
     name: "send_email",
     label: "Send email",
     description:
@@ -107,7 +102,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     },
   });
 
-  const fetch = defineTool({
+  const fetch = PiCodingAgent.defineTool({
     name: "fetch_emails",
     label: "Fetch unanswered emails",
     description:
@@ -233,7 +228,7 @@ export class SdkWorker implements WorkerTransport {
     this.cwd = config.cwd;
     this.setState("spawning");
 
-    const settings = SettingsManager.create(config.cwd, config.agentDir, { projectTrusted: config.projectTrusted });
+    const settings = PiCodingAgent.SettingsManager.create(config.cwd, config.agentDir, { projectTrusted: config.projectTrusted });
     const settingsErrors = settings.drainErrors();
     settings.applyOverrides({
       steeringMode: "all",
@@ -243,7 +238,7 @@ export class SdkWorker implements WorkerTransport {
     for (const { scope } of settingsErrors) {
       this.activity("error", `Pi ${scope} settings could not be loaded; Pi fallback settings apply for that scope.`);
     }
-    const loader = new DefaultResourceLoader({
+    const loader = new PiCodingAgent.DefaultResourceLoader({
       cwd: config.cwd,
       agentDir: config.agentDir,
       settingsManager: settings,
@@ -258,8 +253,8 @@ export class SdkWorker implements WorkerTransport {
       ? this.record.sessionFile
       : undefined;
     const sessionManager = resumableSessionFile
-      ? SessionManager.open(resumableSessionFile, config.sessionDir, config.cwd)
-      : SessionManager.create(config.cwd, config.sessionDir);
+      ? PiCodingAgent.SessionManager.open(resumableSessionFile, config.sessionDir, config.cwd)
+      : PiCodingAgent.SessionManager.create(config.cwd, config.sessionDir);
 
     this.sessionManager = sessionManager;
     try {
@@ -270,7 +265,7 @@ export class SdkWorker implements WorkerTransport {
     }
 
     const requestedTools = [...this.record.tools];
-    const { session } = await createAgentSession({
+    const { session } = await PiCodingAgent.createAgentSession({
       cwd: config.cwd,
       agentDir: config.agentDir,
       modelRuntime: this.modelRuntime,

@@ -8,7 +8,7 @@ it("accepts the supported Pi public feature surface", () => {
 
 it("reports an actionable supported-Pi error for a missing required public feature", () => {
   assert.throws(
-    () => assertPiRuntimeFeatures({ SessionManager: { open() {} } }, {}, {}),
+    () => assertPiRuntimeFeatures({ SessionManager: { open() {} } }, {}, {}, {}),
     /requires the Pi 0\.81\.1 public API surface.*@earendil-works\/pi-coding-agent\.getAgentDir.*Install Pi 0\.81\.1/s,
   );
 });

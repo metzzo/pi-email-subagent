@@ -1,6 +1,9 @@
 import * as PiAi from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
+import * as TypeBox from "typebox";
+
+export const SUPPORTED_PI_VERSION = "0.81.1";
 
 interface Feature {
   path: string;
@@ -41,20 +44,26 @@ const TUI_FEATURES: Feature[] = [
   { path: "wrapTextWithAnsi", present: (module) => callable(module.wrapTextWithAnsi) },
 ];
 
+const TYPEBOX_FEATURES: Feature[] = [
+  { path: "Type", present: (module) => typeof module.Type === "object" && module.Type !== null },
+];
+
 export function assertPiRuntimeFeatures(
   codingAgent: Record<string, unknown>,
   ai: Record<string, unknown>,
   tui: Record<string, unknown>,
+  typebox: Record<string, unknown>,
 ): void {
   const missing = [
     ...CODING_AGENT_FEATURES.filter((feature) => !feature.present(codingAgent)).map((feature) => `@earendil-works/pi-coding-agent.${feature.path}`),
     ...AI_FEATURES.filter((feature) => !feature.present(ai)).map((feature) => `@earendil-works/pi-ai.${feature.path}`),
     ...TUI_FEATURES.filter((feature) => !feature.present(tui)).map((feature) => `@earendil-works/pi-tui.${feature.path}`),
+    ...TYPEBOX_FEATURES.filter((feature) => !feature.present(typebox)).map((feature) => `typebox.${feature.path}`),
   ];
   if (missing.length > 0) {
     throw new Error(
-      `pi-email-subagent requires the Pi 0.81.1 public API surface; missing required feature(s): ${missing.join(", ")}. `
-      + "Install Pi 0.81.1 or use an extension release explicitly tested for your Pi version.",
+      `pi-email-subagent requires the Pi ${SUPPORTED_PI_VERSION} public API surface; missing required feature(s): ${missing.join(", ")}. `
+      + `Install Pi ${SUPPORTED_PI_VERSION} or use an extension release explicitly tested for your Pi version.`,
     );
   }
 }
@@ -64,5 +73,6 @@ export function assertSupportedPiRuntime(): void {
     PiCodingAgent as unknown as Record<string, unknown>,
     PiAi as unknown as Record<string, unknown>,
     PiTui as unknown as Record<string, unknown>,
+    TypeBox as unknown as Record<string, unknown>,
   );
 }
