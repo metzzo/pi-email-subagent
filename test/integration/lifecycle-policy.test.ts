@@ -300,12 +300,15 @@ describe("initial delegation lifecycle", () => {
       assert.equal(saves, 0);
       assert.equal(adapter.snapshots.length, snapshots);
       assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
+      worker.emit({
+        type: "tool_lifecycle", phase: "end", toolCallId: "stream", toolName: "bash", at: new Date().toISOString(),
+      } as never);
     } finally {
       await broker.shutdown();
     }
   });
 
-  it("fails and releases a hanging run at the absolute run deadline", async () => {
+  it("fails and quarantines an active tool at the absolute run deadline without a receipt", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-run-"));
     const workers: FakeWorker[] = [];
     const broker = await brokerWith(root, () => {
@@ -329,11 +332,13 @@ describe("initial delegation lifecycle", () => {
         const inspection = broker.inspectAgent(sent.envelope.to);
         assert.equal(inspection.state, "failed");
         assert.match(inspection.failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
+        assert.equal(inspection.cleanup?.state, "unknown");
         assert.equal(workers[0]?.disposed, true);
       });
+      assert.equal((broker as any).active.has(sent.envelope.to), true, "active capacity remains held without proof");
       assert.equal(broker.fetchUnanswered(sent.envelope.to).length, 1, "accepted request remains an open obligation");
     } finally {
-      await broker.shutdown();
+      await broker.shutdown().catch(() => undefined);
     }
   });
 

@@ -143,6 +143,28 @@ export interface AgentWorkState {
   recoveryError?: string;
 }
 
+export type CleanupPhaseState = "pending" | "succeeded" | "failed" | "timed-out";
+
+export interface CleanupToolRef {
+  toolCallId: string;
+  toolName: string;
+}
+
+/** Persisted fail-closed summary; an in-memory cleanup Promise is never persisted. */
+export interface CleanupDiagnostic {
+  state: "pending" | "unknown";
+  reasonCode: string;
+  workerGeneration: number;
+  startedAt: string;
+  updatedAt: string;
+  abort: CleanupPhaseState;
+  dispose: CleanupPhaseState;
+  quiescence: "unknown";
+  heldCapacity: true;
+  activeTools: CleanupToolRef[];
+  detail?: string;
+}
+
 export interface AgentRecord {
   address: string;
   name: string;
@@ -160,6 +182,7 @@ export interface AgentRecord {
   lastActivityAt?: string;
   currentActivity?: string;
   failure?: string;
+  cleanup?: CleanupDiagnostic;
   enforcementAttempts: number;
   lifecycle: LifecyclePolicy;
   usage: UsageSnapshot;
@@ -223,6 +246,7 @@ export interface AgentInspection {
   pendingReplies: number;
   usage: UsageSnapshot;
   failure?: string;
+  cleanup?: CleanupDiagnostic;
   providerReady: "available" | "unknown";
   lifecycle: LifecyclePolicy;
 }
@@ -270,6 +294,26 @@ export interface WorkerSnapshot {
   isStreaming: boolean;
 }
 
+export interface WorkerCleanupToolReport extends CleanupToolRef {
+  quiescence: "verified" | "not-applicable" | "unknown";
+  detailCode?: string;
+}
+
+export interface WorkerCleanupReport {
+  sessionDisposed: boolean;
+  providerQuiescent: boolean;
+  tools: WorkerCleanupToolReport[];
+  quiescence: "verified" | "unknown";
+  source: string;
+  abort: CleanupPhaseState;
+  dispose: CleanupPhaseState;
+  detail?: string;
+}
+
+export interface WorkerCleanupOptions {
+  abortTimeoutMs: number;
+}
+
 export interface WorkerStartConfig {
   record: AgentRecord;
   model: Model<any>;
@@ -289,6 +333,7 @@ export interface WorkerTransport {
   followUp(message: string): Promise<void>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
+  cleanup(options: WorkerCleanupOptions): Promise<WorkerCleanupReport>;
   setEffort(level: ThinkingLevel): void;
   getSnapshot(): WorkerSnapshot;
   getSessionFile(): string | undefined;

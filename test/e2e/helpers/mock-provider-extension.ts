@@ -17,6 +17,7 @@
  *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
  *   user "E2E DELEGATE WORK"                        → writable worker performs edit/write/bash
  *   user "E2E WATCHDOG IDLE|RUN PATH <path>"         → writable worker runs a real silent Bash child
+ *   user "E2E CLEANUP START|STOP ..."                 → writable worker runs/stops a parent+descendant process
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
  *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
@@ -151,6 +152,22 @@ function planMain(messages: readonly Message[]): Plan {
   }
 
   if (lastText.includes('<agent-email') && lastText.includes('kind="reply"')) return { text: "E2E REPLY SEEN" };
+  if (lastText.includes("E2E CLEANUP STOP")) {
+    return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WRITER_ADDRESS, action: "stop" } }] };
+  }
+  if (lastText.includes("E2E CLEANUP START")) {
+    const paths = / PATH ([^\s]+) HEARTBEAT ([^\s]+)/.exec(lastText);
+    if (!paths) return { text: "E2E CLEANUP PATHS MISSING" };
+    return { toolCalls: [{
+      name: "send_email",
+      arguments: {
+        to: MOCK_WRITER_ADDRESS,
+        subject: "Verify cleanup quarantine",
+        message: `CLEANUP PROCESS PATH ${paths[1]} HEARTBEAT ${paths[2]}`,
+        priority: "low",
+      },
+    }] };
+  }
   if (lastText.includes("E2E STOP")) {
     return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "stop" } }] };
   }
@@ -253,6 +270,17 @@ function planWorker(messages: readonly Message[]): Plan {
 
   if (last?.role === "toolResult") {
     if (last.toolName === "fetch_emails") {
+      if (lastText.includes("CLEANUP PROCESS") && lastToolResultIndex(messages, "bash") < 0) {
+        const paths = /CLEANUP PROCESS PATH ([^\s<]+) HEARTBEAT ([^\s<]+)/.exec(lastText);
+        if (!paths) return { text: "WORKER MISSING CLEANUP PATHS" };
+        return { toolCalls: [{
+          name: "bash",
+          arguments: {
+            command: `${JSON.stringify(process.execPath)} --import tsx test/e2e/helpers/descendant-process.ts ${JSON.stringify(paths[1])} ${JSON.stringify(paths[2])}`,
+            timeout: 30,
+          },
+        }] };
+      }
       if (lastText.includes("WATCHDOG") && lastToolResultIndex(messages, "bash") < 0) {
         const match = /WATCHDOG (IDLE|RUN) PATH ([^\s<]+)/.exec(lastText);
         if (!match) return { text: "WORKER MISSING WATCHDOG PATH" };

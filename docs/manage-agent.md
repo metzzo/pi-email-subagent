@@ -13,11 +13,11 @@ Control an existing agent's lifecycle without assigning work. Main-thread only. 
 
 ### `stop`
 
-Aborts the agent's current run and disposes its worker. State becomes `stopped`; the record, session file, and mailbox are retained. Queued inbound mail stays queued and later sends are still accepted (disposition `stopped`) but do not run until a restart. Errors when the address is unknown or the agent is `archived`.
+Detaches routing immediately and joins the worker's one cleanup lease. State becomes `stopped` only after a structured verified cleanup report; the record, session file, and mailbox are retained. If cleanup misses its caller deadline, rejects, or cannot prove active-tool/process quiescence, state is failed with a sticky cleanup quarantine instead. Capacity remains held, queued inbound mail stays queued, and later sends remain durable but do not run. Errors when the address is unknown or the agent is `archived`.
 
 ### `restart`
 
-Disposes any worker and creates a fresh one bound to the same persistent session file and mailbox, then resumes enforcement for unanswered mail or scheduling for queued mail. Clears `failure` and the reminder counter. Requires free capacity under `maxAgents` when the agent no longer holds an activation lease.
+Joins verified cleanup of any old worker before creating a fresh one bound to the same persistent session file and mailbox. No replacement is created while cleanup is pending or unknown. A cleanup that verifies after the caller deadline may complete the requested replacement generation-safely; otherwise an explicit later restart is required. The replacement resumes enforcement for unanswered mail or scheduling for queued mail and clears `failure` and the reminder counter. Requires free capacity under `maxAgents` when the agent no longer holds an activation lease.
 
 ### `archive`
 
@@ -26,11 +26,11 @@ Frees the agent's activation lease (capacity) while keeping its record, session,
 - Running, spawning, or streaming agents must be stopped and settled first.
 - The agent must have no queued mail and no open obligations in either direction — no unanswered requests addressed to it, and no requests it sent that are still unanswered or have a reply pending delivery. Completed identities should answer all mail. If the user intentionally abandons a request to an inactive recipient, close that exact obligation first with [`cancel_request`](cancel-request.md); cancellation is audited and is not a fabricated answer.
 
-Already-archived agents are a no-op. Sending new mail to an archived address restores it (disposition `restored`). Archive clean completed identities instead of creating unlimited replacement addresses.
+The activation lease is released only after any live worker reports verified cleanup. Pending/unknown cleanup blocks archive and retains capacity. Already-archived agents are a no-op. Sending new mail to an archived address restores it (disposition `restored`). Archive clean completed identities instead of creating unlimited replacement addresses.
 
 ### `clear_failure`
 
-Deletes the stored `failure` diagnostic. Only valid while the agent is `idle`, `stopped`, or `archived`; a failure on a live obligation path must be resolved by `restart` or by answering the mail, not by clearing the message.
+Deletes the stored `failure` diagnostic. Only valid while the agent is `idle`, `stopped`, or `archived`, and never while cleanup is quarantined: clearing text cannot establish quiescence or release held capacity. A failure on a live obligation path must be resolved by `restart` or by answering the mail, not by clearing the message.
 
 ## Result
 
@@ -38,7 +38,7 @@ Deletes the stored `failure` diagnostic. Only valid while the agent is `idle`, `
 restart completed for reviewer.audit@gpt-5.6-sol.com. State: idle.
 ```
 
-`details` carries `address`, `action`, and the resulting `state` (read back via inspection). Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true` — unknown address, invalid transition, capacity limit, or unmet archival preconditions.
+`details` carries `address`, `action`, and the resulting `state` (read back via inspection). Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true` — unknown address, invalid transition, capacity limit, unmet archival preconditions, cleanup deadline, or unknown quiescence. Use [`inspect_agent`](inspect-agent.md) for the bounded cleanup phase diagnostic.
 
 ## Equivalents
 

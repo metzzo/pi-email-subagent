@@ -19,6 +19,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Mechanical completion replies that deliver a successful worker's visible final text when it forgets to call `send_email`, without duplicating explicit replies.
 - Exact-ID administrative cancellation for intentionally abandoned requests to inactive recipients, with durable actor/reason audit metadata and no fabricated reply.
 - Initial-delegation `effort` overrides on `send_email`, including side-effect-free prospective previews through `inspect_agent` and crash-safe spawn-intent recovery.
+- Generation-bound worker cleanup leases with persisted fail-closed quarantine diagnostics, held capacity/address ownership, durable queued-mail preservation, late-settlement observation, and namespace-safe shutdown handoff.
 
 ### Changed
 
@@ -29,6 +30,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - The dashboard and Agents widget label paused, stopped, and archived identities uniformly as `closed`; internal lifecycle/API states remain distinct.
 - When an enabled model ID exists under multiple providers, email routing prefers the main session's current provider and remains fail-closed when that does not uniquely resolve the model.
 - Active tool calls now disarm only the idle watchdog until the last exact parallel call ends; the finite absolute run deadline remains unchanged, and tool progress liveness carries no arguments or output.
+- Stop/restart/archive now require affirmative cleanup confidence instead of treating abort/dispose caller deadlines as cancellation. Pi 0.81.1 active-tool cleanup remains explicitly unknown because its public API exposes no process-quiescence receipt.
 
 ### Security
 

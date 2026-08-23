@@ -18,6 +18,8 @@ import type {
   EmailEnvelope,
   SendEmailInput,
   SendEmailResult,
+  WorkerCleanupOptions,
+  WorkerCleanupReport,
   WorkerEvent,
   WorkerSnapshot,
   WorkerStartConfig,
@@ -176,7 +178,8 @@ export class SdkWorker implements WorkerTransport {
   private listeners = new Set<(event: WorkerEvent) => void>();
   private unsubscribeSession?: () => void;
   private disposed = false;
-  private disposePromise?: Promise<void>;
+  private cleanupPromise?: Promise<WorkerCleanupReport>;
+  private readonly activeToolCalls = new Map<string, string>();
   private startGeneration = 0;
   private runFailure?: string;
   private completionText?: string;
@@ -296,6 +299,7 @@ export class SdkWorker implements WorkerTransport {
         this.activity("status", "Agent run started");
         break;
       case "tool_execution_start": {
+        this.activeToolCalls.set(event.toolCallId, event.toolName);
         this.emit({
           type: "tool_lifecycle",
           phase: "start",
@@ -329,6 +333,7 @@ export class SdkWorker implements WorkerTransport {
         });
         break;
       case "tool_execution_end": {
+        this.activeToolCalls.delete(event.toolCallId);
         this.emit({
           type: "tool_lifecycle",
           phase: "end",
@@ -458,34 +463,81 @@ export class SdkWorker implements WorkerTransport {
     }
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposePromise) return this.disposePromise;
+  cleanup(options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
+    if (this.cleanupPromise) return this.cleanupPromise;
     this.disposed = true;
     this.startGeneration += 1;
     const session = this.session;
     const unsubscribe = this.unsubscribeSession;
+    const activeTools = [...this.activeToolCalls].map(([toolCallId, toolName]) => ({ toolCallId, toolName }));
     this.session = undefined;
     this.sessionManager = undefined;
     this.unsubscribeSession = undefined;
-    const operation = (async () => {
-      let cleanupError: unknown;
-      try {
-        if (session?.isStreaming) await session.abort();
-      } catch (error) {
-        cleanupError = error;
-      } finally {
-        unsubscribe?.();
+    this.activeToolCalls.clear();
+    unsubscribe?.();
+
+    const operation = (async (): Promise<WorkerCleanupReport> => {
+      let abort: WorkerCleanupReport["abort"] = "succeeded";
+      let dispose: WorkerCleanupReport["dispose"] = "succeeded";
+      let providerQuiescent = !session?.isStreaming;
+      let detail: string | undefined;
+      if (session?.isStreaming) {
+        const abortPromise = session.abort();
+        abortPromise.catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          session?.dispose();
-        } catch (error) {
-          cleanupError ??= error;
+          const result = await Promise.race([
+            abortPromise.then(() => "succeeded" as const, (error: unknown) => {
+              detail = truncateText(errorMessage(error), 500);
+              return "failed" as const;
+            }),
+            new Promise<"timed-out">((resolve) => {
+              timer = setTimeout(() => resolve("timed-out"), options.abortTimeoutMs);
+            }),
+          ]);
+          abort = result;
+          providerQuiescent = result === "succeeded";
+          if (result === "timed-out") detail = `LIFECYCLE_ABORT_TIMEOUT: session abort did not settle after ${options.abortTimeoutMs}ms`;
+        } finally {
+          if (timer) clearTimeout(timer);
         }
+      }
+      try {
+        session?.dispose();
+      } catch (error) {
+        dispose = "failed";
+        detail = truncateText(errorMessage(error), 500);
+      } finally {
         this.listeners.clear();
       }
-      if (cleanupError) throw cleanupError;
+      const tools = activeTools.map((tool) => ({
+        ...tool,
+        quiescence: "unknown" as const,
+        detailCode: "PI_TOOL_QUIESCENCE_RECEIPT_UNAVAILABLE",
+      }));
+      const quiescence = providerQuiescent && dispose === "succeeded" && tools.length === 0 ? "verified" as const : "unknown" as const;
+      return {
+        sessionDisposed: dispose === "succeeded",
+        providerQuiescent,
+        tools,
+        quiescence,
+        source: quiescence === "verified"
+          ? "pi-agent-session-idle-with-no-active-tools"
+          : "pi-0.81.1-no-tool-process-quiescence-receipt",
+        abort,
+        dispose,
+        ...(detail ? { detail } : {}),
+      };
     })();
-    this.disposePromise = operation;
+    this.cleanupPromise = operation;
     return operation;
+  }
+
+  async dispose(): Promise<void> {
+    const report = await this.cleanup({ abortTimeoutMs: MAX_TIMER_DELAY_MS });
+    if (report.abort === "failed" || report.dispose === "failed") {
+      throw new Error(report.detail ?? "Worker cleanup failed.");
+    }
   }
 
   setEffort(level: AgentRecord["effort"]): void {

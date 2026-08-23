@@ -2,13 +2,25 @@
 
 ## Status, priority, and classification
 
-- **Status:** proposed; audit evidence and current-code hazards confirmed; implementation not started
+- **Status:** extension containment complete with focused and full validation passed; generic active-tool process quiescence remains blocked on a released Pi receipt
 - **Priority:** P1 safety/reliability
 - **Classification:** async lifecycle cleanup, process quiescence, capacity/namespace ownership, late-promise races
-- **Target baseline inspected:** `6e869743957f8f5b8be99dc642af2345c9ce7ee7`
+- **Target baseline inspected:** `5bbcce0c1f40f50c586b79a6a14c5eece3388560`
 - **Ownership split:** broker containment belongs in this extension; an authoritative built-in tool/process quiescence receipt may require Pi-core support
 
 The release criterion is not “the abort/dispose call returned before a timer.” It is “the old worker can no longer execute provider/tool callbacks or mutate the shared workspace/namespace before ownership is reused.”
+
+## Implementation result and residual blocker
+
+The extension containment layer is implemented. Every broker teardown route now joins one cleanup lease bound to the exact `WorkerTransport` and monotonically assigned worker generation. Starting cleanup synchronously removes routing and subscriptions but retains the address quarantine, activation lease, and any active/concurrency slot. Caller timeout marks bounded persisted `pending`/`unknown` cleanup phases without cancelling or forgetting the underlying Promise. Late verified fake-worker receipts release only their exact lease and can resume one requested replacement; late rejection stays quarantined. Restart, archive, clear-failure, exact-address restoration, high-priority steering, and new mutable scheduling fail closed while unknown, while accepted mail remains queued with its stable journal ID. Persisted `pending` state becomes sticky `unknown` after process restart. Shutdown and session handoff retain namespace ownership rather than starting a replacement over unknown cleanup.
+
+`SdkWorker.cleanup()` is one reused Promise. It suppresses events and unsubscribes immediately, bounds SDK abort response, always invokes session disposal, and returns content-free provider/session/tool confidence. A clean SDK session with no known active tool can verify callback settlement. Any tool active at cleanup start remains `unknown` with `PI_TOOL_QUIESCENCE_RECEIPT_UNAVAILABLE`; arguments, commands, output, and environment never enter the report or registry.
+
+The directly recorded representative Linux test uses the real Pi 0.81.1 SDK worker and built-in Bash to start one Node parent plus an ordinary same-process-group Node descendant. Structured readiness records the exact parent/child PIDs and a unique heartbeat. On stop, both exact PIDs become absent and the heartbeat stops; red and green cleanup use only those recorded PIDs. This verifies that one tested same-group topology terminates. It does not reproduce the historical surviving `worker.js` launch pattern, which is absent from this checkout, and it does not prove escaped descendants, other topologies, or other platforms.
+
+The installed supported contract documents `AgentSession.abort()` as waiting for agent idle, while `dispose()` returns void; neither returns a tracked process-group absence receipt. `shell.js` performs a group `SIGKILL`, but its tracking/kill functions are not an awaited public quiescence capability. Therefore the full issue-cluster release gate remains blocked: no released Pi version consumed here can provide authoritative generic active-tool/process quiescence. No `node_modules` or external repository was patched, and the extension deliberately keeps active-tool cleanup quarantined rather than fabricating `verified` confidence.
+
+Focused SDK/registry, ownership-race, persisted-recovery, namespace-lock, and real-process tests pass. The full unit, integration, E2E, aggregate, package-smoke, license, validation, worktree-secret, and configured Git-history secret scans also pass. The passing test matrix releases the extension containment layer; it does not remove the explicit Pi-core blocker above.
 
 ## Evidence and confidence boundaries
 

@@ -573,7 +573,8 @@ export class DashboardComponent {
         const address = sanitizeConversationLabel(agent.address);
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg(color, `${prefix} ${statusIcon(agent.state)} ${address}`));
-        lines.push(this.theme.fg("dim", `    ${displayStatus(agent.state)} · ${modelId} · effort ${agent.effort} · ${usage}`));
+        const quarantine = agent.cleanup ? " · cleanup unknown · capacity held" : "";
+        lines.push(this.theme.fg("dim", `    ${displayStatus(agent.state)} · ${modelId} · effort ${agent.effort} · ${usage}${quarantine}`));
         const work = agent.work;
         const active = [...(work?.active ?? [])].sort((a, b) => (a.attribution === "explicit" ? -1 : 1) - (b.attribution === "explicit" ? -1 : 1));
         const now = active[0];
@@ -599,6 +600,9 @@ export class DashboardComponent {
         lines.push(this.theme.fg("dim", `[${this.tab === "work" ? "Work" : "work"}] [${this.tab === "activity" ? "Activity" : "activity"}] [${this.tab === "inbox" ? "Inbox" : "inbox"}] [${this.tab === "profile" ? "Profile/Lifecycle" : "profile/lifecycle"}]`));
         // Keep deadline disclosure visible in every detail tab; Profile adds tools/failure context.
         lines.push(this.theme.fg("dim", `lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms · prompt ${agent.lifecycle.promptAcceptanceTimeoutMs}ms · run ${agent.lifecycle.runTimeoutMs}ms · idle ${agent.lifecycle.idleTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
+        if (agent.cleanup) {
+          lines.push(this.theme.fg("error", `cleanup ${agent.cleanup.state}: quiescence unknown · capacity held · restart/archive blocked`));
+        }
         lines.push("");
         if (this.tab === "work") {
           const active = agent.work?.active ?? [];
@@ -745,12 +749,13 @@ export class UIController {
       const idle = agents.filter((agent) => agent.state === "idle").length;
       const failed = agents.filter((agent) => agent.state === "failed").length;
       const spawning = agents.filter((agent) => agent.state === "spawning").length;
+      const cleanupUnknown = agents.filter((agent) => Boolean(agent.cleanup)).length;
       const closed = agents.filter((agent) => CLOSED_STATES.has(agent.state)).length;
       const activeMutations = agents.flatMap((agent) => (agent.work?.active ?? []).filter((item) => item.attribution === "explicit").map((item) => sanitizeConversationLabel(`${agent.name}: ${item.kind} ${item.displayPath ?? "unknown"}`)));
       const conflicts = activePathConflicts(agents);
       const work = activeMutations.length ? ` · now ${activeMutations.slice(0, 2).join("; ")}${activeMutations.length > 2 ? ` +${activeMutations.length - 2}` : ""}` : "";
       const warning = conflicts.size ? ` · ⚠ ${conflicts.size} path conflict${conflicts.size === 1 ? "" : "s"}` : "";
-      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${closed ? ` · ${closed} closed` : ""}${work}${warning}`, 240);
+      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${work}${warning}`, 240);
       // The below-editor widget is the canonical agents bar. Clear the legacy
       // footer status instead of rendering a redundant, unaligned `agents:0/1`.
       this.ctx.ui.setStatus("pi-email-subagent", undefined);

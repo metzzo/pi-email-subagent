@@ -243,7 +243,17 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     latestBrokerSnapshot = undefined;
     conversationSources.clear();
     ui.bind(ctx);
-    if (broker) await broker.shutdown().catch(() => undefined);
+    if (broker) {
+      try {
+        await broker.shutdown();
+      } catch (error) {
+        broker = undefined;
+        if (generation === myGeneration) {
+          ctx.ui.notify(`Email subagent handoff blocked: prior broker cleanup is not quiescent: ${errorMessage(error)}`, "error");
+        }
+        return;
+      }
+    }
     if (generation !== myGeneration) return;
     broker = undefined;
 
@@ -317,8 +327,12 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       }
     } catch (error) {
       if (broker === next) broker = undefined;
-      await next.shutdown().catch(() => undefined);
-      if (generation === myGeneration) ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}`, "error");
+      let cleanupError: unknown;
+      try { await next.shutdown(); } catch (failure) { cleanupError = failure; }
+      if (generation === myGeneration) {
+        const suffix = cleanupError ? `; cleanup remains unsafe: ${errorMessage(cleanupError)}` : "";
+        ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}${suffix}`, "error");
+      }
     }
   });
 
