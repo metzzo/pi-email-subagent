@@ -2,13 +2,21 @@
 
 ## Status, priority, and classification
 
-- **Status:** proposed; audit evidence and current-code mechanism confirmed; implementation not started
+- **Status:** complete; focused red/green regressions and full release validation passed
 - **Priority:** P1 reliability/correctness
 - **Classification:** lifecycle watchdog semantics, concurrency/race safety, deterministic regression coverage
-- **Target baseline inspected:** `6e869743957f8f5b8be99dc642af2345c9ce7ee7`
+- **Target baseline inspected:** `bc6da78f901eefafb63dea4369b9d992eada3a76`
 - **Primary ownership:** this extension (`src/sdk-worker.ts`, `src/broker.ts`); no Pi-core change is required for the smallest first release because Pi 0.81.1 already publishes tool-update events
 
 This plan changes what “idle” means during an accepted run. It does **not** raise the 15-minute default as a substitute for correct liveness semantics.
+
+## Implementation result
+
+The implemented change adds a content-free `tool_lifecycle` worker event for Pi's start/update/end boundaries and a broker-local active-call map bound to the exact `WorkerTransport` and watchdog generation. Stable tool-call IDs make duplicate starts idempotent and orphan updates/ends harmless. Starts recorded before watchdog installation transfer only into the next generation for that exact worker. While one or more calls are active, the idle timer is absent; the final exact end arms a full new idle interval. Ordinary activity uses the same active-aware refresh path.
+
+The absolute run timer is installed once and is never refreshed by tools, progress, work, activity, or steering. Timeout callbacks validate worker identity, watchdog generation, idle-arm generation, and timer state before synchronously claiming the terminal transition. Terminal, replacement, and shutdown paths clear ephemeral tool state. Progress updates return before worker snapshot synchronization, registry persistence, or UI publication. Timeout diagnostics contain only bounded generation/timing and tool ID/name counts, never tool arguments or output.
+
+Focused tests include SDK translation/privacy, pre-watchdog starts, parallel last-end behavior, duplicate/orphan events, stale replaced workers, invalidated-idle and run-timeout/end races, progress publication/persistence suppression, ordinary idle expiry, and absolute run expiry. The real Pi 0.81.1 SDK-worker regression executes the built-in Bash tool with an output-silent Node child: the unchanged code failed at the shortened idle boundary, while the implementation lets that child finish and answer; a separate active Bash child still fails at the shorter absolute run deadline. The focused unit, integration, and E2E commands, full layer suites, `npm test`, package smoke, license policy, `npm run validate`, and the CI-pinned Gitleaks scan all pass. This validates the identified mechanism only. It does not attribute every historical idle alert to active tools and does not change cleanup/process-tree quiescence semantics.
 
 ## Evidence and confidence boundaries
 

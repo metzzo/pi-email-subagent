@@ -26,6 +26,7 @@ import type {
   LifecyclePolicy,
   WaitForRepliesResult,
   WorkerEvent,
+  WorkerToolLifecycleEvent,
   WorkerTransport,
   WorkItem,
   AgentWorkState,
@@ -113,6 +114,28 @@ function containsLifecycleTimeout(error: unknown): boolean {
   return error instanceof AggregateError && error.errors.some(containsLifecycleTimeout);
 }
 
+interface WatchdogEntry {
+  generation: number;
+  worker: WorkerTransport;
+  startedAt: number;
+  lastIdleAt: number;
+  idleGeneration: number;
+  run?: ReturnType<typeof setTimeout>;
+  idle?: ReturnType<typeof setTimeout>;
+}
+
+interface ActiveToolCall {
+  toolName: string;
+  startedAt: string;
+  lastProgressAt: string;
+}
+
+interface ToolLifecycleState {
+  worker: WorkerTransport;
+  watchdogGeneration?: number;
+  calls: Map<string, ActiveToolCall>;
+}
+
 function sortMail(emails: EmailEnvelope[]): EmailEnvelope[] {
   return emails.sort((a, b) => {
     if (a.priority !== b.priority) return a.priority === "high" ? -1 : 1;
@@ -146,7 +169,8 @@ export class AgentBroker {
   private readonly collectingRequestIds = new Map<string, number>();
   private readonly collectionClaims = new Map<string, number>();
   private readonly pendingWorkPersists = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly watchdogs = new Map<string, { generation: number; run?: ReturnType<typeof setTimeout>; idle?: ReturnType<typeof setTimeout> }>();
+  private readonly watchdogs = new Map<string, WatchdogEntry>();
+  private readonly toolLifecycles = new Map<string, ToolLifecycleState>();
   private watchdogGeneration = 0;
   private lifecycle: "new" | "initializing" | "active" | "closing" | "closed" = "new";
   private lifecycleGeneration = 0;
@@ -858,6 +882,8 @@ export class AgentBroker {
       const previous = this.workers.get(record.address);
       if (previous && previous !== worker) throw new Error(`Agent ${record.address} already has a live worker.`);
       this.workers.set(record.address, worker);
+      this.clearToolLifecycle(record.address);
+      this.toolLifecycles.set(record.address, { worker, calls: new Map() });
       this.workerUnsubscribers.set(record.address, unsubscribe);
       this.provisionalWorkers.delete(worker);
       this.syncWorker(record.address, worker);
@@ -870,6 +896,7 @@ export class AgentBroker {
       unsubscribe();
       this.provisionalWorkers.delete(worker);
       if (this.workers.get(record.address) === worker) this.workers.delete(record.address);
+      this.clearToolLifecycle(record.address, worker);
       if (this.workerUnsubscribers.get(record.address) === unsubscribe) this.workerUnsubscribers.delete(record.address);
       if (!this.cancelled(generation)) {
         record.state = "failed";
@@ -892,39 +919,149 @@ export class AgentBroker {
     this.watchdogs.delete(address);
   }
 
+  private clearToolLifecycle(address: string, worker?: WorkerTransport): void {
+    const current = this.toolLifecycles.get(address);
+    if (!worker || current?.worker === worker) this.toolLifecycles.delete(address);
+  }
+
   private startWatchdog(address: string): void {
     const record = this.records.get(address);
-    if (!record) return;
+    const worker = this.workers.get(address);
+    if (!record || !worker) return;
     this.clearWatchdog(address);
     const generation = ++this.watchdogGeneration;
-    const entry: { generation: number; run?: ReturnType<typeof setTimeout>; idle?: ReturnType<typeof setTimeout> } = { generation };
-    entry.run = setTimeout(() => swallow(this.expireWorker(address, generation, "LIFECYCLE_RUN_TIMEOUT")), record.lifecycle.runTimeoutMs);
-    entry.idle = setTimeout(() => swallow(this.expireWorker(address, generation, "LIFECYCLE_IDLE_TIMEOUT")), record.lifecycle.idleTimeoutMs);
+    const startedAt = Date.now();
+    const entry: WatchdogEntry = {
+      generation,
+      worker,
+      startedAt,
+      lastIdleAt: startedAt,
+      idleGeneration: 0,
+    };
+    let tools = this.toolLifecycles.get(address);
+    if (!tools || tools.worker !== worker) {
+      tools = { worker, calls: new Map() };
+      this.toolLifecycles.set(address, tools);
+    } else if (tools.watchdogGeneration !== undefined && tools.watchdogGeneration !== generation) {
+      tools.calls.clear();
+    }
+    tools.watchdogGeneration = generation;
+    entry.run = setTimeout(
+      () => swallow(this.expireWorker(address, generation, "LIFECYCLE_RUN_TIMEOUT", worker)),
+      record.lifecycle.runTimeoutMs,
+    );
     this.watchdogs.set(address, entry);
+    this.refreshIdleWatchdog(address, generation, worker);
+  }
+
+  private refreshIdleWatchdog(address: string, generation: number, worker: WorkerTransport): void {
+    const entry = this.watchdogs.get(address);
+    const record = this.records.get(address);
+    if (!entry || entry.generation !== generation || entry.worker !== worker || !record) return;
+    let tools = this.toolLifecycles.get(address);
+    if (!tools || tools.worker !== worker) {
+      tools = { worker, watchdogGeneration: generation, calls: new Map() };
+      this.toolLifecycles.set(address, tools);
+    }
+    if (tools.watchdogGeneration === undefined) tools.watchdogGeneration = generation;
+    if (tools.watchdogGeneration !== generation) return;
+    if (entry.idle) clearTimeout(entry.idle);
+    entry.idle = undefined;
+    entry.idleGeneration += 1;
+    if (tools.calls.size > 0) return;
+    entry.lastIdleAt = Date.now();
+    const idleGeneration = entry.idleGeneration;
+    entry.idle = setTimeout(
+      () => swallow(this.expireWorker(
+        address,
+        generation,
+        "LIFECYCLE_IDLE_TIMEOUT",
+        worker,
+        idleGeneration,
+      )),
+      record.lifecycle.idleTimeoutMs,
+    );
   }
 
   private touchWatchdog(address: string): void {
     const entry = this.watchdogs.get(address);
-    const record = this.records.get(address);
-    if (!entry || !record) return;
-    if (entry.idle) clearTimeout(entry.idle);
-    entry.idle = setTimeout(() => swallow(this.expireWorker(address, entry.generation, "LIFECYCLE_IDLE_TIMEOUT")), record.lifecycle.idleTimeoutMs);
+    if (!entry) return;
+    this.refreshIdleWatchdog(address, entry.generation, entry.worker);
   }
 
-  private async expireWorker(address: string, generation: number, code: string): Promise<void> {
+  private onToolLifecycle(address: string, worker: WorkerTransport, event: WorkerToolLifecycleEvent): void {
+    let tools = this.toolLifecycles.get(address);
+    const watchdog = this.watchdogs.get(address);
+    if (!tools || tools.worker !== worker) {
+      tools = { worker, ...(watchdog ? { watchdogGeneration: watchdog.generation } : {}), calls: new Map() };
+      this.toolLifecycles.set(address, tools);
+    }
+    if (watchdog) {
+      if (tools.watchdogGeneration === undefined) tools.watchdogGeneration = watchdog.generation;
+      if (tools.watchdogGeneration !== watchdog.generation || watchdog.worker !== worker) return;
+    } else if (tools.watchdogGeneration !== undefined) {
+      return;
+    }
+
+    if (event.phase === "start") {
+      if (!tools.calls.has(event.toolCallId)) {
+        tools.calls.set(event.toolCallId, {
+          toolName: event.toolName,
+          startedAt: event.at,
+          lastProgressAt: event.at,
+        });
+      }
+    } else {
+      const call = tools.calls.get(event.toolCallId);
+      if (!call) return;
+      if (event.phase === "progress") call.lastProgressAt = event.at;
+      else tools.calls.delete(event.toolCallId);
+    }
+    if (watchdog) this.refreshIdleWatchdog(address, watchdog.generation, worker);
+  }
+
+  private async expireWorker(
+    address: string,
+    generation: number,
+    code: string,
+    expectedWorker?: WorkerTransport,
+    expectedIdleGeneration?: number,
+  ): Promise<void> {
     const entry = this.watchdogs.get(address);
     if (!entry || entry.generation !== generation || this.disposed) return;
+    const worker = expectedWorker ?? entry.worker;
+    if (entry.worker !== worker || this.workers.get(address) !== worker) return;
+    const tools = this.toolLifecycles.get(address);
+    const activeCalls = tools?.worker === worker && tools.watchdogGeneration === generation ? tools.calls : new Map();
+    if (code === "LIFECYCLE_IDLE_TIMEOUT") {
+      if (expectedIdleGeneration === undefined
+        || entry.idleGeneration !== expectedIdleGeneration
+        || !entry.idle) return;
+      if (activeCalls.size > 0) {
+        this.refreshIdleWatchdog(address, generation, worker);
+        return;
+      }
+    }
+
+    // Claim the generation synchronously before cleanup awaits. Later tool
+    // boundaries cannot revive a terminal timeout.
     this.clearWatchdog(address);
-    const worker = this.workers.get(address);
+    this.clearToolLifecycle(address, worker);
     const record = this.records.get(address);
-    if (!worker || !record) return;
+    if (!record) return;
     this.workerUnsubscribers.get(address)?.();
     this.workerUnsubscribers.delete(address);
     this.workers.delete(address);
     this.active.delete(address);
     record.state = "failed";
     this.interruptRecordWork(record);
-    record.failure = `${code}: lifecycle watchdog expired`;
+    const now = Date.now();
+    const activeTools = [...activeCalls].slice(0, 8).map(([id, call]) =>
+      `${truncateText(call.toolName.replace(/\s+/g, " "), 80)}:${truncateText(id.replace(/\s+/g, " "), 80)}`);
+    const elapsed = code === "LIFECYCLE_IDLE_TIMEOUT"
+      ? `elapsedIdleMs=${Math.max(0, now - entry.lastIdleAt)}`
+      : `elapsedRunMs=${Math.max(0, now - entry.startedAt)}`;
+    record.failure = `${code}: lifecycle watchdog expired (generation=${generation}; ${elapsed}; activeToolCount=${activeCalls.size}${activeTools.length > 0 ? `; activeTools=${activeTools.join(",")}` : ""})`;
     record.currentActivity = record.failure;
     record.updatedAt = nowIso();
     let cleanup = "";
@@ -961,6 +1098,10 @@ export class AgentBroker {
     if (this.disposed || this.workers.get(address) !== worker) return;
     const record = this.records.get(address);
     if (!record) return;
+    if (event.type === "tool_lifecycle") {
+      this.onToolLifecycle(address, worker, event);
+      return;
+    }
     this.syncWorker(address, worker);
     if (event.type === "activity" || event.type === "work") this.touchWatchdog(address);
     if (event.type === "state" && event.state && record.state !== "failed" && record.state !== "stopped") {
@@ -968,6 +1109,7 @@ export class AgentBroker {
     }
     if (event.type === "failure" && event.error) {
       this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       const shouldNotify = record.state !== "failed" || record.failure !== event.error;
       record.state = "failed";
       this.interruptRecordWork(record);
@@ -997,6 +1139,7 @@ export class AgentBroker {
     this.publish();
     if (event.type === "settled") {
       this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       if (this.settling.has(address)) this.pendingSettlements.add(address);
       else swallow(this.onWorkerSettled(address, worker, event.completionText));
     }
@@ -1136,6 +1279,8 @@ export class AgentBroker {
         return;
       }
       for (const email of queued) await this.failEnvelope(email, errorMessage(error));
+      this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       this.active.delete(address);
       record.state = "failed";
       record.failure = errorMessage(error);
@@ -1177,6 +1322,8 @@ export class AgentBroker {
         await this.expireWorker(address, this.watchdogs.get(address)!.generation, error.code);
         return;
       }
+      this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       this.active.delete(address);
       record.state = "failed";
       record.failure = errorMessage(error);
@@ -1237,6 +1384,8 @@ export class AgentBroker {
           await this.persistRegistry();
           return;
         }
+        this.clearWatchdog(address);
+        this.clearToolLifecycle(address, worker);
         record.state = "failed";
         record.failure = `Stopped with ${outstanding.length} unanswered email(s) after ${record.enforcementAttempts} reminder(s).`;
         this.active.delete(address);
@@ -1262,6 +1411,8 @@ export class AgentBroker {
         await this.expireWorker(address, this.watchdogs.get(address)!.generation, error.code);
         return;
       }
+      this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       if (record) {
         record.state = "failed";
         record.failure = errorMessage(error);
@@ -1300,6 +1451,7 @@ export class AgentBroker {
       if (record.state === "archived") throw new Error(`Agent ${address} is archived.`);
       let cleanupError: unknown;
       this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       if (worker) {
         this.syncWorker(address, worker);
         try {
@@ -1345,6 +1497,7 @@ export class AgentBroker {
       }
       const old = this.workers.get(address);
       this.clearWatchdog(address);
+      this.clearToolLifecycle(address, old);
       this.workerUnsubscribers.get(address)?.();
       this.workerUnsubscribers.delete(address);
       this.workers.delete(address);
@@ -1447,6 +1600,7 @@ export class AgentBroker {
       );
       if (obligated) throw new Error("Agent has queued mail or unanswered obligations and cannot be archived.");
       this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       this.workerUnsubscribers.get(address)?.();
       this.workerUnsubscribers.delete(address);
       this.workers.delete(address);
@@ -1733,6 +1887,7 @@ export class AgentBroker {
     const allWorkers = new Set<WorkerTransport>([...committed.values(), ...this.provisionalWorkers]);
     for (const [address, worker] of committed) {
       this.clearWatchdog(address);
+      this.clearToolLifecycle(address, worker);
       const record = this.records.get(address);
       if (record && !["stopped", "failed", "archived"].includes(record.state)) {
         this.syncWorker(address, worker);
@@ -1744,6 +1899,7 @@ export class AgentBroker {
     }
     this.workers.clear();
     this.workerUnsubscribers.clear();
+    this.toolLifecycles.clear();
     this.active.clear();
     const results = await Promise.allSettled([...allWorkers].map((worker) => {
       const address = [...committed].find(([, candidate]) => candidate === worker)?.[0];
