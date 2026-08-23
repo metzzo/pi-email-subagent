@@ -72,40 +72,144 @@ describe("worker cleanup quarantine", () => {
         const inspection = broker.inspectAgent(sent.envelope.to) as any;
         assert.equal(inspection.state, "failed");
         assert.equal(inspection.cleanup?.state, "unknown");
-        assert.equal(inspection.cleanup?.heldCapacity, true);
+        assert.equal(inspection.cleanup?.heldRunSlot, true);
       });
       assert.equal((broker as any).workers.has(sent.envelope.to), false, "routing detaches immediately");
       assert.equal((broker as any).active.has(sent.envelope.to), true, "the exact active slot stays leased");
 
-      let queuedId = "";
-      await assert.rejects(async () => {
-        const result = await broker.send(broker.mainAddress, {
-          to: "worker.blocked-mutation@gpt-5.4.com",
-          subject: "Queued safely",
-          message: "Do not start while cleanup is unknown.",
-          priority: "low",
-        });
-        queuedId = result.envelope.id;
-      }, /cleanup.*quarantin|quiescence.*unknown/i);
-      const queued = broker.mailStore.list().find((email) => email.to === "worker.blocked-mutation@gpt-5.4.com");
-      assert.ok(queued?.id);
-      queuedId = queued.id;
-      assert.equal(queued.deliveryState, "queued");
+      const queuedResult = await broker.send(broker.mainAddress, {
+        to: "worker.blocked-mutation@gpt-5.4.com",
+        subject: "Queued safely",
+        message: "Do not start while cleanup is unknown.",
+        priority: "low",
+      });
+      const queuedId = queuedResult.envelope.id;
+      const queued = broker.mailStore.get(queuedId);
+      assert.equal(queued?.deliveryState, "queued");
+      assert.equal(queuedResult.recipientState, "queued");
       assert.equal(workers.length, 1, "no second writable worker starts under namespace quarantine");
 
       cleanup.resolve(verifiedCleanup());
       await eventually(() => {
         assert.equal((broker.inspectAgent(sent.envelope.to) as any).cleanup, undefined);
         assert.equal((broker as any).active.has(sent.envelope.to), false);
+        assert.equal(broker.mailStore.get(queuedId)?.deliveryState, "delivered");
       });
-      assert.equal(broker.mailStore.get(queuedId)?.deliveryState, "queued", "verified release does not lose accepted mail");
+      assert.equal(workers.length, 2, "the durable deferred identity is materialized exactly once after release");
+      assert.equal(workers[1]!.prompts.filter((prompt) => prompt.includes(queuedId)).length, 1);
+      assert.equal(broker.mailStore.list().filter((email) => email.id === queuedId).length, 1, "stable accepted ID is not resent");
     } finally {
       cleanup.resolve(verifiedCleanup());
       await broker.shutdown().catch(() => undefined);
     }
   });
 
-  it("creates exactly one replacement after a timed-out restart receives late verified cleanup", async () => {
+  it("revalidates quarantine after markDelivered and resumes the retained admission after release", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-admission-"));
+    const cleanup = deferred<any>();
+    const workers: FakeWorker[] = [];
+    class DeferredCleanupWorker extends FakeWorker {
+      cleanup(): Promise<any> { return cleanup.promise; }
+      override async dispose(): Promise<void> { await cleanup.promise; await super.dispose(); }
+    }
+    const broker = await makeBroker(root, () => {
+      const worker = workers.length === 1 ? new DeferredCleanupWorker() : new FakeWorker();
+      workers.push(worker);
+      return worker;
+    }, 3);
+    try {
+      const first = await broker.send(broker.mainAddress, {
+        to: "worker.admission-target@gpt-5.4.com", subject: "Initial", message: "Become idle.", priority: "low",
+      });
+      await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(first.envelope.id, first.envelope.subject),
+        message: "Initial done.",
+        priority: "low",
+      });
+      workers[0]!.settle();
+      await eventually(() => assert.equal(broker.inspectAgent(first.envelope.to).state, "idle"));
+
+      const owner = await broker.send(broker.mainAddress, {
+        to: "worker.admission-owner@gpt-5.4.com", subject: "Own quarantine", message: "Remain active.", priority: "low",
+      });
+      const originalMark = broker.mailStore.markDelivered.bind(broker.mailStore);
+      let inject = true;
+      broker.mailStore.markDelivered = async (ids) => {
+        await originalMark(ids);
+        if (!inject) return;
+        inject = false;
+        (broker as any).beginWorkerCleanup(owner.envelope.to, workers[1], "TEST_ADMISSION_RACE", "paused");
+      };
+
+      const raced = await broker.send(broker.mainAddress, {
+        to: first.envelope.to, subject: "Raced delivery", message: "Prompt only after release.", priority: "low",
+      });
+      assert.equal(raced.envelope.deliveryState, "delivered", "journal transition remains truthful and stable");
+      assert.equal(workers[0]!.prompts.length, 1, "no prompt is admitted in the newer quarantine epoch");
+      assert.equal((broker as any).pendingStarts.includes(first.envelope.to), true);
+
+      cleanup.resolve(verifiedCleanup());
+      await eventually(() => assert.equal(workers[0]!.prompts.length, 2));
+      assert.match(workers[0]!.prompts[1]!, /mailbox-enforcement/);
+      assert.equal(broker.mailStore.list().filter((email) => email.id === raced.envelope.id).length, 1);
+    } finally {
+      cleanup.resolve(verifiedCleanup());
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("revalidates quarantine between request delivery and high-priority steer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-steer-admission-"));
+    const cleanup = deferred<any>();
+    const workers: FakeWorker[] = [];
+    class DeferredCleanupWorker extends FakeWorker {
+      cleanup(): Promise<any> { return cleanup.promise; }
+      override async dispose(): Promise<void> { await cleanup.promise; await super.dispose(); }
+    }
+    const broker = await makeBroker(root, () => {
+      const worker = workers.length === 1 ? new DeferredCleanupWorker() : new FakeWorker();
+      workers.push(worker);
+      return worker;
+    }, 3);
+    try {
+      const target = await broker.send(broker.mainAddress, {
+        to: "worker.steer-target@gpt-5.4.com", subject: "Initial", message: "Remain streaming.", priority: "low",
+      });
+      const owner = await broker.send(broker.mainAddress, {
+        to: "worker.steer-owner@gpt-5.4.com", subject: "Own quarantine", message: "Remain active.", priority: "low",
+      });
+      const originalMark = broker.mailStore.markDelivered.bind(broker.mailStore);
+      let inject = true;
+      broker.mailStore.markDelivered = async (ids) => {
+        await originalMark(ids);
+        if (!inject) return;
+        inject = false;
+        (broker as any).beginWorkerCleanup(owner.envelope.to, workers[1], "TEST_STEER_ADMISSION_RACE", "paused");
+      };
+
+      const high = await broker.send(broker.mainAddress, {
+        to: target.envelope.to, subject: "High raced", message: "Do not steer in quarantine.", priority: "high",
+      });
+      assert.equal(high.envelope.deliveryState, "delivered");
+      assert.equal(workers[0]!.steers.length, 0, "the newer epoch blocks synchronous steer admission");
+      workers[0]!.settle();
+      await eventually(() => {
+        assert.equal((broker as any).active.has(target.envelope.to), false);
+        assert.equal((broker as any).pendingStarts.includes(target.envelope.to), true);
+      });
+
+      cleanup.resolve(verifiedCleanup());
+      await eventually(() => assert.equal(workers[0]!.prompts.length, 2));
+      assert.match(workers[0]!.prompts[1]!, /mailbox-enforcement/);
+      assert.equal(broker.mailStore.list().filter((email) => email.id === high.envelope.id).length, 1);
+    } finally {
+      cleanup.resolve(verifiedCleanup());
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("leaves a timed-out restart paused after late verified cleanup until an explicit restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-late-restart-"));
     const cleanup = deferred<any>();
     const entered = deferred<void>();
@@ -141,14 +245,18 @@ describe("worker cleanup quarantine", () => {
 
       cleanup.resolve(verifiedCleanup());
       await eventually(() => {
-        assert.equal(workers.length, 2);
+        assert.equal(workers.length, 1, "late cleanup never creates a hidden replacement");
         const inspection = broker.inspectAgent(sent.envelope.to) as any;
         assert.equal(inspection.cleanup, undefined);
-        assert.equal(inspection.state, "idle");
+        assert.equal(inspection.state, "paused");
       });
       staleListener({ type: "failure", error: "stale cleanup callback" });
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "paused");
+      assert.equal(workers.length, 1);
+
+      await broker.restart(sent.envelope.to);
+      assert.equal(workers.length, 2, "an explicit second restart creates the replacement");
       assert.equal(broker.inspectAgent(sent.envelope.to).state, "idle");
-      assert.equal(workers.length, 2, "late settlement creates one replacement only");
     } finally {
       cleanup.resolve(verifiedCleanup());
       await broker.shutdown().catch(() => undefined);
@@ -229,6 +337,76 @@ describe("worker cleanup quarantine", () => {
     }
   });
 
+  it("reconstructs exact cleanup capability and inherited run slots before current read-only profiles", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-reconstruct-"));
+    const first = await makeBroker(root, () => new FakeWorker(), 2);
+    await first.send(first.mainAddress, {
+      to: "worker.cleanup-old-one@gpt-5.4.com", subject: "One", message: "Persist one.", priority: "low",
+    });
+    await first.send(first.mainAddress, {
+      to: "worker.cleanup-old-two@gpt-5.4.com", subject: "Two", message: "Persist two.", priority: "low",
+    });
+    await first.shutdown();
+
+    const registryPath = join(root, "state", "registry.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    const now = new Date().toISOString();
+    for (let index = 0; index < registry.agents.length; index += 1) {
+      registry.agents[index].state = "failed";
+      registry.agents[index].cleanup = {
+        state: "unknown",
+        reasonCode: "PERSISTED_TEST_CLEANUP",
+        workerGeneration: index + 1,
+        startedAt: now,
+        updatedAt: now,
+        abort: "timed-out",
+        dispose: "timed-out",
+        quiescence: "unknown",
+        mutationCapableAtStart: true,
+        heldRunSlot: true,
+        activeTools: [],
+      };
+    }
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.maxAgents = 3;
+    config.maxConcurrent = 1;
+    config.roles.worker!.tools = ["read", "send_email", "fetch_emails"];
+    config.addresses["worker.mutable-after-restore@gpt-5.4.com"] = {
+      tools: ["read", "bash", "send_email", "fetch_emails"],
+    };
+    const workers: FakeWorker[] = [];
+    const restored = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config,
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: new FakeMainAdapter(),
+      workerFactory: () => { const worker = new FakeWorker(); workers.push(worker); return worker; },
+      projectTrusted: true,
+    });
+    await restored.init();
+    try {
+      assert.equal((restored as any).active.size, 2, "both exact inherited slots survive maxConcurrent reduction");
+      assert.equal(restored.getSnapshot().capacity.runSlotsUsed, 2);
+      for (const record of restored.getSnapshot().agents) {
+        assert.equal(record.tools.includes("bash"), false, "current read-only profile is visible");
+        assert.equal(record.cleanup?.mutationCapableAtStart, true, "old generation capability is not overwritten");
+        assert.equal(record.cleanup?.heldRunSlot, true);
+      }
+      const accepted = await restored.send(restored.mainAddress, {
+        to: "worker.mutable-after-restore@gpt-5.4.com", subject: "Deferred", message: "Do not admit over inherited slots.", priority: "low",
+      });
+      assert.equal(accepted.envelope.deliveryState, "queued");
+      assert.equal(workers.length, 0);
+      assert.equal((restored as any).active.size, 2, "ordinary work does not consume or replace inherited holds");
+    } finally {
+      await restored.shutdown().catch(() => undefined);
+    }
+  });
+
   it("restores a persisted unknown cleanup fail-closed and preserves newly accepted mail", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-restore-"));
     const firstWorkers: FakeWorker[] = [];
@@ -255,7 +433,8 @@ describe("worker cleanup quarantine", () => {
       abort: "pending",
       dispose: "pending",
       quiescence: "unknown",
-      heldCapacity: true,
+      mutationCapableAtStart: true,
+      heldRunSlot: true,
       activeTools: [{ toolCallId: "bash-9", toolName: "bash" }],
       detail: "Original process ended before cleanup settled.",
     };
@@ -275,9 +454,10 @@ describe("worker cleanup quarantine", () => {
       assert.equal((restored as any).active.has(sent.envelope.to), true);
       assert.match(inspection.cleanup?.detail ?? "", /process restart|promise owner|owner/i);
       await assert.rejects(restored.restart(sent.envelope.to), /cleanup.*quarantin|quiescence.*unknown/i);
-      await assert.rejects(restored.send(restored.mainAddress, {
+      const accepted = await restored.send(restored.mainAddress, {
         to: sent.envelope.to, subject: "Retained", message: "Remain queued.", priority: "low",
-      }), /cleanup.*quarantin|quiescence.*unknown/i);
+      });
+      assert.equal(accepted.envelope.deliveryState, "queued");
       const retained = restored.mailStore.list().filter((email) => email.subject === "Retained");
       assert.equal(retained.length, 1);
       assert.equal(retained[0]?.deliveryState, "queued");

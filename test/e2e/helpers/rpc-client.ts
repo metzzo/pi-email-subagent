@@ -105,6 +105,18 @@ export class PiRpcClient {
     return this.lines;
   }
 
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
+  kill(signal: NodeJS.Signals = "SIGKILL"): boolean {
+    return this.child.kill(signal);
+  }
+
+  waitForExit(): Promise<number | null> {
+    return this.exitPromise;
+  }
+
   send(command: Record<string, unknown>): void {
     this.child.stdin!.write(`${JSON.stringify(command)}\n`);
   }

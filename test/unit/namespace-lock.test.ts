@@ -38,8 +38,13 @@ it("recovers a proper-lockfile lease after its stale threshold", async () => {
   await utimes(`${namespace}.lock`, stale, stale);
 
   const recovered = await NamespaceLock.acquire(namespace, () => undefined);
-  const owner = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number; token: string };
+  assert.equal(recovered.abandonedOwner, true);
+  const owner = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number; token: string; bootId?: string; processStartTime?: string };
   assert.equal(owner.pid, process.pid);
   assert.notEqual(owner.token, "stale-token");
+  if (process.platform === "linux") {
+    assert.ok(owner.bootId);
+    assert.ok(owner.processStartTime);
+  }
   await recovered.release();
 });
