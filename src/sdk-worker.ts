@@ -324,7 +324,6 @@ export class SdkWorker implements WorkerTransport {
           phase: "start",
           toolCallId: event.toolCallId,
           toolName: event.toolName,
-          at: nowIso(),
         });
         const work = this.record.work ??= emptyWorkState();
         const toolClass = classifyTool(event.toolName);
@@ -343,13 +342,6 @@ export class SdkWorker implements WorkerTransport {
         break;
       }
       case "tool_execution_update":
-        this.emit({
-          type: "tool_lifecycle",
-          phase: "progress",
-          toolCallId: event.toolCallId,
-          toolName: event.toolName,
-          at: nowIso(),
-        });
         break;
       case "tool_execution_end": {
         this.activeToolCalls.delete(event.toolCallId);
@@ -358,7 +350,6 @@ export class SdkWorker implements WorkerTransport {
           phase: "end",
           toolCallId: event.toolCallId,
           toolName: event.toolName,
-          at: nowIso(),
         });
         const work = this.record.work ??= emptyWorkState();
         const index = work.active.findIndex((candidate) => candidate.toolCallId === event.toolCallId);

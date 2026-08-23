@@ -1,6 +1,6 @@
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { migrateSessionEntries, parseSessionEntries, renderDiff, truncateHead, type ExtensionContext, type FileEntry, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { renderDiff, SessionManager, truncateHead, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
 import { isThinkingLevel } from "./config.ts";
@@ -166,46 +166,28 @@ export function conversationBlocks(entries: readonly SessionEntry[]): Conversati
   return blocks;
 }
 
-export function activeSessionBranch(fileEntries: readonly FileEntry[]): SessionEntry[] {
-  const entries: SessionEntry[] = [];
-  for (const candidate of fileEntries as readonly unknown[]) {
-    if (!candidate || typeof candidate !== "object") continue;
-    const entry = candidate as Record<string, unknown>;
-    if (entry.type === "session" || typeof entry.type !== "string" || typeof entry.id !== "string") continue;
-    entries.push(candidate as SessionEntry);
-  }
-  const byId = new Map(entries.map((entry) => [entry.id, entry]));
-  const path: SessionEntry[] = [];
-  const visited = new Set<string>();
-  let current = entries.at(-1);
-  while (current && !visited.has(current.id)) {
-    path.push(current);
-    visited.add(current.id);
-    current = current.parentId ? byId.get(current.parentId) : undefined;
-  }
-  return path.reverse();
+const MAX_UI_SESSION_BYTES = 20 * 1024 * 1024;
+
+function openSessionBranch(sessionFile: string): SessionEntry[] {
+  return SessionManager.open(sessionFile).getBranch();
 }
 
 export async function readConversationBlocks(sessionFile: string): Promise<ConversationBlock[]> {
-  const content = await readFile(sessionFile, "utf8");
-  const entries = parseSessionEntries(content);
-  migrateSessionEntries(entries);
-  return conversationBlocks(activeSessionBranch(entries));
+  const info = await stat(sessionFile);
+  if (info.size > MAX_UI_SESSION_BYTES) throw new Error("session exceeds 20 MB conversation lookup bound");
+  return conversationBlocks(openSessionBranch(sessionFile));
 }
 
 const patchIndexCache = new Map<string, { signature: string; patches: Map<string, { patch: string; truncated: boolean }> }>();
 
 export async function readPersistedEditPatch(sessionFile: string, toolCallId: string): Promise<{ patch: string; truncated: boolean } | undefined> {
   const info = await stat(sessionFile);
-  if (info.size > 20 * 1024 * 1024) throw new Error("session exceeds 20 MB diff lookup bound");
+  if (info.size > MAX_UI_SESSION_BYTES) throw new Error("session exceeds 20 MB diff lookup bound");
   const signature = `${info.size}:${info.mtimeMs}`;
   const cached = patchIndexCache.get(sessionFile);
   if (cached?.signature === signature) return cached.patches.get(toolCallId);
-  const content = await readFile(sessionFile, "utf8");
-  const entries = parseSessionEntries(content);
-  migrateSessionEntries(entries);
   const patches = new Map<string, { patch: string; truncated: boolean }>();
-  for (const entry of activeSessionBranch(entries)) {
+  for (const entry of openSessionBranch(sessionFile)) {
     if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "edit") continue;
     const details = entry.message.details;
     if (!details || typeof details !== "object") continue;

@@ -176,8 +176,6 @@ interface SettlementLease {
 
 interface ActiveToolCall {
   toolName: string;
-  startedAt: string;
-  lastProgressAt: string;
 }
 
 interface ToolLifecycleState {
@@ -1573,18 +1571,10 @@ export class AgentBroker {
     }
 
     if (event.phase === "start") {
-      if (!tools.calls.has(event.toolCallId)) {
-        tools.calls.set(event.toolCallId, {
-          toolName: event.toolName,
-          startedAt: event.at,
-          lastProgressAt: event.at,
-        });
-      }
+      if (!tools.calls.has(event.toolCallId)) tools.calls.set(event.toolCallId, { toolName: event.toolName });
     } else {
-      const call = tools.calls.get(event.toolCallId);
-      if (!call) return;
-      if (event.phase === "progress") call.lastProgressAt = event.at;
-      else tools.calls.delete(event.toolCallId);
+      if (!tools.calls.has(event.toolCallId)) return;
+      tools.calls.delete(event.toolCallId);
     }
     if (watchdog) this.refreshIdleWatchdog(address, watchdog.generation, worker);
   }

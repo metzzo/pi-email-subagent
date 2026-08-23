@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -102,6 +102,20 @@ describe("recorded conversation UI", () => {
       const v2Transcript = formatConversationTranscript(await readConversationBlocks(v2));
       assert.match(v2Transcript, /Context · legacy-hook/);
       assert.match(v2Transcript, /legacy v2 context/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds supported-path conversation session reads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-conversation-bound-"));
+    try {
+      const sessionFile = join(root, "oversized.jsonl");
+      await writeFile(sessionFile, `${JSON.stringify({
+        type: "session", version: 3, id: "oversized", timestamp: new Date().toISOString(), cwd: root,
+      })}\n`);
+      await truncate(sessionFile, 20 * 1024 * 1024 + 1);
+      await assert.rejects(readConversationBlocks(sessionFile), /session exceeds 20 MB conversation lookup bound/);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

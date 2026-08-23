@@ -5,10 +5,55 @@
  * events that arrived before the wait started.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 export interface RpcLine {
   type: string;
   [key: string]: unknown;
+}
+
+export class JsonLineFramer {
+  private readonly decoder = new StringDecoder("utf8");
+  private buffer = "";
+  private ended = false;
+
+  constructor(private readonly onRecord: (record: RpcLine) => void) {}
+
+  write(chunk: Buffer | string): void {
+    if (this.ended) throw new Error("Pi RPC stdout arrived after the decoder was finalized.");
+    const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    this.consume(this.decoder.write(bytes));
+  }
+
+  end(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.consume(this.decoder.end());
+    if (this.buffer.trim()) {
+      throw new Error("Unterminated Pi RPC stdout JSONL record at process close.");
+    }
+    this.buffer = "";
+  }
+
+  private consume(decoded: string): void {
+    this.buffer += decoded;
+    let newline = this.buffer.indexOf("\n");
+    while (newline >= 0) {
+      const record = this.buffer.slice(0, newline);
+      this.buffer = this.buffer.slice(newline + 1);
+      if (record.trim()) {
+        let parsed: RpcLine;
+        try {
+          parsed = JSON.parse(record) as RpcLine;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Malformed Pi RPC stdout JSONL record: ${detail}`, { cause: error });
+        }
+        this.onRecord(parsed);
+      }
+      newline = this.buffer.indexOf("\n");
+    }
+  }
 }
 
 export interface LaunchOptions {
@@ -35,27 +80,44 @@ export class PiRpcClient {
     reject: (error: Error) => void;
     timer: NodeJS.Timeout;
   }[] = [];
-  private buffer = "";
+  private readonly framer: JsonLineFramer;
   stderr = "";
   private exitCode: number | null | undefined;
   private readonly exitPromise: Promise<number | null>;
+  private rejectExit!: (error: Error) => void;
+  private terminalError?: Error;
 
   private constructor(child: ChildProcess) {
     this.child = child;
-    child.stdout!.on("data", (chunk) => this.ingest(String(chunk)));
-    child.stderr!.on("data", (chunk) => { this.stderr += String(chunk); });
+    this.framer = new JsonLineFramer((line) => this.accept(line));
     this.exitPromise = new Promise((resolve, reject) => {
-      child.once("error", reject);
+      this.rejectExit = reject;
+      child.once("error", (error) => this.fail(error));
       child.once("close", (code) => {
         this.exitCode = code;
-        const error = new Error(`Pi exited with code ${code} before the expected event.\n${this.stderr}`);
-        for (const waiter of this.waiters.splice(0)) {
-          clearTimeout(waiter.timer);
-          waiter.reject(error);
+        try {
+          this.framer.end();
+        } catch (error) {
+          this.fail(error instanceof Error ? error : new Error(String(error)));
         }
+        if (this.terminalError) return;
+        const error = new Error(`Pi exited with code ${code} before the expected event.\n${this.stderr}`);
+        this.rejectWaiters(error);
         resolve(code);
       });
     });
+    // Keep framing failures observable through waitFor/waitForExit/close without
+    // creating a separate unhandled-rejection path before callers can await it.
+    void this.exitPromise.catch(() => undefined);
+    child.stdout!.on("data", (chunk: Buffer) => {
+      try {
+        this.framer.write(chunk);
+      } catch (error) {
+        this.fail(error instanceof Error ? error : new Error(String(error)));
+        child.kill("SIGTERM");
+      }
+    });
+    child.stderr!.on("data", (chunk) => { this.stderr += String(chunk); });
   }
 
   static launch(options: LaunchOptions): PiRpcClient {
@@ -73,27 +135,29 @@ export class PiRpcClient {
     return new PiRpcClient(child);
   }
 
-  private ingest(chunk: string): void {
-    this.buffer += chunk;
-    const parts = this.buffer.split("\n");
-    this.buffer = parts.pop() ?? "";
-    for (const part of parts) {
-      if (!part.trim()) continue;
-      let line: RpcLine;
-      try {
-        line = JSON.parse(part) as RpcLine;
-      } catch {
-        continue; // ignore non-JSON noise
-      }
-      this.lines.push(line);
-      for (const waiter of [...this.waiters]) {
-        if (this.lines.length - 1 < waiter.after) continue;
-        if (!waiter.pred(line)) continue;
-        clearTimeout(waiter.timer);
-        this.waiters.splice(this.waiters.indexOf(waiter), 1);
-        waiter.resolve(line);
-      }
+  private accept(line: RpcLine): void {
+    this.lines.push(line);
+    for (const waiter of [...this.waiters]) {
+      if (this.lines.length - 1 < waiter.after) continue;
+      if (!waiter.pred(line)) continue;
+      clearTimeout(waiter.timer);
+      this.waiters.splice(this.waiters.indexOf(waiter), 1);
+      waiter.resolve(line);
     }
+  }
+
+  private rejectWaiters(error: Error): void {
+    for (const waiter of this.waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  }
+
+  private fail(error: Error): void {
+    if (this.terminalError) return;
+    this.terminalError = error;
+    this.rejectWaiters(error);
+    this.rejectExit(error);
   }
 
   /** Current buffer length; pass to waitFor via `after` to only match future events. */
@@ -173,8 +237,10 @@ export class PiRpcClient {
     timeoutMs = 90_000,
     after = 0,
   ): Promise<RpcLine[]> {
+    if (this.terminalError) throw this.terminalError;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (this.terminalError) throw this.terminalError;
       const matches = this.lines.slice(Math.max(after, 0)).filter(pred);
       if (matches.length >= count) return matches;
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
@@ -188,6 +254,7 @@ export class PiRpcClient {
     timeoutMs = 90_000,
     after = 0,
   ): Promise<RpcLine> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     for (let index = Math.max(after, 0); index < this.lines.length; index += 1) {
       if (pred(this.lines[index]!)) return Promise.resolve(this.lines[index]!);
     }
