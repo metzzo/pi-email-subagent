@@ -274,7 +274,7 @@ describe("SDK worker failures", () => {
     assert.doesNotMatch(JSON.stringify(settled), /hidden reasoning/);
   });
 
-  it("emits content-free lifecycle boundaries for tool starts, progress, and ends", () => {
+  it("emits only content-free lifecycle boundaries for tool starts and ends", () => {
     const worker = new SdkWorker({} as never);
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
     const internal = worker as unknown as { record: typeof record; cwd: string; onSessionEvent(event: unknown): void };
@@ -307,10 +307,9 @@ describe("SDK worker failures", () => {
     const lifecycle = events.filter((event) => event.type === "tool_lifecycle");
     assert.deepEqual(lifecycle.map(({ phase, toolCallId, toolName }) => ({ phase, toolCallId, toolName })), [
       { phase: "start", toolCallId: "call-1", toolName: "bash" },
-      { phase: "progress", toolCallId: "call-1", toolName: "bash" },
       { phase: "end", toolCallId: "call-1", toolName: "bash" },
     ]);
-    assert.ok(lifecycle.every((event) => typeof event.at === "string"));
+    assert.ok(lifecycle.every((event) => !("at" in event)));
     assert.doesNotMatch(JSON.stringify(lifecycle), /PRIVATE|args|partialResult|result/);
   });
 

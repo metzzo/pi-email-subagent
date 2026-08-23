@@ -212,13 +212,12 @@ describe("initial delegation lifecycle", () => {
         priority: "low",
         lifecycle: { runTimeoutMs: 4_000, idleTimeoutMs: 500 },
       });
-      const emit = (phase: "start" | "progress" | "end", toolCallId: string) => workers[0]!.emit({
-        type: "tool_lifecycle", phase, toolCallId, toolName: "bash", at: new Date().toISOString(),
+      const emit = (phase: "start" | "end", toolCallId: string) => workers[0]!.emit({
+        type: "tool_lifecycle", phase, toolCallId, toolName: "bash",
       } as never);
       emit("start", "call-a");
       emit("start", "call-a");
       emit("start", "call-b");
-      emit("progress", "orphan");
       emit("end", "orphan");
       emit("end", "call-a");
       emit("end", "call-a");
@@ -262,47 +261,6 @@ describe("initial delegation lifecycle", () => {
         type: "tool_lifecycle", phase: "end", toolCallId: "early", toolName: "bash", at: new Date().toISOString(),
       } as never);
       await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
-  it("does not persist or publish content-free tool progress updates", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-progress-"));
-    const worker = new FakeWorker();
-    const broker = await brokerWith(root, () => worker);
-    try {
-      const sent = await broker.send(broker.mainAddress, {
-        to: "worker.tool-progress@gpt-5.4.com",
-        subject: "Progress",
-        message: "Stream progress.",
-        priority: "low",
-        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 500 },
-      });
-      worker.emit({
-        type: "tool_lifecycle", phase: "start", toolCallId: "stream", toolName: "bash", at: new Date().toISOString(),
-      } as never);
-      const adapter = (broker as any).options.mainAdapter as FakeMainAdapter;
-      let saves = 0;
-      const originalSave = broker.registryStore.save.bind(broker.registryStore);
-      broker.registryStore.save = async (registry) => { saves += 1; await originalSave(registry); };
-      const snapshots = adapter.snapshots.length;
-      for (let index = 0; index < 100; index += 1) {
-        worker.emit({
-          type: "tool_lifecycle",
-          phase: "progress",
-          toolCallId: "stream",
-          toolName: "bash",
-          at: new Date().toISOString(),
-        } as never);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      assert.equal(saves, 0);
-      assert.equal(adapter.snapshots.length, snapshots);
-      assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
-      worker.emit({
-        type: "tool_lifecycle", phase: "end", toolCallId: "stream", toolName: "bash", at: new Date().toISOString(),
-      } as never);
     } finally {
       await broker.shutdown();
     }

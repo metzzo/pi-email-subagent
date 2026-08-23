@@ -316,13 +316,12 @@ export interface WorkerStatusEvent {
   error?: string;
 }
 
-/** Ephemeral, content-free tool execution liveness for the broker watchdog. */
+/** Ephemeral, content-free tool execution boundaries for the broker watchdog. */
 export interface WorkerToolLifecycleEvent {
   type: "tool_lifecycle";
-  phase: "start" | "progress" | "end";
+  phase: "start" | "end";
   toolCallId: string;
   toolName: string;
-  at: string;
 }
 
 export type WorkerEvent = WorkerStatusEvent | WorkerToolLifecycleEvent;
