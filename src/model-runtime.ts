@@ -89,6 +89,23 @@ function headerProvenanceError(providerId: string, modelId: string): ProviderRea
   );
 }
 
+function nativeProviderPolicyUnavailable(providerId: string): ProviderReadinessError {
+  return new ProviderReadinessError(
+    providerId,
+    "native-provider-policy-unavailable",
+    `Native provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.81.1 worker; no email was accepted.`,
+  );
+}
+
+function assertStaticNativeProvider(providerId: string, provider: NativeProvider): void {
+  if ((provider.headers && Object.keys(provider.headers).length > 0)
+    || provider.auth.oauth
+    || provider.refreshModels
+    || provider.filterModels) {
+    throw nativeProviderPolicyUnavailable(providerId);
+  }
+}
+
 function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
   const {
     id,
@@ -173,6 +190,7 @@ export class WorkerRuntimeFactory {
     const key = modelKey(providerId, modelId);
     if (this.headerModels.has(key)) throw headerProvenanceError(providerId, modelId);
     const registered = this.registeredProviders.get(providerId);
+    if (registered?.kind === "native") assertStaticNativeProvider(providerId, registered.provider);
     if (registered?.kind === "configured") {
       const config = registered.config;
       if (config.oauth || config.refreshModels
@@ -187,6 +205,7 @@ export class WorkerRuntimeFactory {
     }
 
     let runtime: ModelRuntime;
+    let available: readonly Model<Api>[] | undefined;
     try {
       runtime = await this.createRuntime(this.options);
       if (registered?.kind === "native") runtime.registerNativeProvider(registered.provider);
@@ -194,12 +213,20 @@ export class WorkerRuntimeFactory {
       // registerProvider/registerNativeProvider start an internal refresh without
       // returning it. Public getAvailable() coalesces that exact pending refresh,
       // so readiness is not declared from the provisional snapshot.
-      if (registered) await runtime.getAvailable(providerId);
+      if (registered) available = await runtime.getAvailable(providerId);
     } catch {
       throw new ProviderReadinessError(
         providerId,
         "runtime-snapshot-unavailable",
         `Worker runtime snapshot for provider ${providerId} could not be created. Correct provider/model configuration, then reload the extension.`,
+      );
+    }
+
+    if (registered && !available?.some((candidate) => candidate.provider === providerId && candidate.id === modelId)) {
+      throw new ProviderReadinessError(
+        providerId,
+        "registered-model-not-available",
+        `Registered provider ${providerId}'s exact model ${providerId}/${modelId} was not in the joined available set. Correct provider authentication/catalog policy, then reload the extension.`,
       );
     }
 

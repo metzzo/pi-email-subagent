@@ -237,7 +237,7 @@ function profileRecord(
         const unique = [...new Set(entry.tools as string[])];
         const effectiveCount = new Set([...unique, ...REQUIRED_MAIL_TOOLS]).size;
         if (entry.tools.length > MAX_CONFIG_PROFILE_TOOLS || effectiveCount > MAX_CONFIG_PROFILE_TOOLS) {
-          warnings.push(`${entryLabel}.tools must resolve to at most ${MAX_CONFIG_PROFILE_TOOLS} unique names including required mail tools; ignoring the entire tools field.`);
+          warnings.push(`${entryLabel}.tools source array must contain at most ${MAX_CONFIG_PROFILE_TOOLS} raw items and its effective set must contain at most ${MAX_CONFIG_PROFILE_TOOLS} unique names including required mail tools; ignoring the entire tools field.`);
         } else if (unique.some((tool) => !tool || !withinUtf8Bytes(tool, MAX_CONFIG_TOOL_NAME_BYTES))) {
           warnings.push(`${entryLabel}.tools names must be non-empty and at most ${MAX_CONFIG_TOOL_NAME_BYTES} UTF-8 bytes; ignoring the entire tools field.`);
         } else if (unique.some((tool) => !isSafeConfigSemanticText(tool, false))) {

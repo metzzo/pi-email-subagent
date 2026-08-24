@@ -252,6 +252,7 @@ describe("configuration", () => {
           instructions: instructionSentinel,
         },
         many: { tools: Array.from({ length: MAX_CONFIG_PROFILE_TOOLS + 1 }, (_, index) => `tool-${index}`) },
+        duplicateMany: { tools: Array.from({ length: MAX_CONFIG_PROFILE_TOOLS + 1 }, () => "read") },
       },
     }));
     const loaded = loadConfig(agentDir, root, false);
@@ -259,11 +260,12 @@ describe("configuration", () => {
     assert.equal(loaded.config.roles.semantic?.instructions, undefined);
     assert.equal(loaded.config.roles.semantic?.tools, undefined);
     assert.equal(loaded.config.roles.many?.tools, undefined);
+    assert.equal(loaded.config.roles.duplicateMany?.tools, undefined, "the raw source item limit applies before deduplication");
     assert.equal(resolveAgentProfile(loaded.config, "semantic.task@gpt-5.4.com", "semantic").tools.includes("fetch_emails"), true);
     const warnings = loaded.warnings.join("\n");
     assert.match(warnings, /modelPolicy.*UTF-8 bytes/i);
     assert.match(warnings, /instructions.*UTF-8 bytes/i);
-    assert.match(warnings, /tools.*unique names/i);
+    assert.match(warnings, /tools source array.*raw items.*effective set.*unique names/i);
     assert.doesNotMatch(warnings, /INSTRUCTION_SENTINEL|POLICY_SENTINEL|TOOL_SENTINEL/);
   });
 

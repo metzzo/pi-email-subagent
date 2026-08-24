@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, Provider } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   assertCredentialSourceEquivalent,
@@ -27,8 +27,9 @@ const model = {
 function sourceRegistry(
   status: CredentialStatus = { configured: true, source: "stored" },
   sourceModel: Model<any> = model,
-  registered: "safe" | "unsafe" | undefined = undefined,
+  registered: "safe" | "unsafe" | Provider | undefined = undefined,
 ): ModelRegistry {
+  const native = typeof registered === "object" ? registered : undefined;
   const config = registered === "unsafe"
     ? { oauth: { name: "dynamic" } }
     : registered === "safe"
@@ -38,9 +39,26 @@ function sourceRegistry(
     getAll: () => [sourceModel],
     getRegisteredProviderIds: () => registered ? [sourceModel.provider] : [],
     getRegisteredProviderConfig: () => config,
-    getRegisteredNativeProvider: () => undefined,
+    getRegisteredNativeProvider: () => native,
     getProviderAuthStatus: () => status,
   } as unknown as ModelRegistry;
+}
+
+function nativeProvider(overrides: Partial<Provider> = {}): Provider {
+  return {
+    id: model.provider,
+    name: "Static native fixture",
+    auth: {
+      apiKey: {
+        name: "Fixture",
+        resolve: async () => ({ auth: { apiKey: "fixture" } }),
+      },
+    },
+    getModels: () => [model],
+    stream: (() => { throw new Error("fixture stream must not run"); }) as Provider["stream"],
+    streamSimple: (() => { throw new Error("fixture stream must not run"); }) as Provider["streamSimple"],
+    ...overrides,
+  };
 }
 
 function targetRuntime(
@@ -146,6 +164,41 @@ describe("worker model runtime", () => {
     assert.equal(created, false, "dynamic hooks are not replayed into a worker runtime");
   });
 
+  it("rejects every unsafe native provider policy before worker runtime creation or hook execution", async () => {
+    const sentinel = "SENTINEL_NATIVE_PROVIDER_SECRET";
+    const cases: Array<[string, Partial<Provider>, () => number]> = [];
+    let oauthCalls = 0;
+    cases.push(["oauth", { auth: { oauth: {
+      name: "Dynamic fixture",
+      login: async () => { oauthCalls += 1; throw new Error(sentinel); },
+      refresh: async () => { oauthCalls += 1; throw new Error(sentinel); },
+      toAuth: async () => { oauthCalls += 1; throw new Error(sentinel); },
+    } } as Provider["auth"] }, () => oauthCalls]);
+    let refreshCalls = 0;
+    cases.push(["refresh", { refreshModels: async () => { refreshCalls += 1; throw new Error(sentinel); } }, () => refreshCalls]);
+    let filterCalls = 0;
+    cases.push(["filter", { filterModels: () => { filterCalls += 1; throw new Error(sentinel); } }, () => filterCalls]);
+    cases.push(["headers", { headers: { authorization: sentinel } }, () => 0]);
+
+    for (const [label, override, hookCalls] of cases) {
+      let created = 0;
+      await assert.rejects(
+        new WorkerRuntimeFactory(sourceRegistry(undefined, model, nativeProvider(override)), {}, async () => {
+          created += 1;
+          return targetRuntime();
+        }).preflight(model.provider, model.id),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /native provider.*cannot be proven.*no email was accepted/i, label);
+          assert.doesNotMatch(error.message, new RegExp(sentinel, "i"), label);
+          return true;
+        },
+      );
+      assert.equal(created, 0, `${label}: runtime creation is pre-gated`);
+      assert.equal(hookCalls(), 0, `${label}: unsafe native hook was not invoked`);
+    }
+  });
+
   it("awaits the public availability refresh after safe static provider registration", async () => {
     let registered = 0;
     let readiness = 0;
@@ -159,6 +212,26 @@ describe("worker model runtime", () => {
       .create("builtin-provider", "model-a");
     assert.equal(registered, 1);
     assert.equal(readiness, 1);
+  });
+
+  it("requires a safe registered native provider's exact model in the joined available set", async () => {
+    let registered = 0;
+    let lookedUp = 0;
+    const runtime = targetRuntime() as ModelRuntime & {
+      registerNativeProvider(provider: Provider): void;
+      getAvailable(providerId?: string): Promise<readonly Model<any>[]>;
+      getModel(providerId: string, modelId: string): Model<any> | undefined;
+    };
+    runtime.registerNativeProvider = () => { registered += 1; };
+    runtime.getAvailable = async () => [];
+    runtime.getModel = () => { lookedUp += 1; return model; };
+    await assert.rejects(
+      new WorkerRuntimeFactory(sourceRegistry(undefined, model, nativeProvider()), {}, async () => runtime)
+        .preflight(model.provider, model.id),
+      /exact model.*not in.*available/i,
+    );
+    assert.equal(registered, 1);
+    assert.equal(lookedUp, 0, "provisional registry lookup cannot replace public readiness evidence");
   });
 
   it("rejects unsupported source classes before a model request", async () => {
