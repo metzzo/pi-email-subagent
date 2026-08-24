@@ -456,6 +456,45 @@ describe("broker hardening", () => {
     }
   });
 
+  it("recovers one child blocker across crashes before and after its journal commit", async () => {
+    const first = await setup({ roles: delegatingRoles() });
+    const upstream = await first.broker.send(first.broker.mainAddress, {
+      to: "worker.crash-parent@gpt-5.4.com", subject: "Parent", message: "Delegate before simulated crash.", priority: "low",
+    });
+    const child = await first.workers[0]!.send({
+      to: "worker.crash-child@gpt-5.4.com", subject: "Child", message: "Remain open across recovery.", priority: "low",
+    });
+    await first.broker.shutdown();
+
+    const registryPath = join(first.root, "state", "registry.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as { agents: Array<Record<string, unknown>> };
+    const failedChild = registry.agents.find((record) => record.address === child.envelope.to)!;
+    failedChild.state = "failed";
+    failedChild.failure = "simulated crash before blocker journal commit";
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+
+    const afterBeforeCommit = await setup({ roles: delegatingRoles() }, first.root);
+    try {
+      await eventually(() => {
+        const blockers = afterBeforeCommit.broker.mailStore.list().filter((email) =>
+          email.kind === "reply" && email.inReplyTo === child.envelope.id);
+        assert.equal(blockers.length, 1);
+      });
+      assert.equal(afterBeforeCommit.broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined);
+    } finally {
+      await afterBeforeCommit.broker.shutdown();
+    }
+
+    const afterCommittedCrash = await setup({ roles: delegatingRoles() }, first.root);
+    try {
+      const blockers = afterCommittedCrash.broker.mailStore.list().filter((email) =>
+        email.kind === "reply" && email.inReplyTo === child.envelope.id);
+      assert.equal(blockers.length, 1, "post-commit recovery never creates a replacement blocker ID");
+    } finally {
+      await afterCommittedCrash.broker.shutdown();
+    }
+  });
+
   it("reports possible effects in a terminal child blocker without exposing work contents", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
