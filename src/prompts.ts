@@ -105,8 +105,8 @@ const MUTATION_TOOLS = new Set(["bash", "edit", "write"]);
 export function effectiveRoleToolSummary(config: SubagentConfig): string {
   const describe = (label: string, profile: { tools: readonly string[]; canSpawn: boolean }) => {
     const capability = profile.tools.some((tool) => MUTATION_TOOLS.has(tool)) ? "writable" : "read-only";
-    const spawn = profile.canSpawn ? "can spawn" : "spawn disabled";
-    return `- ${label}: ${profile.tools.join(", ") || "(none)"} (${capability}, ${spawn})`;
+    const delegation = profile.canSpawn ? "can delegate" : "delegation disabled";
+    return `- ${label}: ${profile.tools.join(", ") || "(none)"} (${capability}, ${delegation})`;
   };
   const roles = Object.keys(config.roles).sort().map((name) => {
     const profile = resolveAgentProfile(config, `__summary__.role@invalid`, name);
@@ -162,9 +162,9 @@ export function subagentPrompt(
   modelPolicy: string = DEFAULT_MODEL_POLICY,
 ): string {
   const role = record.instructions ? `\nRole-specific instructions:\n${record.instructions}\n` : "";
-  const spawnRule = record.canSpawn
-    ? ""
-    : "\nYou are not permitted to create new agents: sending to an unknown address is rejected. Reuse an existing agent or ask the main thread to spawn one.\n";
+  const delegationRule = record.canSpawn
+    ? "\nYou are permitted to delegate response-required requests to other subagents. Each accepted child request remains an open dependency until its exact reply or terminal blocker is delivered; do not answer upstream work while a child dependency is open.\n"
+    : "\nYou are not permitted to delegate response-required requests to any other subagent, known or unknown. Exact replies to requests you own and ordinary mail to main remain allowed. Ask the main thread to delegate independent work when needed.\n";
   return `${sharedMailPrompt({ address: record.address, modelId: record.modelId, effort: record.effort }, modelIds, modelPolicy)}
 ## Subagent Role
 
@@ -174,7 +174,7 @@ You are a persistent Pi subagent.
 - Your task slug: \`${record.taskSlug}\`
 - Main thread: \`${mainAddress}\`
 - Lifecycle: spawn ${record.lifecycle.spawnTimeoutMs}ms; prompt acceptance ${record.lifecycle.promptAcceptanceTimeoutMs}ms; run ${record.lifecycle.runTimeoutMs}ms; idle/stall ${record.lifecycle.idleTimeoutMs}ms; abort ${record.lifecycle.abortTimeoutMs}ms; dispose ${record.lifecycle.disposeTimeoutMs}ms
-${role}${spawnRule}
+${role}${delegationRule}
 Your transcript is private to your session. The requester cannot be assumed to see assistant output or tool results.
 
 For every work cycle:

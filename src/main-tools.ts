@@ -105,7 +105,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
           inspection.exists
             ? `Binding: persisted exact provider/model${inspection.providerReady === "unavailable" ? " · unavailable in current catalog · no provider substitution" : " · existing identity ignores current main-provider preference"}`
             : "Selection: prospective provider/model under the current main-provider preference; the first accepted mail persists it",
-          `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"} · ${inspection.canSpawn ? "can spawn" : "spawn disabled"}`,
+          `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"} · ${inspection.canSpawn ? "can delegate" : "delegation disabled"}`,
           `Tools: ${inspection.tools.join(", ")}`,
           `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} used · this address holds a lease: ${inspection.holdsActivationLease ? "yes" : "no"} · capacity available for this address: ${inspection.capacityAvailable ? "yes" : "no"}`,
           `Run concurrency: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit} slots used`,

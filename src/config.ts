@@ -60,16 +60,19 @@ export const DEFAULT_CONFIG: SubagentConfig = {
     scout: {
       effort: "low",
       tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
+      canSpawn: false,
       instructions: "Explore and report concise evidence with paths. Do not modify files.",
     },
     reviewer: {
       effort: "high",
       tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
+      canSpawn: false,
       instructions: "Review for correctness and return findings with concrete paths and validation. Do not modify files.",
     },
     worker: {
       effort: "medium",
       tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "send_email", "fetch_emails"],
+      canSpawn: false,
       instructions: "Implement focused changes, validate them, and report exact files and test results.",
     },
   },
@@ -348,7 +351,7 @@ export function resolveAgentProfile(
   const merged = {
     effort: exact.effort ?? role.effort ?? config.defaultEffort,
     tools: [...new Set([...tools, "send_email", "fetch_emails"])],
-    canSpawn: exact.canSpawn ?? role.canSpawn ?? true,
+    canSpawn: exact.canSpawn ?? role.canSpawn ?? false,
   } as Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions">;
   const instructions = exact.instructions ?? role.instructions;
   if (instructions !== undefined) merged.instructions = instructions;

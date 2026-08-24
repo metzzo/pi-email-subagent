@@ -108,11 +108,12 @@ describe("configuration", () => {
     assert.deepEqual(warnings, []);
     assert.equal(resolveAgentProfile(config, "scout.a@gpt-5.4.com", "scout").canSpawn, false);
     assert.equal(resolveAgentProfile(config, "scout.privileged@gpt-5.4.com", "scout").canSpawn, true);
-    assert.equal(resolveAgentProfile(config, "worker.a@gpt-5.4.com", "worker").canSpawn, true);
+    assert.equal(resolveAgentProfile(config, "worker.a@gpt-5.4.com", "worker").canSpawn, false);
+    assert.equal(resolveAgentProfile(config, "analyst.a@gpt-5.4.com", "analyst").canSpawn, false);
 
     await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ roles: { scout: { canSpawn: "no" } } }));
     const invalid = loadConfig(agentDir, root, false);
-    assert.equal(invalid.config.roles.scout?.canSpawn, undefined);
+    assert.equal(invalid.config.roles.scout?.canSpawn, false);
     assert.equal(invalid.warnings.length, 1);
     assert.match(invalid.warnings[0]!, /canSpawn/);
   });

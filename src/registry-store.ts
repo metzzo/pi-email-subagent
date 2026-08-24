@@ -242,8 +242,8 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     modelId: string(raw.modelId, `${label}.modelId`),
     effort,
     tools: stringArray(raw.tools, `${label}.tools`),
-    // Absent in registries written before spawn control existed.
-    canSpawn: raw.canSpawn === undefined ? true : (raw.canSpawn as boolean),
+    // Legacy registries without an explicit delegation grant fail closed.
+    canSpawn: raw.canSpawn === undefined ? false : (raw.canSpawn as boolean),
     state,
     createdAt: string(raw.createdAt, `${label}.createdAt`),
     updatedAt: string(raw.updatedAt, `${label}.updatedAt`),

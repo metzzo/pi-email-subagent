@@ -1054,6 +1054,10 @@ export class AgentBroker {
       const shape = parseSubagentAddressShape(requestedTo);
       const existingRecord = this.records.get(shape.address);
       to = shape.address;
+      const senderRecord = this.records.get(sender);
+      if (senderRecord && !senderRecord.canSpawn && !reply) {
+        throw new Error(`Agent ${sender} is not permitted to delegate to subagents; response-required requests to known and unknown subagents are disabled.`);
+      }
       failedKnown = existingRecord?.state === "failed";
       if (!failedKnown) {
         parsed = existingRecord
@@ -1071,10 +1075,6 @@ export class AgentBroker {
         ?? input.effort
         ?? resolveAgentProfile(this.options.config, to, parsed!.name).effort;
       initialLifecycle = existingRecord?.lifecycle ?? resolveLifecycle(this.options.config, to, parsed!.name, input.lifecycle);
-      const senderRecord = this.records.get(sender);
-      if (senderRecord && !senderRecord.canSpawn && !this.records.has(to)) {
-        throw new Error(`Agent ${sender} is not permitted to spawn new agents; reuse an existing address.`);
-      }
       if (!failedKnown && !this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
         throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
       }
@@ -1359,7 +1359,7 @@ export class AgentBroker {
       modelId: binding?.modelId ?? shape.modelId,
       effort: effortIntent ?? this.options.config.defaultEffort,
       tools: [],
-      canSpawn: true,
+      canSpawn: false,
       state: "failed",
       createdAt,
       updatedAt: nowIso(),

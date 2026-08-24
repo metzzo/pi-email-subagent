@@ -873,12 +873,13 @@ describe("broker hardening", () => {
     }
   });
 
-  it("blocks spawn-disabled agents from creating identities but allows reuse", async () => {
+  it("treats canSpawn as subagent delegation permission for known and unknown identities", async () => {
     const roles = structuredClone(DEFAULT_CONFIG.roles);
     roles.scout!.canSpawn = false;
-    const { broker, workers } = await setup({ roles });
+    roles.worker!.canSpawn = true;
+    const { broker, workers, main } = await setup({ roles });
     try {
-      await broker.send(broker.mainAddress, {
+      const scoutOne = await broker.send(broker.mainAddress, {
         to: "scout.one@gpt-5.4.com", subject: "One", message: "First.", priority: "low",
       });
       await broker.send(broker.mainAddress, {
@@ -886,27 +887,52 @@ describe("broker hardening", () => {
       });
       assert.equal(workers.length, 2);
 
-      // Reusing an existing address is still permitted.
-      const reuse = await workers[0]!.send({
-        to: "scout.two@gpt-5.4.com", subject: "Reuse", message: "Existing identity.", priority: "low",
-      });
-      assert.equal(reuse.spawned, false);
-      assert.equal(reuse.recipientDisposition, "reused");
-
-      // Spawning a new identity is rejected for the spawn-disabled role.
       await assert.rejects(workers[0]!.send({
-        to: "scout.three@gpt-5.4.com", subject: "Spawn", message: "New identity.", priority: "low",
-      }), /not permitted to spawn new agents/);
-      assert.equal(workers.length, 2, "no third worker was created");
+        to: "scout.two@gpt-5.4.com", subject: "Known delegation", message: "Existing identity.", priority: "low",
+      }), /not permitted to delegate to subagents/);
+      await assert.rejects(workers[0]!.send({
+        to: "scout.three@gpt-5.4.com", subject: "Unknown delegation", message: "New identity.", priority: "low",
+      }), /not permitted to delegate to subagents/);
+      assert.equal(workers.length, 2, "disabled delegation creates no worker or envelope");
 
-      // A spawn-enabled worker role remains unrestricted.
+      const exactReply = await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: scoutOne.expectedReplySubject!,
+        message: "Exact replies remain permitted.",
+        priority: "low",
+      });
+      assert.equal(exactReply.answeredEmailId, scoutOne.envelope.id);
+      const mainMail = await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: "Non-delegation status",
+        message: "Ordinary mail to main remains permitted.",
+        priority: "low",
+      });
+      assert.equal(mainMail.recipientDisposition, "main");
+      assert.equal(main.deliveries.length, 2);
+
       await broker.send(broker.mainAddress, {
-        to: "worker.three@gpt-5.4.com", subject: "Three", message: "Third.", priority: "low",
+        to: "worker.three@gpt-5.4.com", subject: "Three", message: "Explicitly opted in.", priority: "low",
       });
       const spawned = await workers[2]!.send({
         to: "scout.four@gpt-5.4.com", subject: "Four", message: "Fourth.", priority: "low",
       });
       assert.equal(spawned.spawned, true);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("disables delegation for unknown roles by default", async () => {
+    const { broker, workers } = await setup();
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "analyst.parent@gpt-5.4.com", subject: "Parent", message: "Do not fan out.", priority: "low",
+      });
+      await assert.rejects(workers[0]!.send({
+        to: "analyst.child@gpt-5.4.com", subject: "Child", message: "Must be rejected.", priority: "low",
+      }), /not permitted to delegate to subagents/);
+      assert.equal(workers.length, 1);
     } finally {
       await broker.shutdown();
     }

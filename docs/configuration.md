@@ -86,7 +86,7 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
 - Resolution order per configured profile field: exact address → role → defaults. An initial `send_email.effort` overrides those three levels only while creating an unknown identity; the resulting effort is persisted. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
-- `canSpawn` (default `true`) controls whether an agent may send to an unknown address and thereby create a new identity. Spawn-disabled agents get an actionable error and may still reuse existing addresses, reply, and mail main; their system prompt states the restriction. Main is never spawn-restricted.
+- `canSpawn` is retained as the compatibility key for **subagent delegation permission**, not creation-only permission. It defaults to `false`. When false, a subagent cannot send a new response-required request to any other subagent, known or unknown; exact replies it owns and ordinary mail to main remain allowed. Main is never delegation-restricted. Set `canSpawn: true` explicitly on a role or exact address only when nested dependency parking/blocker semantics are wanted.
 - Unknown tool names are dropped at worker start and noted in the agent's activity log.
 - Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
@@ -123,7 +123,7 @@ The relevant Pi keys are `retry.enabled`, `retry.maxRetries`, `retry.baseDelayMs
 | `reviewer` | high | read, grep, find, ls + mail | Review with findings and validation; read-only |
 | `worker` | medium | read, grep, find, ls, bash, edit, write + mail | Implement and validate changes |
 
-All default roles may spawn; set `canSpawn: false` on read-only roles to prevent fan-out and unplanned token spend.
+All default roles explicitly set `canSpawn: false`; nested delegation requires an explicit role or exact-address opt-in. Unknown role names also default to delegation disabled.
 
 ## Notes
 
