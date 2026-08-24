@@ -10,7 +10,7 @@ import {
   parseNewSubagentAddress,
   parseSubagentAddressShape,
 } from "./address.ts";
-import { isThinkingLevel, resolveAgentProfile, resolveLifecycle } from "./config.ts";
+import { isThinkingLevel, MAX_TIMER_DELAY_MS, resolveAgentProfile, resolveLifecycle } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
 import { ProviderReadinessError } from "./model-runtime.ts";
@@ -40,6 +40,7 @@ import type {
   WaitForRepliesResult,
   WorkerCleanupReport,
   WorkerEvent,
+  WorkerRunLivenessEvent,
   WorkerToolLifecycleEvent,
   WorkerTransport,
   WorkItem,
@@ -157,6 +158,19 @@ interface WatchdogEntry {
   idle?: ReturnType<typeof setTimeout>;
 }
 
+interface RetryLivenessHold {
+  deadline: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+interface RunLivenessState {
+  worker: WorkerTransport;
+  watchdogGeneration?: number;
+  modelPhase?: "started" | "progress" | "ended";
+  lastPulseAt?: number;
+  retry?: RetryLivenessHold;
+}
+
 interface WorkerCleanupLease {
   address: string;
   worker: WorkerTransport;
@@ -233,6 +247,7 @@ export class AgentBroker {
   private readonly pendingWorkPersists = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly watchdogs = new Map<string, WatchdogEntry>();
   private readonly toolLifecycles = new Map<string, ToolLifecycleState>();
+  private readonly runLifecycles = new Map<string, RunLivenessState>();
   private watchdogGeneration = 0;
   private lifecycle: "new" | "initializing" | "active" | "closing" | "closed" = "new";
   private lifecycleGeneration = 0;
@@ -1589,6 +1604,8 @@ export class AgentBroker {
       this.workers.set(record.address, worker);
       this.clearToolLifecycle(record.address);
       this.toolLifecycles.set(record.address, { worker, calls: new Map() });
+      this.clearRunLifecycle(record.address);
+      this.runLifecycles.set(record.address, { worker });
       this.workerUnsubscribers.set(record.address, unsubscribe);
       this.provisionalWorkers.delete(worker);
       this.syncWorker(record.address, worker);
@@ -1602,6 +1619,7 @@ export class AgentBroker {
       this.provisionalWorkers.delete(worker);
       if (this.workers.get(record.address) === worker) this.workers.delete(record.address);
       this.clearToolLifecycle(record.address, worker);
+      this.clearRunLifecycle(record.address, worker);
       if (this.workerUnsubscribers.get(record.address) === unsubscribe) this.workerUnsubscribers.delete(record.address);
       if (!this.cancelled(generation)) {
         record.state = "failed";
@@ -1621,11 +1639,19 @@ export class AgentBroker {
     }
   }
 
-  private clearWatchdog(address: string): void {
+  private clearRunLifecycle(address: string, worker?: WorkerTransport): void {
+    const current = this.runLifecycles.get(address);
+    if (worker && current?.worker !== worker) return;
+    if (current?.retry?.timer) clearTimeout(current.retry.timer);
+    this.runLifecycles.delete(address);
+  }
+
+  private clearWatchdog(address: string, preserveRunLifecycle = false): void {
     const current = this.watchdogs.get(address);
     if (current?.run) clearTimeout(current.run);
     if (current?.idle) clearTimeout(current.idle);
     this.watchdogs.delete(address);
+    if (!preserveRunLifecycle) this.clearRunLifecycle(address, current?.worker);
   }
 
   private clearToolLifecycle(address: string, worker?: WorkerTransport): void {
@@ -1633,11 +1659,40 @@ export class AgentBroker {
     if (!worker || current?.worker === worker) this.toolLifecycles.delete(address);
   }
 
+  private retrySchedulingSlackMs(record: AgentRecord): number {
+    return Math.min(1_000, Math.max(25, Math.floor(record.lifecycle.idleTimeoutMs / 10)));
+  }
+
+  private modelProgressCoalesceMs(record: AgentRecord): number {
+    return Math.min(1_000, Math.max(25, Math.floor(record.lifecycle.idleTimeoutMs / 4)));
+  }
+
+  private scheduleRetryHoldExpiry(address: string, state: RunLivenessState, watchdog: WatchdogEntry): void {
+    const hold = state.retry;
+    if (!hold) return;
+    if (hold.timer) clearTimeout(hold.timer);
+    const remaining = hold.deadline - Date.now();
+    if (remaining <= 0) {
+      delete state.retry;
+      this.refreshIdleWatchdog(address, watchdog.generation, watchdog.worker);
+      return;
+    }
+    hold.timer = setTimeout(() => {
+      const currentState = this.runLifecycles.get(address);
+      const currentWatchdog = this.watchdogs.get(address);
+      if (currentState !== state || currentState.retry !== hold
+        || currentWatchdog !== watchdog || Date.now() < hold.deadline) return;
+      delete currentState.retry;
+      this.refreshIdleWatchdog(address, watchdog.generation, watchdog.worker);
+    }, remaining);
+    hold.timer.unref?.();
+  }
+
   private startWatchdog(address: string): void {
     const record = this.records.get(address);
     const worker = this.workers.get(address);
     if (!record || !worker) return;
-    this.clearWatchdog(address);
+    this.clearWatchdog(address, true);
     const generation = ++this.watchdogGeneration;
     const startedAt = Date.now();
     const entry: WatchdogEntry = {
@@ -1655,11 +1710,20 @@ export class AgentBroker {
       tools.calls.clear();
     }
     tools.watchdogGeneration = generation;
+    let liveness = this.runLifecycles.get(address);
+    if (!liveness || liveness.worker !== worker
+      || (liveness.watchdogGeneration !== undefined && liveness.watchdogGeneration !== generation)) {
+      this.clearRunLifecycle(address);
+      liveness = { worker };
+      this.runLifecycles.set(address, liveness);
+    }
+    liveness.watchdogGeneration = generation;
     entry.run = setTimeout(
       () => swallow(this.expireWorker(address, generation, "LIFECYCLE_RUN_TIMEOUT", worker)),
       record.lifecycle.runTimeoutMs,
     );
     this.watchdogs.set(address, entry);
+    if (liveness.retry) this.scheduleRetryHoldExpiry(address, liveness, entry);
     this.refreshIdleWatchdog(address, generation, worker);
   }
 
@@ -1674,10 +1738,12 @@ export class AgentBroker {
     }
     if (tools.watchdogGeneration === undefined) tools.watchdogGeneration = generation;
     if (tools.watchdogGeneration !== generation) return;
+    const liveness = this.runLifecycles.get(address);
+    if (liveness && (liveness.worker !== worker || liveness.watchdogGeneration !== generation)) return;
     if (entry.idle) clearTimeout(entry.idle);
     entry.idle = undefined;
     entry.idleGeneration += 1;
-    if (tools.calls.size > 0) return;
+    if (tools.calls.size > 0 || Boolean(liveness?.retry)) return;
     entry.lastIdleAt = Date.now();
     const idleGeneration = entry.idleGeneration;
     entry.idle = setTimeout(
@@ -1696,6 +1762,66 @@ export class AgentBroker {
     const entry = this.watchdogs.get(address);
     if (!entry) return;
     this.refreshIdleWatchdog(address, entry.generation, entry.worker);
+  }
+
+  private onRunLiveness(address: string, worker: WorkerTransport, event: WorkerRunLivenessEvent): void {
+    const watchdog = this.watchdogs.get(address);
+    let state = this.runLifecycles.get(address);
+    if (!state || state.worker !== worker) {
+      this.clearRunLifecycle(address);
+      state = { worker, ...(watchdog ? { watchdogGeneration: watchdog.generation } : {}) };
+      this.runLifecycles.set(address, state);
+    }
+    if (watchdog) {
+      if (state.watchdogGeneration === undefined) state.watchdogGeneration = watchdog.generation;
+      if (state.watchdogGeneration !== watchdog.generation || watchdog.worker !== worker) return;
+    } else if (state.watchdogGeneration !== undefined) return;
+
+    const clearRetry = (): void => {
+      if (state!.retry?.timer) clearTimeout(state!.retry!.timer);
+      delete state!.retry;
+    };
+    const pulse = (coalesced: boolean): void => {
+      const now = Date.now();
+      const record = this.records.get(address);
+      if (coalesced && record && state!.lastPulseAt !== undefined
+        && now - state!.lastPulseAt < this.modelProgressCoalesceMs(record)) return;
+      state!.lastPulseAt = now;
+      if (watchdog) this.refreshIdleWatchdog(address, watchdog.generation, worker);
+    };
+
+    if (event.phase === "retry_start") {
+      const record = this.records.get(address);
+      if (!record || !Number.isFinite(event.delayMs) || event.delayMs! < 0) return;
+      clearRetry();
+      state.retry = {
+        deadline: Date.now() + Math.min(MAX_TIMER_DELAY_MS, event.delayMs!) + this.retrySchedulingSlackMs(record),
+      };
+      if (watchdog) {
+        this.scheduleRetryHoldExpiry(address, state, watchdog);
+        this.refreshIdleWatchdog(address, watchdog.generation, worker);
+      }
+      return;
+    }
+    if (event.phase === "retry_end") {
+      clearRetry();
+      pulse(false);
+      return;
+    }
+    if (event.phase === "model_start") {
+      clearRetry();
+      state.modelPhase = "started";
+      pulse(false);
+      return;
+    }
+    if (event.phase === "model_progress") {
+      state.modelPhase = "progress";
+      pulse(true);
+      return;
+    }
+    clearRetry();
+    state.modelPhase = "ended";
+    pulse(false);
   }
 
   private onToolLifecycle(address: string, worker: WorkerTransport, event: WorkerToolLifecycleEvent): void {
@@ -1820,6 +1946,10 @@ export class AgentBroker {
     if (!record) return;
     if (event.type === "tool_lifecycle") {
       this.onToolLifecycle(address, worker, event);
+      return;
+    }
+    if (event.type === "run_liveness") {
+      this.onRunLiveness(address, worker, event);
       return;
     }
     this.syncWorker(address, worker);

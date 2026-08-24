@@ -314,6 +314,41 @@ describe("SDK worker failures", () => {
     assert.doesNotMatch(JSON.stringify(events), /hidden reasoning/);
   });
 
+  it("emits only content-free model and retry liveness facts", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    const events: any[] = [];
+    worker.subscribe((event) => events.push(event));
+
+    internal.onSessionEvent({ type: "agent_start", privatePrompt: "PRIVATE PROMPT" });
+    internal.onSessionEvent({
+      type: "message_update",
+      message: { role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE THINKING" }] },
+      assistantMessageEvent: { type: "thinking_delta", delta: "PRIVATE DELTA" },
+    });
+    internal.onSessionEvent({ type: "agent_end", messages: [], willRetry: true, privateResponse: "PRIVATE RESPONSE" });
+    internal.onSessionEvent({
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 4_000,
+      errorMessage: "PRIVATE PROVIDER ERROR",
+    });
+    internal.onSessionEvent({ type: "auto_retry_end", success: true, attempt: 1, finalError: "PRIVATE FINAL ERROR" });
+
+    const liveness = events.filter((event) => event.type === "run_liveness");
+    assert.deepEqual(liveness, [
+      { type: "run_liveness", phase: "model_start" },
+      { type: "run_liveness", phase: "model_progress" },
+      { type: "run_liveness", phase: "model_end" },
+      { type: "run_liveness", phase: "retry_start", delayMs: 4_000 },
+      { type: "run_liveness", phase: "retry_end" },
+    ]);
+    assert.doesNotMatch(JSON.stringify(liveness), /PRIVATE|prompt|thinking|delta|response|error/i);
+  });
+
   it("emits only content-free lifecycle boundaries for tool starts and ends", () => {
     const worker = new SdkWorker({} as never);
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;

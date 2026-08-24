@@ -333,9 +333,12 @@ describe("broker lifecycle races", () => {
       staleListener({
         type: "tool_lifecycle", phase: "start", toolCallId: "stale", toolName: "bash", at: new Date().toISOString(),
       } as never);
+      staleListener({ type: "run_liveness", phase: "model_progress" } as never);
+      staleListener({ type: "run_liveness", phase: "retry_start", delayMs: 60_000 } as never);
       assert.equal((broker as any).watchdogs.get(request.envelope.to)?.generation, currentWatchdog.generation);
       assert.equal((broker as any).watchdogs.get(request.envelope.to)?.idle, currentWatchdog.idle);
       assert.equal((broker as any).toolLifecycles.get(request.envelope.to)?.worker, workers[1]);
+      assert.equal((broker as any).runLifecycles.get(request.envelope.to)?.worker, workers[1]);
     } finally {
       await broker.shutdown();
     }

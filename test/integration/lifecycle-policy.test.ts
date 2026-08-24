@@ -157,6 +157,124 @@ describe("initial delegation lifecycle", () => {
     }
   });
 
+  it("treats coalesced model progress as pulses without turning model start into a hold", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-model-pulse-"));
+    const worker = new FakeWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.model-pulse@gpt-5.4.com",
+        subject: "Stream",
+        message: "Emit content-free progress.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 300 },
+      });
+      const activityBefore = broker.getSnapshot().agents[0]!.activity.length;
+      worker.emit({ type: "run_liveness", phase: "model_start" } as never);
+      for (let index = 0; index < 4; index += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        worker.emit({ type: "run_liveness", phase: "model_progress" } as never);
+      }
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
+      assert.equal(broker.getSnapshot().agents[0]!.activity.length, activityBefore, "ephemeral pulses never enter registry activity");
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+    } finally {
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("expires a model start that never produces progress or an end", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-model-stall-"));
+    const worker = new FakeWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.model-stall@gpt-5.4.com",
+        subject: "Stall",
+        message: "Start without progress.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 2_000, idleTimeoutMs: 200 },
+      });
+      worker.emit({ type: "run_liveness", phase: "model_start" } as never);
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+    } finally {
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("uses Pi retry delay as a bounded hold and clears it on the next attempt boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-retry-hold-"));
+    const worker = new FakeWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.retry-hold@gpt-5.4.com",
+        subject: "Retry",
+        message: "Wait for Pi's retry boundary.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 200 },
+      });
+      worker.emit({ type: "run_liveness", phase: "retry_start", delayMs: 600 } as never);
+      assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "finite retry delay may outlive ordinary idle");
+      worker.emit({ type: "run_liveness", phase: "model_start" } as never);
+      assert.ok((broker as any).watchdogs.get(sent.envelope.to)?.idle, "the next exact attempt boundary clears the retry hold");
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+    } finally {
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("expires a bounded retry hold when Pi emits no end or next attempt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-retry-missing-end-"));
+    const worker = new FakeWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.retry-missing-end@gpt-5.4.com",
+        subject: "Retry missing end",
+        message: "Do not hold forever.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 150 },
+      });
+      worker.emit({ type: "run_liveness", phase: "retry_start", delayMs: 250 } as never);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
+      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/), 1_500);
+    } finally {
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("keeps the run deadline absolute across model progress and retry holds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-run-absolute-"));
+    const worker = new FakeWorker();
+    const broker = await brokerWith(root, () => worker);
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.run-absolute@gpt-5.4.com",
+        subject: "Absolute run",
+        message: "Progress must not move the run deadline.",
+        priority: "low",
+        lifecycle: { runTimeoutMs: 450, idleTimeoutMs: 175 },
+      });
+      worker.emit({ type: "run_liveness", phase: "retry_start", delayMs: 1_000 } as never);
+      const pulse = setInterval(() => worker.emit({ type: "run_liveness", phase: "model_progress" } as never), 75);
+      try {
+        await eventually(() => {
+          const failure = broker.inspectAgent(sent.envelope.to).failure ?? "";
+          assert.match(failure, /LIFECYCLE_RUN_TIMEOUT/);
+          assert.doesNotMatch(failure, /LIFECYCLE_IDLE_TIMEOUT/);
+        }, 1_500);
+      } finally {
+        clearInterval(pulse);
+      }
+    } finally {
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
   it("disarms idle while a known tool is active and rearms a full interval after its end", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-active-tool-"));
     const workers: FakeWorker[] = [];

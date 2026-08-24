@@ -322,7 +322,15 @@ export interface WorkerToolLifecycleEvent {
   toolName: string;
 }
 
-export type WorkerEvent = WorkerStatusEvent | WorkerToolLifecycleEvent;
+/** Ephemeral model pulses and finite Pi retry boundaries; never persisted or published. */
+export interface WorkerRunLivenessEvent {
+  type: "run_liveness";
+  phase: "model_start" | "model_progress" | "model_end" | "retry_start" | "retry_end";
+  /** Present only for retry_start and derived from Pi's finite retry schedule. */
+  delayMs?: number;
+}
+
+export type WorkerEvent = WorkerStatusEvent | WorkerToolLifecycleEvent | WorkerRunLivenessEvent;
 
 export interface WorkerSnapshot {
   record: AgentRecord;
