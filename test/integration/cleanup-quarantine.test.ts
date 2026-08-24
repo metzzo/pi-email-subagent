@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -404,6 +404,108 @@ describe("worker cleanup quarantine", () => {
       assert.equal((restored as any).active.size, 2, "ordinary work does not consume or replace inherited holds");
     } finally {
       await restored.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("classifies abandoned failed and ambiguous owners from exact epochs or raw legacy tools before profile overlay", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-abandoned-epoch-"));
+    const stateDir = join(root, "state");
+    await mkdir(stateDir, { recursive: true });
+    const now = new Date().toISOString();
+    const lifecycle = structuredClone(DEFAULT_CONFIG.lifecycle);
+    const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+    const base = (address: string, state: string, tools: string[], workerEpoch?: unknown) => ({
+      address,
+      name: "worker",
+      taskSlug: address.split(".")[1]!.split("@")[0],
+      provider: "openai-codex",
+      modelId: "gpt-5.4",
+      effort: "medium",
+      tools,
+      canSpawn: false,
+      state,
+      createdAt: now,
+      updatedAt: now,
+      enforcementAttempts: 0,
+      lifecycle,
+      usage,
+      activity: [],
+      ...(workerEpoch ? { workerEpoch } : {}),
+    });
+    const activatedMutable = "worker.epoch-mutable@gpt-5.4.com";
+    const activatedReadonly = "worker.epoch-readonly@gpt-5.4.com";
+    const activatedOmitted = "worker.epoch-omitted@gpt-5.4.com";
+    const legacyMutable = "worker.legacy-mutable@gpt-5.4.com";
+    const verifiedClean = "worker.verified-clean@gpt-5.4.com";
+    const archivedLegacy = "worker.archived-legacy@gpt-5.4.com";
+    const agents = [
+      base(activatedMutable, "failed", ["bash", "send_email", "fetch_emails"], {
+        generation: 11, phase: "activated", tools: ["bash", "send_email", "fetch_emails"], mutationCapable: true, runSlotHeld: true,
+      }),
+      base(activatedReadonly, "failed", ["read", "send_email", "fetch_emails"], {
+        generation: 12, phase: "activated", tools: ["read", "send_email", "fetch_emails"], mutationCapable: false, runSlotHeld: false,
+      }),
+      base(activatedOmitted, "failed", ["write", "send_email", "fetch_emails"], {
+        generation: 13, phase: "activated", tools: ["read", "send_email", "fetch_emails"], mutationCapable: false, runSlotHeld: false,
+      }),
+      base(legacyMutable, "stopped", ["write", "send_email", "fetch_emails"]),
+      base(verifiedClean, "stopped", ["bash", "send_email", "fetch_emails"], {
+        generation: 14, phase: "verified-clean", tools: ["bash", "send_email", "fetch_emails"], mutationCapable: true, runSlotHeld: false,
+      }),
+      base(archivedLegacy, "archived", ["write", "send_email", "fetch_emails"]),
+    ];
+    await writeFile(join(stateDir, "registry.json"), `${JSON.stringify({
+      version: 1,
+      mainAddress: "main@gpt-5.4.com",
+      mainAliases: ["main@gpt-5.4.com"],
+      agents,
+      updatedAt: now,
+    }, null, 2)}\n`);
+    await writeFile(join(stateDir, ".broker-owner.json"), `${JSON.stringify({
+      pid: 2_000_000_000,
+      token: "abandoned-test-owner",
+      acquiredAt: now,
+      namespaceDir: stateDir,
+    })}\n`);
+
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.roles.worker!.tools = ["read", "send_email", "fetch_emails"];
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: stateDir,
+      config,
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: new FakeMainAdapter(),
+      workerFactory: () => new FakeWorker(),
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      const epoch = broker.inspectAgent(activatedMutable);
+      assert.equal(epoch.cleanup?.reasonCode, "ABANDONED_OWNER_RECOVERY");
+      assert.equal(epoch.cleanup?.workerGeneration, 11);
+      assert.equal(epoch.cleanup?.mutationCapableAtStart, true);
+      assert.equal(epoch.cleanup?.heldRunSlot, true);
+      assert.equal(epoch.tools.includes("bash"), false, "current configured profile is separate from the prior epoch");
+
+      const legacy = broker.inspectAgent(legacyMutable);
+      assert.equal(legacy.cleanup?.reasonCode, "ABANDONED_OWNER_RECOVERY");
+      assert.equal(legacy.cleanup?.mutationCapableAtStart, true, "raw legacy tools are captured before profile overlay");
+      assert.equal(legacy.cleanup?.heldRunSlot, true, "legacy stopped ownership is ambiguous without an epoch");
+      assert.equal(legacy.tools.includes("write"), false);
+
+      assert.equal(broker.inspectAgent(activatedReadonly).cleanup, undefined);
+      assert.equal(broker.inspectAgent(activatedOmitted).cleanup, undefined, "configured write omitted from the activated epoch is not sticky");
+      assert.equal(broker.inspectAgent(verifiedClean).cleanup, undefined);
+      assert.equal(broker.inspectAgent(verifiedClean).state, "stopped");
+      assert.equal(broker.inspectAgent(archivedLegacy).cleanup, undefined);
+      assert.equal(broker.inspectAgent(archivedLegacy).state, "archived");
+      assert.equal((broker as any).active.has(activatedMutable), true);
+      assert.equal((broker as any).active.has(legacyMutable), true);
+    } finally {
+      await broker.shutdown().catch(() => undefined);
+      await (broker as any).releaseNamespaceLock();
     }
   });
 

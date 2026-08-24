@@ -7,7 +7,7 @@ import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { MailStore } from "../../src/mail-store.ts";
 import { makeReplySubject } from "../../src/reply.ts";
-import type { MainDelivery, SubagentConfig } from "../../src/types.ts";
+import type { MainDelivery, SubagentConfig, WorkerStartConfig } from "../../src/types.ts";
 import { appendRecent, emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
 import { createWorkerFactory, eventually, FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
 
@@ -715,6 +715,84 @@ describe("broker hardening", () => {
       }), /Agent limit reached/);
     } finally {
       await second.broker.shutdown();
+    }
+  });
+
+  it("keeps configured intent separate from live activated tools before first prompt admission", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-active-tools-"));
+    const registryPath = join(root, "state", "registry.json");
+    class OmittedWriteWorker extends FakeWorker {
+      override async start(config: WorkerStartConfig): Promise<void> {
+        await super.start(config);
+        this.record!.tools = this.record!.tools.filter((tool) => tool !== "write" && tool !== "edit" && tool !== "bash");
+      }
+      override async prompt(message: string): Promise<void> {
+        const durable = JSON.parse(await readFile(registryPath, "utf8")) as any;
+        const epoch = durable.agents[0]?.workerEpoch;
+        assert.equal(epoch?.phase, "activated");
+        assert.equal(epoch?.runSlotHeld, true, "the exact run-slot epoch is durable before prompt admission");
+        assert.equal(epoch?.mutationCapable, false);
+        assert.equal(epoch?.tools.includes("write"), false);
+        await super.prompt(message);
+      }
+    }
+    const worker = new OmittedWriteWorker();
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config: structuredClone(DEFAULT_CONFIG),
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: new FakeMainAdapter(),
+      workerFactory: () => worker,
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      const preview = broker.inspectAgent("worker.activated-tools@gpt-5.4.com");
+      assert.equal(preview.writable, true);
+      assert.equal(preview.activeTools, undefined);
+      assert.equal(preview.tools.includes("write"), true);
+
+      const sent = await broker.send(broker.mainAddress, {
+        to: preview.address,
+        subject: "Activation truth",
+        message: "Pi omits configured mutation tools.",
+        priority: "low",
+      });
+      assert.equal(sent.recipientTools?.includes("write"), false, "send reports live activation, not configured intent");
+      const live = broker.inspectAgent(preview.address);
+      assert.equal(live.tools.includes("write"), true, "configured intent remains explicit");
+      assert.equal(live.activeTools?.includes("write"), false);
+      assert.equal(live.writable, false);
+      const snapshot = broker.getSnapshot().agents[0]!;
+      assert.equal(snapshot.tools.includes("write"), true);
+      assert.equal(snapshot.activeTools?.includes("write"), false);
+      const durable = JSON.parse(await readFile(registryPath, "utf8")) as any;
+      assert.equal(durable.agents[0].tools.includes("write"), true);
+      assert.equal(durable.agents[0].activeTools, undefined);
+      assert.equal(durable.agents[0].workerEpoch.phase, "activated");
+      assert.equal(durable.agents[0].workerEpoch.mutationCapable, false);
+      await worker.send({
+        to: broker.mainAddress,
+        subject: sent.expectedReplySubject!,
+        message: "Activation truth verified.",
+        priority: "low",
+      });
+      worker.settle();
+      await eventually(async () => {
+        assert.equal(broker.inspectAgent(preview.address).state, "idle");
+        const settled = JSON.parse(await readFile(registryPath, "utf8")) as any;
+        assert.equal(settled.agents[0].workerEpoch.phase, "activated");
+        assert.equal(settled.agents[0].workerEpoch.runSlotHeld, false);
+      });
+      await broker.stop(preview.address);
+      assert.equal(broker.inspectAgent(preview.address).activeTools, undefined);
+      const cleaned = JSON.parse(await readFile(registryPath, "utf8")) as any;
+      assert.equal(cleaned.agents[0].workerEpoch.phase, "verified-clean");
+      assert.equal(cleaned.agents[0].workerEpoch.runSlotHeld, false);
+    } finally {
+      await broker.shutdown();
     }
   });
 

@@ -158,6 +158,14 @@ export interface CleanupToolRef {
 }
 
 /** Persisted fail-closed summary; an in-memory cleanup Promise is never persisted. */
+export interface WorkerCapabilityEpoch {
+  generation: number;
+  phase: "spawning" | "activated" | "verified-clean";
+  tools: string[];
+  mutationCapable: boolean;
+  runSlotHeld: boolean;
+}
+
 export interface CleanupDiagnostic {
   state: "pending" | "unknown";
   reasonCode: string;
@@ -182,7 +190,12 @@ export interface AgentRecord {
   provider: string;
   modelId: string;
   effort: ThinkingLevel;
+  /** Current configured intent. */
   tools: string[];
+  /** Current live activation, exposed only in derived snapshots while the exact worker exists. */
+  activeTools?: string[];
+  /** Durable capability evidence for one exact worker generation. */
+  workerEpoch?: WorkerCapabilityEpoch;
   canSpawn: boolean;
   instructions?: string;
   state: AgentStatus;
@@ -271,7 +284,10 @@ export interface AgentInspection {
   provider: string;
   effort: ThinkingLevel;
   role: string;
+  /** Current configured intent. */
   tools: string[];
+  /** Exact Pi activation, present only while this identity has a live worker. */
+  activeTools?: string[];
   instructions?: string;
   writable: boolean;
   canSpawn: boolean;
@@ -334,6 +350,8 @@ export type WorkerEvent = WorkerStatusEvent | WorkerToolLifecycleEvent | WorkerR
 
 export interface WorkerSnapshot {
   record: AgentRecord;
+  /** Exact names returned by the live Pi session. */
+  activeTools: string[];
   isIdle: boolean;
   isStreaming: boolean;
 }

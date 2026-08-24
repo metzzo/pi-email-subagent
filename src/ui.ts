@@ -598,8 +598,11 @@ export class DashboardComponent {
         const provider = sanitizeConversationLabel(agent.provider);
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg("accent", `${statusIcon(agent.state)} ${address}`));
-        const writable = agent.tools.some((tool) => tool === "edit" || tool === "write" || tool === "bash");
-        lines.push(this.theme.fg("muted", `${displayStatus(agent.state)} · ${provider}/${modelId} · effort ${agent.effort} · ${writable ? "writable" : "read-only"}`));
+        const runtimeTools = agent.activeTools ?? agent.tools;
+        const writable = runtimeTools.some((tool) => tool === "edit" || tool === "write" || tool === "bash"
+          || !["read", "grep", "find", "ls", "send_email", "fetch_emails"].includes(tool));
+        const capabilityLabel = agent.activeTools ? "live" : "configured";
+        lines.push(this.theme.fg("muted", `${displayStatus(agent.state)} · ${provider}/${modelId} · effort ${agent.effort} · ${capabilityLabel} ${writable ? "writable" : "read-only"}`));
         lines.push(this.theme.fg("dim", `[${this.tab === "work" ? "Work" : "work"}] [${this.tab === "activity" ? "Activity" : "activity"}] [${this.tab === "inbox" ? "Inbox" : "inbox"}] [${this.tab === "profile" ? "Profile/Lifecycle" : "profile/lifecycle"}]`));
         // Keep deadline disclosure visible in every detail tab; Profile adds tools/failure context.
         lines.push(this.theme.fg("dim", `lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms · prompt ${agent.lifecycle.promptAcceptanceTimeoutMs}ms · run ${agent.lifecycle.runTimeoutMs}ms · idle ${agent.lifecycle.idleTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
@@ -653,7 +656,9 @@ export class DashboardComponent {
             for (const excerptLine of wrapTextWithAnsi(this.theme.fg("text", excerpt), Math.max(1, width - 2)).slice(0, 3)) lines.push(`  ${excerptLine}`);
           }
         } else {
-          lines.push(this.theme.fg("dim", `tools: ${agent.tools.map(sanitizeConversationLabel).join(", ")}`));
+          lines.push(this.theme.fg("dim", `configured tools: ${agent.tools.map(sanitizeConversationLabel).join(", ")}`));
+          if (agent.activeTools) lines.push(this.theme.fg("dim", `live active tools: ${agent.activeTools.map(sanitizeConversationLabel).join(", ")}`));
+          else lines.push(this.theme.fg("dim", "live active tools: unavailable (no exact live worker)"));
           lines.push(this.theme.fg("dim", `internal state: ${agent.state}`));
           let inspection: AgentInspection | undefined;
           try { inspection = this.getInspection?.(agent.address); } catch { /* current snapshot remains renderable */ }

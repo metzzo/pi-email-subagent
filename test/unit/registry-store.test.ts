@@ -67,6 +67,34 @@ describe("registry schema", () => {
     assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);
   });
 
+  it("round-trips a bounded worker capability epoch and leaves legacy records explicit", () => {
+    const base = record();
+    base.workerEpoch = {
+      generation: 9,
+      phase: "activated",
+      tools: ["read", "send_email", "fetch_emails"],
+      mutationCapable: false,
+      runSlotHeld: true,
+    };
+    const parsed = parseRegistry({ ...registry(), agents: [base] });
+    assert.deepEqual(parsed.agents[0]?.workerEpoch, base.workerEpoch);
+
+    const legacy = record();
+    const legacyParsed = parseRegistry({ ...registry(), agents: [legacy] });
+    assert.equal(legacyParsed.agents[0]?.workerEpoch, undefined);
+
+    for (const workerEpoch of [
+      { ...base.workerEpoch, generation: 0 },
+      { ...base.workerEpoch, phase: "unknown" },
+      { ...base.workerEpoch, tools: ["x".repeat(101)] },
+      { ...base.workerEpoch, tools: Array.from({ length: 129 }, (_, index) => `tool-${index}`) },
+      { ...base.workerEpoch, mutationCapable: "yes" },
+      { ...base.workerEpoch, runSlotHeld: "yes" },
+    ]) {
+      assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, workerEpoch }] }), /workerEpoch/i);
+    }
+  });
+
   it("round-trips bounded cleanup quarantine and rejects malformed diagnostics", () => {
     const base = record();
     const now = new Date().toISOString();

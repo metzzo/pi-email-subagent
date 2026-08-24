@@ -581,6 +581,7 @@ export class SdkWorker implements WorkerTransport {
     if (!this.record) throw new Error("Worker has not started.");
     return {
       record: { ...clone(this.record), usage: usageFromRecord(this.record) },
+      activeTools: [...this.record.tools],
       isIdle: this.session?.isIdle ?? true,
       isStreaming: this.session?.isStreaming ?? false,
     };

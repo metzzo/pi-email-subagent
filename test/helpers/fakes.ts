@@ -129,7 +129,7 @@ export class FakeWorker implements WorkerTransport {
 
   getSnapshot(): WorkerSnapshot {
     if (!this.record) throw new Error("not started");
-    return { record: clonedRecord(this.record), isIdle: this.idle, isStreaming: this.streaming };
+    return { record: clonedRecord(this.record), activeTools: [...this.record.tools], isIdle: this.idle, isStreaming: this.streaming };
   }
 
   getSessionFile(): string | undefined { return this.record?.sessionFile; }
