@@ -89,6 +89,12 @@ function planMain(messages: readonly Message[]): Plan {
     allowExhaustedRecovery = true;
     return { toolCalls: [{ name: "manage_agent", arguments: { address: RETRY_WORKER_ADDRESS, action: "restart" } }] };
   }
+  if (text.includes("E2E PROVIDER CACHE REJECT")) {
+    return { toolCalls: [{
+      name: "send_email",
+      arguments: { to: RETRY_WORKER_ADDRESS, subject: "Reject unsupported cache retention", message: "CACHE_RETENTION_REJECT before tools", priority: "low" },
+    }] };
+  }
   if (text.includes("E2E PROVIDER TOOL RECOVER")) {
     const path = / PATH (\S+)/.exec(text)?.[1];
     if (!path) return { text: "E2E PROVIDER PATH MISSING" };
@@ -135,6 +141,9 @@ function planWorker(messages: readonly Message[]): Plan {
 
   if (last?.role === "toolResult") {
     if (last.toolName === "fetch_emails") {
+      if (text.includes("CACHE_RETENTION_REJECT")) {
+        return { error: "prompt_cache_retention is not supported on this model; Authorization: Bearer SENTINEL_CACHE_NATIVE" };
+      }
       if (text.includes("RETRY_RECOVER")) {
         recoverAttempts += 1;
         if (recoverAttempts === 1) return { error: "WebSocket error: deterministic recoverable attempt" };

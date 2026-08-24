@@ -20,9 +20,10 @@ import type {
   WorkerTransport,
 } from "./types.ts";
 import { formatUnanswered } from "./prompts.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
-import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
+import { clone, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem } from "./work-ledger.ts";
 
 const { Type } = TypeBox;
@@ -97,7 +98,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientLifecycle) lines.push(`Recipient lifecycle: ${JSON.stringify(result.recipientLifecycle)}`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
-        const message = errorMessage(error);
+        const message = safeErrorSummary(error);
         // The broker may report a post-journal delivery problem. Do not
         // relabel a durable email.created commit as rejection.
         if (/^Email\s+\S+\s+was persisted\b/.test(message)) throw new Error(message);
@@ -167,7 +168,7 @@ export function terminalAgentError(messages: readonly AgentMessage[], willRetry:
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role === "assistant" && message.stopReason === "error") {
-      return message.errorMessage?.trim() || "The model request failed without an error message.";
+      return safeErrorSummary(message.errorMessage);
     }
   }
   return undefined;
@@ -209,7 +210,8 @@ export class SdkWorker implements WorkerTransport {
 
   private activity(kind: ActivityItem["kind"], summary: string): void {
     if (!this.record) return;
-    const item: ActivityItem = { at: nowIso(), kind, summary: truncateText(summary.replace(/\s+/g, " ").trim(), 500) };
+    const normalized = kind === "error" ? safeErrorSummary(summary) : summary.replace(/\s+/g, " ").trim();
+    const item: ActivityItem = { at: nowIso(), kind, summary: truncateText(normalized, 500) };
     this.record.activity.push(item);
     if (this.record.activity.length > 40) this.record.activity.splice(0, this.record.activity.length - 40);
     this.record.lastActivityAt = item.at;
@@ -263,7 +265,7 @@ export class SdkWorker implements WorkerTransport {
     try {
       this.record.work = recoverMutationWork(sessionManager.getBranch(), config.cwd, this.record.work);
     } catch (error) {
-      this.record.work.recoveryError = truncateText(errorMessage(error), 500);
+      this.record.work.recoveryError = safeErrorSummary(error);
       interruptActive(this.record.work);
     }
 
@@ -390,11 +392,11 @@ export class SdkWorker implements WorkerTransport {
         break;
       }
       case "auto_retry_start":
-        this.activity("status", `Provider retry ${event.attempt}/${event.maxAttempts} scheduled in ${event.delayMs}ms: ${event.errorMessage}`);
+        this.activity("status", `Pi agent retry ${event.attempt}/${event.maxAttempts} scheduled in ${event.delayMs}ms: ${safeErrorSummary(event.errorMessage)}`);
         break;
       case "auto_retry_end":
-        if (event.success) this.activity("status", `Provider retry recovered after attempt ${event.attempt}`);
-        else this.activity("error", `Provider retry ended after attempt ${event.attempt}: ${event.finalError ?? "unknown error"}`);
+        if (event.success) this.activity("status", `Pi agent retry recovered after attempt ${event.attempt}`);
+        else this.activity("error", `Pi agent retry ended after attempt ${event.attempt}: ${safeErrorSummary(event.finalError)}`);
         break;
       case "agent_end": {
         const failure = terminalAgentError(event.messages, event.willRetry);
@@ -450,7 +452,7 @@ export class SdkWorker implements WorkerTransport {
           },
         }),
         (error) => {
-          const messageText = errorMessage(error);
+          const messageText = safeErrorSummary(error);
           this.activity("error", messageText);
           this.emit({ type: "failure", error: messageText });
         },
@@ -508,14 +510,14 @@ export class SdkWorker implements WorkerTransport {
         } catch (error) {
           abort = "failed";
           providerQuiescent = false;
-          detail = truncateText(errorMessage(error), 500);
+          detail = safeErrorSummary(error);
         }
       }
       try {
         session?.dispose();
       } catch (error) {
         dispose = "failed";
-        detail = truncateText(errorMessage(error), 500);
+        detail = safeErrorSummary(error);
       } finally {
         this.listeners.clear();
       }

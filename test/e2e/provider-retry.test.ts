@@ -108,7 +108,7 @@ function activeSessionMessages(sessionFile: string): any[] {
 
 function retryActivity(record: any): Array<{ kind: string; summary: string }> {
   return (record.activity as Array<{ kind: string; summary: string }>)
-    .filter((item) => item.summary.startsWith("Provider retry"))
+    .filter((item) => item.summary.startsWith("Pi agent retry"))
     .map(({ kind, summary }) => ({ kind, summary }));
 }
 
@@ -118,6 +118,52 @@ function customFailureAlerts(events: readonly RpcLine[], after: number): RpcLine
 }
 
 describe("real Pi provider retry resilience", { concurrency: false }, () => {
+  it("keeps one accepted cache-option rejection terminal, sanitized, and unreplayed", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E PROVIDER CACHE REJECT");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "cache rejection send", 90_000, mark));
+      const requestId = sent.correlationId as string;
+      await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as { customType?: string } | undefined)?.customType === "pi-email-subagent.alert",
+        "sanitized cache rejection alert",
+        120_000,
+        mark,
+      );
+      await client.waitForSettlement(mark);
+      const registry = await eventuallyRegistry(
+        agentDir,
+        sessionId,
+        (candidate) => candidate.agents?.[0]?.state === "failed",
+        "with terminal cache rejection",
+      );
+      const record = registry.agents[0];
+      assert.match(record.failure ?? "", /prompt_cache_retention is not supported on this model/);
+      assert.match(record.failure ?? "", /Authorization: \[redacted\]/);
+      assert.doesNotMatch(JSON.stringify(record), /SENTINEL_CACHE_NATIVE|<agent-email>/i);
+      assert.equal(retryActivity(record).length, 0, "the non-retryable option rejection has no Pi agent retry cycle");
+      const alerts = customFailureAlerts(client.events(), mark);
+      assert.equal(alerts.length, 1);
+      assert.doesNotMatch(messageText(alerts[0]!), /SENTINEL_CACHE_NATIVE|<agent-email>/i);
+      assert.equal(client.events().slice(mark).filter(toolStart("manage_agent")).length, 0);
+
+      const journal = await readJournal(agentDir, sessionId);
+      assert.equal(journal.filter((event) => event.type === "email.created" && event.email?.id === requestId).length, 1);
+      assert.equal(journal.some((event) => event.type === "email.answered" && event.id === requestId), false);
+      const messages = activeSessionMessages(record.sessionFile);
+      assert.equal(messages.filter((message) => message.role === "user").length, 1);
+      const nativeErrors = messages.filter((message) => message.role === "assistant" && message.stopReason === "error");
+      assert.equal(nativeErrors.length, 1);
+      assert.match(nativeErrors[0]?.errorMessage ?? "", /SENTINEL_CACHE_NATIVE/);
+      assert.equal(await client.close(), 0, client.stderr);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("recovers through Pi retry activity without a terminal alert or a new envelope", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {
@@ -139,8 +185,8 @@ describe("real Pi provider retry resilience", { concurrency: false }, () => {
       assert.equal(record.address, WORKER_ADDRESS);
       assert.equal(record.failure, undefined);
       assert.deepEqual(retryActivity(record), [
-        { kind: "status", summary: "Provider retry 1/1 scheduled in 5ms: WebSocket error: deterministic recoverable attempt" },
-        { kind: "status", summary: "Provider retry recovered after attempt 1" },
+        { kind: "status", summary: "Pi agent retry 1/1 scheduled in 5ms: WebSocket error: deterministic recoverable attempt" },
+        { kind: "status", summary: "Pi agent retry recovered after attempt 1" },
       ]);
       assert.equal(customFailureAlerts(client.events(), mark).length, 0);
 
@@ -223,8 +269,8 @@ describe("real Pi provider retry resilience", { concurrency: false }, () => {
       const failed = failedRegistry.agents[0];
       assert.match(failed.failure ?? "", /fetch failed: deterministic exhausted attempt 2/);
       assert.deepEqual(retryActivity(failed), [
-        { kind: "status", summary: "Provider retry 1/1 scheduled in 5ms: fetch failed: deterministic exhausted attempt 1" },
-        { kind: "error", summary: "Provider retry ended after attempt 1: fetch failed: deterministic exhausted attempt 2" },
+        { kind: "status", summary: "Pi agent retry 1/1 scheduled in 5ms: fetch failed: deterministic exhausted attempt 1" },
+        { kind: "error", summary: "Pi agent retry ended after attempt 1: fetch failed: deterministic exhausted attempt 2" },
       ]);
       assert.equal(failed.work.recent.filter((item: any) => item.toolName === "write").length, 1);
       assert.equal(await readFile(effectPath, "utf8"), "terminal attempt effect occurred once\n");

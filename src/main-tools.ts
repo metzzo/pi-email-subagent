@@ -2,11 +2,13 @@ import * as PiAi from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as TypeBox from "typebox";
 import type { AgentBroker } from "./broker.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 import { textResult } from "./tool-result.ts";
 import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
-import { byteLength, errorMessage } from "./util.ts";
+import { byteLength } from "./util.ts";
 import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 
+const errorMessage = safeErrorSummary;
 const { Type } = TypeBox;
 const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated. Later replies are delivered automatically to the main thread when they arrive (or after broker/session restoration). No immediate wait_for_replies rejoin is needed merely to keep requests alive. Rejoin only for a deliberate synchronous collection/status window.";
 const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live presentation. Pi 0.81.1 exposes no staged tool-result append receipt, so a process crash can leave the mail journal answered before this exact tool result is durably present in the main session. Recover by inspecting Conversation/mail and rejoining the stable request ID; this is not a crash-proof exactly-once guarantee.";

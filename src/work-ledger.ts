@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentWorkState, WorkCounters, WorkItem, WorkKind } from "./types.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 
 export const MAX_RECENT_WORK = 48;
 export const MAX_ACTIVE_WORK = 64;
@@ -122,13 +123,13 @@ export function patchStats(value: unknown): { linesAdded?: number; linesRemoved?
 }
 
 export function extractError(result: unknown): string | undefined {
-  if (!result || typeof result !== "object") return capText(String(result ?? "Tool failed"), MAX_ERROR_CHARS);
+  if (!result || typeof result !== "object") return safeErrorSummary(result ?? "Tool failed");
   const raw = result as Record<string, unknown>;
   if (Array.isArray(raw.content)) {
     const text = raw.content.map((part) => part && typeof part === "object" && typeof (part as Record<string, unknown>).text === "string" ? (part as Record<string, unknown>).text : "").filter(Boolean).join("\n");
-    if (text) return capText(text, MAX_ERROR_CHARS);
+    if (text) return safeErrorSummary(text);
   }
-  return capText(typeof raw.error === "string" ? raw.error : "Tool failed", MAX_ERROR_CHARS);
+  return safeErrorSummary(typeof raw.error === "string" ? raw.error : "Tool failed");
 }
 
 function argsObject(args: unknown): Record<string, unknown> {

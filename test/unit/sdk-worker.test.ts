@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { awaitPromptAcceptance, effectiveWorkerModel, SdkWorker, terminalAgentError } from "../../src/sdk-worker.ts";
+import { SAFE_SUMMARY_MAX_BYTES } from "../../src/safe-summary.ts";
 import { emptyWorkState } from "../../src/work-ledger.ts";
 
 const failedRun = [{
@@ -18,6 +19,19 @@ describe("SDK worker failures", () => {
 
   it("does not fail a worker while AgentSession will retry the request", () => {
     assert.equal(terminalAgentError(failedRun, true), undefined);
+  });
+
+  it("summarizes terminal native errors once before they enter worker events", () => {
+    const native = [{
+      role: "assistant",
+      content: [],
+      stopReason: "error",
+      errorMessage: `Authorization: Bearer SENTINEL_NATIVE_BEARER\nhttps://user:SENTINEL_PASSWORD@example.invalid/path?sig=SENTINEL_SIGNATURE\n${"🙂".repeat(2_000)}`,
+    }] as unknown as AgentMessage[];
+    const summary = terminalAgentError(native, false);
+    assert.ok(summary);
+    assert.ok(Buffer.byteLength(summary, "utf8") <= SAFE_SUMMARY_MAX_BYTES);
+    assert.doesNotMatch(summary, /SENTINEL|Bearer\s+\S+|user:/i);
   });
 
   it("maps Pi-managed retry lifecycle into bounded activity without a failure signal", () => {
@@ -41,11 +55,36 @@ describe("SDK worker failures", () => {
     internal.onSessionEvent({ type: "auto_retry_end", success: true, attempt: 2 });
 
     assert.deepEqual(record.activity.map(({ kind, summary }: any) => ({ kind, summary })), [
-      { kind: "status", summary: "Provider retry 2/3 scheduled in 4000ms: WebSocket error PRIVATE SUMMARY" },
-      { kind: "status", summary: "Provider retry recovered after attempt 2" },
+      { kind: "status", summary: "Pi agent retry 2/3 scheduled in 4000ms: WebSocket error · PRIVATE SUMMARY" },
+      { kind: "status", summary: "Pi agent retry recovered after attempt 2" },
     ]);
     assert.equal(events.some((event) => event.type === "failure"), false);
     assert.doesNotMatch(JSON.stringify(record.activity), /PRIVATE HEADER|PRIVATE PAYLOAD|authorization|rawPayload/);
+  });
+
+  it("sanitizes retry start/end detail before shared activity", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    internal.onSessionEvent({
+      type: "auto_retry_start",
+      attempt: 1,
+      maxAttempts: 2,
+      delayMs: 5,
+      errorMessage: "Authorization: Bearer SENTINEL_RETRY_START",
+    });
+    internal.onSessionEvent({
+      type: "auto_retry_end",
+      success: false,
+      attempt: 1,
+      finalError: "https://example.invalid/path?signature=SENTINEL_RETRY_END",
+    });
+    assert.deepEqual(record.activity.map((item: any) => item.summary), [
+      "Pi agent retry 1/2 scheduled in 5ms: Authorization: [redacted]",
+      "Pi agent retry ended after attempt 1: https://example.invalid/path?signature=[redacted]",
+    ]);
+    assert.doesNotMatch(JSON.stringify(record.activity), /SENTINEL/);
   });
 
   it("records an unsuccessful retry end as activity while only the final non-retrying agent error fails once", () => {
@@ -65,7 +104,7 @@ describe("SDK worker failures", () => {
     assert.equal(events.find((event) => event.type === "failure")?.error, "404 resource not found");
     assert.equal(record.state, "failed");
     assert.deepEqual(record.activity.map(({ kind, summary }: any) => ({ kind, summary })), [
-      { kind: "error", summary: "Provider retry ended after attempt 3: fetch failed finally" },
+      { kind: "error", summary: "Pi agent retry ended after attempt 3: fetch failed finally" },
       { kind: "error", summary: "404 resource not found" },
       { kind: "status", summary: "Agent run failed" },
     ]);

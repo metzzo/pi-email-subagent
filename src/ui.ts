@@ -5,10 +5,12 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 import * as PiTui from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
 import { isThinkingLevel } from "./config.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 import type { AgentInspection, AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
 import { activePathConflicts, aggregateWork, capPatch, countWrite, currentBatchHasEffectfulWork } from "./work-ledger.ts";
-import { errorMessage, truncateText } from "./util.ts";
+import { truncateText } from "./util.ts";
 
+const errorMessage = safeErrorSummary;
 const { renderDiff, SessionManager, truncateHead } = PiCodingAgent;
 const { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } = PiTui;
 

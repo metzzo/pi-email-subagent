@@ -19,6 +19,7 @@ import { enforcementPrompt, formatEmail, formatEmailBatch, subagentPrompt } from
 import { RegistryStore } from "./registry-store.ts";
 import { looksLikeReply, makeReplySubject, parseReplySubject } from "./reply.ts";
 import { SlidingWindowRateLimiter } from "./rate-limit.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 import { MAIL_TOOL_BATCH_BYTES, MAIL_TOOL_BATCH_LINES } from "./tool-result.ts";
 import type {
   AgentArchiveBlockers,
@@ -44,11 +45,15 @@ import type {
   WorkItem,
   AgentWorkState,
 } from "./types.ts";
-import { byteLength, clone, errorMessage, nowIso, truncateText } from "./util.ts";
+import { byteLength, clone, nowIso, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
 const ARCHIVE_BLOCKER_ID_LIMIT = 5;
+
+// Every caught lifecycle/provider/session error uses the shared content-safe
+// boundary before it can enter mail, registry, UI, or a main notification.
+const errorMessage = safeErrorSummary;
 
 function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
@@ -62,6 +67,27 @@ export function lightweightWorkItem(item: WorkItem): WorkItem {
   }
   if (Object.prototype.hasOwnProperty.call(item, "patchPreview")) projected.patchAvailable = true;
   return projected as unknown as WorkItem;
+}
+
+function sanitizePersistedRecordErrors(record: AgentRecord): void {
+  if (record.failure) record.failure = safeErrorSummary(record.failure);
+  if (record.cleanup?.detail) record.cleanup.detail = safeErrorSummary(record.cleanup.detail);
+  if (record.work?.recoveryError) record.work.recoveryError = safeErrorSummary(record.work.recoveryError);
+  for (const item of [...(record.work?.active ?? []), ...(record.work?.recent ?? [])]) {
+    if (item.error) item.error = safeErrorSummary(item.error);
+  }
+  let currentIndex = -1;
+  for (let index = record.activity.length - 1; index >= 0; index -= 1) {
+    if (record.activity[index]?.summary === record.currentActivity) { currentIndex = index; break; }
+  }
+  record.activity = record.activity.map((item) => ({
+    ...item,
+    summary: item.kind === "error" || item.kind === "status"
+      ? safeErrorSummary(item.summary)
+      : item.summary,
+  }));
+  if (currentIndex >= 0) record.currentActivity = record.activity[currentIndex]?.summary;
+  else if (record.state === "failed" && record.currentActivity) record.currentActivity = safeErrorSummary(record.currentActivity);
 }
 
 function lightweightWork(work: AgentWorkState): AgentWorkState {
@@ -271,6 +297,7 @@ export class AgentBroker {
       for (const loaded of this.registry.agents) {
         const shape = parseSubagentAddressShape(loaded.address);
         const record = clone(loaded);
+        sanitizePersistedRecordErrors(record);
         record.address = shape.address;
         if (this.namespaceLock.abandonedOwner
           && !record.cleanup
@@ -648,16 +675,17 @@ export class AgentBroker {
     if (this.cleanupQuarantines.get(lease.address) !== lease) return;
     const record = this.records.get(lease.address);
     if (!record?.cleanup || record.cleanup.workerGeneration !== lease.workerGeneration) return;
+    const safeDetail = safeErrorSummary(detail);
     record.cleanup = {
       ...record.cleanup,
       state: "unknown",
       updatedAt: nowIso(),
       abort,
       dispose,
-      detail: truncateText(detail.replace(/\s+/g, " "), 500),
+      detail: safeDetail,
     };
     record.state = "failed";
-    const cleanupFailure = `Cleanup quarantine: quiescence unknown for worker generation ${lease.workerGeneration}; capacity held; ${truncateText(detail.replace(/\s+/g, " "), 500)}`;
+    const cleanupFailure = `Cleanup quarantine: quiescence unknown for worker generation ${lease.workerGeneration}; capacity held; ${safeDetail}`;
     if (!record.failure) record.failure = cleanupFailure;
     else if (!record.failure.includes("Cleanup quarantine:")) record.failure = truncateText(`${record.failure}; ${cleanupFailure}`, 1_500);
     record.currentActivity = cleanupFailure;
@@ -1753,9 +1781,17 @@ export class AgentBroker {
       current.sessionFile = worker.getSessionFile();
       current.effort = snapshot.effort;
       current.usage = snapshot.usage;
-      current.activity = snapshot.activity.slice(-40);
+      current.activity = snapshot.activity.slice(-40).map((item) => ({
+        ...item,
+        summary: item.kind === "error" || item.kind === "status"
+          ? safeErrorSummary(item.summary)
+          : item.summary,
+      }));
       current.lastActivityAt = snapshot.lastActivityAt;
-      current.currentActivity = snapshot.currentActivity;
+      const latest = current.activity.at(-1);
+      current.currentActivity = snapshot.currentActivity === snapshot.activity.at(-1)?.summary
+        ? latest?.summary
+        : snapshot.currentActivity;
       current.work = snapshot.work ? clone(snapshot.work) : current.work;
       current.updatedAt = nowIso();
     } catch {
@@ -1792,13 +1828,12 @@ export class AgentBroker {
       record.state = event.state;
     }
     if (event.type === "failure" && event.error) {
-      const shouldNotify = record.state !== "failed" || record.failure !== event.error;
+      const summary = safeErrorSummary(event.error);
+      const shouldNotify = record.state !== "failed" || record.failure !== summary;
       record.state = "failed";
       this.interruptRecordWork(record);
-      record.failure = event.error;
-      record.currentActivity = `Failed: ${event.error}`;
-      record.activity.push({ at: nowIso(), kind: "error", summary: event.error });
-      record.activity = record.activity.slice(-40);
+      record.failure = summary;
+      record.currentActivity = `Failed: ${summary}`;
       record.updatedAt = nowIso();
       const lease = this.beginWorkerCleanup(address, worker, "WORKER_FAILURE", "failed");
       swallow(this.waitForCleanup(
@@ -1806,7 +1841,7 @@ export class AgentBroker {
         record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs,
       ).catch(() => undefined));
       swallow(this.ensureTerminalChildBlockers(record));
-      if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${event.error}\n${this.terminalFailureRecovery(record)}`);
+      if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${summary}\n${this.terminalFailureRecovery(record)}`);
       this.publish();
       return;
     }

@@ -61,6 +61,14 @@ When an existing exact tuple is absent:
 
 Unrelated valid records continue restoring. Reintroducing the exact provider/model on a later process start makes explicit same-identity restart available, but does not automatically create a worker from the failed state; queued mail stays queued until that operator action. Provider rename is removal plus addition; there is no automatic alias or migration.
 
+## Credential-source and compatibility readiness
+
+Provider/model presence alone is insufficient. The extension-start worker factory also snapshots Pi's non-secret `getProviderAuthStatus()` result and the exact model API family / effective `supportsLongCacheRetention` capability.
+
+Supported credential-source equivalence is deliberately narrow: matching `stored` through the same explicit auth path, matching `environment` with the same non-secret source context/process, and matching non-command `models_json_key` through the same models path. Runtime overrides, models-JSON commands, provider fallback, mismatches, and indeterminate/unconfigured status fail closed. No key, OAuth token, header, URL, environment value, or secret-derived fingerprint is resolved, compared, copied, transferred, or logged; source equivalence is not a universal same-account proof.
+
+For a new identity the runtime/auth/model-compatibility preflight occurs before `email.created`, so deterministic incompatibility creates no obligation. Ordinary mail to a known failed identity intentionally performs no catalog/auth readiness and queues under the persisted identity. Explicit restart performs readiness. If an archived/paused identity's post-accept creation detects a readiness change, the accepted ID remains queued and the record keeps a bounded failure; there is no rebind or provider switch. All definition, source-class, and compatibility corrections require extension reload.
+
 ## Observability and privacy
 
 - `send_email`: additive `recipientProvider` beside compatible `recipientModel`, and normal text renders `provider/model`.
@@ -68,7 +76,7 @@ Unrelated valid records continue restoring. Reintroducing the exact provider/mod
 - `/agents`: list headers retain provider/model; Profile states that the binding is preserved across main-provider changes or unavailable without substitution.
 - startup alerts and failures use bounded provider/model candidate diagnostics.
 
-These surfaces do not include model objects, credentials, auth sources, provider configuration bodies, mail bodies, subjects, or unrelated identities.
+These surfaces do not include model objects, credential material, credential labels, provider configuration bodies, mail bodies, subjects, or unrelated identities. Readiness failures may name only the provider and non-secret source class.
 
 ## Rollback boundary
 
