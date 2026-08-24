@@ -53,25 +53,6 @@ function emptyUsage(): AgentRecord["usage"] {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
-function utf8Prefix(value: string, maxBytes: number): string {
-  let output = "";
-  let bytes = 0;
-  for (const character of value) {
-    const size = byteLength(character);
-    if (bytes + size > maxBytes) break;
-    output += character;
-    bytes += size;
-  }
-  return output;
-}
-
-function boundedCompletionMessage(value: string, maxBytes: number): string {
-  if (byteLength(value) <= maxBytes) return value;
-  const suffix = "\n\n[Automatic completion email truncated to the configured message limit.]";
-  if (byteLength(suffix) >= maxBytes) return utf8Prefix(value, maxBytes);
-  return `${utf8Prefix(value, maxBytes - byteLength(suffix))}${suffix}`;
-}
-
 export function lightweightWorkItem(item: WorkItem): WorkItem {
   const projected: Record<string, unknown> = {};
   for (const key of Object.keys(item)) {
@@ -170,7 +151,6 @@ interface SettlementLease {
   workerGeneration: number;
   invalidated: boolean;
   pending: boolean;
-  pendingCompletionText?: string;
   operation: Promise<void>;
 }
 
@@ -1713,7 +1693,7 @@ export class AgentBroker {
     if (event.type === "settled") {
       this.clearWatchdog(address);
       this.clearToolLifecycle(address, worker);
-      this.queueWorkerSettlement(address, worker, event.completionText);
+      this.queueWorkerSettlement(address, worker);
     }
   }
 
@@ -1736,11 +1716,10 @@ export class AgentBroker {
       && this.workerGenerations.get(settlement.worker) === settlement.workerGeneration;
   }
 
-  private queueWorkerSettlement(address: string, worker: WorkerTransport, completionText?: string): void {
+  private queueWorkerSettlement(address: string, worker: WorkerTransport): void {
     const existing = this.settlements.get(worker);
     if (existing) {
       existing.pending = true;
-      if (completionText?.trim()) existing.pendingCompletionText = completionText;
       return;
     }
     const settlement: SettlementLease = {
@@ -1749,16 +1728,15 @@ export class AgentBroker {
       workerGeneration: this.workerGeneration(worker, address),
       invalidated: false,
       pending: false,
-      ...(completionText?.trim() ? { pendingCompletionText: completionText } : {}),
       operation: undefined as never,
     };
     this.settlements.set(worker, settlement);
-    settlement.operation = this.onWorkerSettled(settlement, completionText).finally(() => {
+    settlement.operation = this.onWorkerSettled(settlement).finally(() => {
       if (this.settlements.get(worker) !== settlement) return;
       this.settlements.delete(worker);
       this.publish();
       if (settlement.pending && !settlement.invalidated && !this.disposed && this.workers.get(address) === worker) {
-        this.queueWorkerSettlement(address, worker, settlement.pendingCompletionText);
+        this.queueWorkerSettlement(address, worker);
       }
     });
     swallow(settlement.operation);
@@ -2014,40 +1992,7 @@ export class AgentBroker {
     }
   }
 
-  private async sendCompletionReplies(
-    address: string,
-    requests: EmailEnvelope[],
-    completionText: string,
-    settlement: SettlementLease,
-  ): Promise<void> {
-    const distinctSenders = new Set(requests.map((request) => request.from));
-    const sharedBody = distinctSenders.size === 1
-      ? completionText.trim()
-      : `Automatic completion notice: ${address} finished a batch containing requests from multiple senders without sending a dedicated reply to this message. The combined final text was not forwarded to avoid cross-request disclosure. Send a follow-up for a dedicated result.`;
-    const message = boundedCompletionMessage(sharedBody, this.options.config.maxMessageBytes);
-    for (const request of requests) {
-      if (!this.settlementCurrent(settlement)) return;
-      try {
-        await this.send(address, {
-          to: request.from,
-          subject: makeReplySubject(request.id, request.subject),
-          message,
-          priority: "low",
-        });
-        if (!this.settlementCurrent(settlement)) return;
-      } catch (error) {
-        if (!this.settlementCurrent(settlement)) continue;
-        const record = this.records.get(address);
-        if (record && this.settlementCurrent(settlement)) {
-          const summary = truncateText(`Automatic completion email for ${request.id} failed: ${errorMessage(error)}`, 500);
-          record.activity.push({ at: nowIso(), kind: "error", summary });
-          record.activity = record.activity.slice(-40);
-        }
-      }
-    }
-  }
-
-  private async onWorkerSettled(settlement: SettlementLease, completionText?: string): Promise<void> {
+  private async onWorkerSettled(settlement: SettlementLease): Promise<void> {
     const { address, worker } = settlement;
     if (!this.settlementCurrent(settlement)) return;
     let record = this.records.get(address);
@@ -2057,12 +2002,7 @@ export class AgentBroker {
       this.syncWorker(address, worker);
       if (!this.settlementCurrent(settlement)) return;
       this.interruptRecordWork(record);
-      let outstanding = this.fetchUnanswered(address);
-      if (outstanding.length > 0 && completionText?.trim()) {
-        await this.sendCompletionReplies(address, outstanding, completionText, settlement);
-        if (!this.settlementCurrent(settlement)) return;
-        outstanding = this.fetchUnanswered(address);
-      }
+      const outstanding = this.fetchUnanswered(address);
       if (outstanding.length > 0) {
         record = this.records.get(address);
         if (!record || !this.settlementCurrent(settlement)) return;

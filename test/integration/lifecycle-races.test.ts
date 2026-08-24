@@ -65,34 +65,36 @@ describe("broker lifecycle races", () => {
 
   it("invalidates and joins an old settlement continuation before stop or replacement", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-settlement-owner-"));
-    const deliveryEntered = deferred();
-    const releaseDelivery = deferred();
-    class BlockingMain extends FakeMainAdapter {
-      override async deliver(delivery: Parameters<FakeMainAdapter["deliver"]>[0]): Promise<void> {
-        deliveryEntered.resolve();
-        await releaseDelivery.promise;
-        await super.deliver(delivery);
+    const enforcementEntered = deferred();
+    const releaseEnforcement = deferred();
+    class BlockingEnforcementWorker extends FakeWorker {
+      override async prompt(message: string): Promise<void> {
+        if (message.includes("mailbox-enforcement")) {
+          enforcementEntered.resolve();
+          await releaseEnforcement.promise;
+        }
+        await super.prompt(message);
       }
     }
     const workers: FakeWorker[] = [];
     const broker = makeBroker(root, () => {
-      const worker = new FakeWorker();
+      const worker = new BlockingEnforcementWorker();
       workers.push(worker);
       return worker;
-    }, new BlockingMain());
+    });
     await broker.init();
     try {
       const request = await broker.send(broker.mainAddress, {
-        to: "worker.settlement-owner@gpt-5.4.com", subject: "Finish", message: "Use completion fallback.", priority: "low",
+        to: "worker.settlement-owner@gpt-5.4.com", subject: "Finish", message: "Reply with send_email.", priority: "low",
       });
-      workers[0]!.settle("Completion reply blocked in delivery.");
-      await deliveryEntered.promise;
+      workers[0]!.settle("Visible final text is not an email reply.");
+      await enforcementEntered.promise;
 
       let stopFinished = false;
       const stopping = broker.stop(request.envelope.to).then(() => { stopFinished = true; });
       await new Promise((resolve) => setTimeout(resolve, 20));
       assert.equal(stopFinished, false, "management joins the exact old settlement continuation");
-      releaseDelivery.resolve();
+      releaseEnforcement.resolve();
       await stopping;
       assert.equal(broker.inspectAgent(request.envelope.to).state, "stopped");
       assert.equal((broker as any).active.has(request.envelope.to), false);
@@ -100,18 +102,17 @@ describe("broker lifecycle races", () => {
       await broker.restart(request.envelope.to);
       assert.equal(workers.length, 2);
       const next = await broker.send(broker.mainAddress, {
-        to: request.envelope.to, subject: "Replacement", message: "Settle the replacement independently.", priority: "low",
+        to: request.envelope.to, subject: "Replacement", message: "Queue behind exact obligation recovery.", priority: "low",
       });
-      await workers[1]!.send({
-        to: broker.mainAddress,
-        subject: makeReplySubject(next.envelope.id, next.envelope.subject),
-        message: "Replacement complete.",
-        priority: "low",
-      });
-      workers[1]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(request.envelope.to).state, "idle"));
+      assert.equal(next.envelope.deliveryState, "queued");
+      assert.match(workers[1]!.prompts[0]!, /mailbox-enforcement/);
+      assert.deepEqual(
+        broker.fetchUnanswered(request.envelope.to).map((email) => email.id),
+        [request.envelope.id],
+        "the original obligation remains open for explicit same-identity handling",
+      );
     } finally {
-      releaseDelivery.resolve();
+      releaseEnforcement.resolve();
       await broker.shutdown();
     }
   });

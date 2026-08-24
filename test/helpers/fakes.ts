@@ -141,14 +141,14 @@ export class FakeWorker implements WorkerTransport {
 
   emit(event: WorkerEvent): void { for (const listener of this.listeners) listener(event); }
 
-  settle(completionText?: string): void {
+  settle(_completionText?: string): void {
     if (!this.record) throw new Error("not started");
     this.streaming = false;
     this.idle = true;
     this.record.state = "idle";
     const activity: ActivityItem = { at: new Date().toISOString(), kind: "status", summary: "settled" };
     this.record.activity.push(activity);
-    this.emit({ type: "settled", ...(completionText ? { completionText } : {}) });
+    this.emit({ type: "settled" });
   }
 
   fail(message: string): void { this.emit({ type: "failure", error: message }); }

@@ -418,10 +418,9 @@ function planWorker(messages: readonly Message[]): Plan {
         },
       }));
       // "IGNORE" requests deliberately return visible final text without a
-      // send_email call, exercising the broker's mechanical completion reply.
-      if (replies.length > 0 && lastText.includes("IGNORE") && !allText(messages).includes("<mailbox-enforcement")) {
-        return { text: "WORKER SILENT" };
-      }
+      // send_email call, including after enforcement, proving that ordinary
+      // assistant text never closes the durable mail obligation.
+      if (replies.length > 0 && allText(messages).includes("IGNORE")) return { text: "WORKER SILENT" };
       if (replies.length > 0) return { toolCalls: replies };
       return { text: "WORKER IDLE" };
     }

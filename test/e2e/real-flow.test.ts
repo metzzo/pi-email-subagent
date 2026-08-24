@@ -610,35 +610,30 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
-  it("mechanically emails a real worker's final text when it omits send_email", { timeout: 240_000 }, async () => {
+  it("leaves a real worker request unanswered when it omits send_email", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {
       const mark = client.mark();
       await client.prompt("E2E DELEGATE IGNORE");
       const sent = sendResult(await client.waitFor(toolEnd("send_email"), "ignored send", 90_000, mark));
-      const wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "automatic completion reply", 120_000, mark));
+      const wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "failed unanswered wait", 120_000, mark));
       assert.equal(wait.complete, true);
-      assert.equal(wait.items[0]?.state, "answered");
+      assert.equal(wait.items[0]?.state, "failed");
       await client.waitForSettlement(mark);
 
-      // No extra model turn is needed: the broker converts visible final text
-      // into the exact reply while keeping the worker transcript truthful.
       const registry = await eventuallyRegistry(
         agentDir,
         sessionId,
-        (candidate) => candidate.agents?.[0]?.state === "idle" && Boolean(candidate.agents[0].sessionFile),
-        "with the idle worker",
+        (candidate) => candidate.agents?.[0]?.state === "failed" && Boolean(candidate.agents[0].sessionFile),
+        "with the enforcement-exhausted worker",
       );
       const transcript = await readFile(registry.agents[0].sessionFile, "utf8");
-      assert.doesNotMatch(transcript, /mailbox-enforcement/);
+      assert.match(transcript, /mailbox-enforcement/);
       assert.equal(await client.close(), 0, client.stderr);
 
       const journal = await readJournal(agentDir, sessionId);
-      const answered = journal.filter((event) => event.type === "email.answered" && event.id === sent.correlationId);
-      assert.equal(answered.length, 1, "exactly one mechanically generated answer despite the omitted tool call");
-      assert.ok(journal.some((event) => event.type === "email.created"
-        && event.email.id === answered[0].replyId
-        && event.email.message === "WORKER SILENT"));
+      assert.equal(journal.some((event) => event.type === "email.answered" && event.id === sent.correlationId), false);
+      assert.equal(journal.some((event) => event.type === "email.reply_reserved" && event.id === sent.correlationId), false);
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });
