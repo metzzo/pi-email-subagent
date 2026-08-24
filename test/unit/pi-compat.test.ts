@@ -86,7 +86,6 @@ it("probes every public startup and restore method before use", () => {
         "SessionManager.prototype.getSessionId",
         "SessionManager.prototype.appendCustomEntry",
         "ModelRuntime.prototype.getModel",
-        "ModelRuntime.prototype.getAuth",
         "ModelRuntime.prototype.getProviderAuthStatus",
         "ModelRuntime.prototype.registerNativeProvider",
         "ModelRuntime.prototype.registerProvider",
@@ -103,9 +102,24 @@ it("probes every public startup and restore method before use", () => {
         "AgentSession.prototype.subscribe",
         "AgentSession.prototype.getActiveToolNames",
         "AgentSession.prototype.prompt",
+        "AgentSession.prototype.steer",
+        "AgentSession.prototype.followUp",
       ]) assert.match(error.message, new RegExp(feature.replaceAll(".", "\\.")));
       return true;
     },
+  );
+});
+
+it("probes DefaultResourceLoader.reload before worker registration", () => {
+  class IncompleteResourceLoader {}
+  assert.throws(
+    () => assertPiRuntimeFeatures(
+      { ...PiCodingAgent, DefaultResourceLoader: IncompleteResourceLoader } as unknown as Record<string, unknown>,
+      PiAi as unknown as Record<string, unknown>,
+      PiTui as unknown as Record<string, unknown>,
+      TypeBox as unknown as Record<string, unknown>,
+    ),
+    /DefaultResourceLoader\.prototype\.reload/,
   );
 });
 

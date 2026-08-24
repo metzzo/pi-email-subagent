@@ -302,12 +302,14 @@ export function recoverMutationWork(entries: readonly unknown[], cwd: string, ex
       if (part.type !== "toolCall" || typeof part.id !== "string" || typeof part.name !== "string") continue;
       const toolClass = classifyTool(part.name);
       if (toolClass === "inspection" || toolClass === "mailbox") continue;
+      if (recoveredBatch === 0) state.effectEvidenceUnavailable = true;
       const call = startWorkItem(part.id, part.name, part.arguments, recoveredBatch, cwd, at);
       if (call) calls.set(part.id, call);
     }
     if (raw.role !== "toolResult" || typeof raw.toolCallId !== "string" || typeof raw.toolName !== "string") continue;
     const toolClass = classifyTool(raw.toolName);
     if (toolClass === "inspection" || toolClass === "mailbox") continue;
+    if (recoveredBatch === 0) state.effectEvidenceUnavailable = true;
     const call = calls.get(raw.toolCallId);
     const observedResult = raw.isError === true ? "error" as const : "success" as const;
     if (!call) {

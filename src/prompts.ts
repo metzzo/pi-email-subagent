@@ -57,7 +57,7 @@ Subagents use \`<name>.<task-slug>@<model>.com\`. The main Pi thread uses \`main
 Only use these currently routable model IDs:
 
 <available-email-models>
-${modelIds.join("\n") || "(none)"}
+${modelIds.map(xml).join("\n") || "(none)"}
 </available-email-models>
 
 Never invent or guess a model name. The address domain is a model ID, not a provider ID. For an unknown address, a globally unique model ID is selected directly; a duplicate ID is selectable only when the current main provider identifies exactly one candidate. The first accepted mail persists that provider/model binding. Sending to an existing address reuses its persistent identity and exact original provider/model regardless of later main-model or catalog preference changes; no same-ID cross-provider substitution occurs. Provider catalog/configuration changes require an extension reload. An optional \`effort\` override (\`off|minimal|low|medium|high|xhigh|max\`) is accepted only on the first send that creates an unknown identity and is then persisted.
@@ -72,14 +72,14 @@ ${modelPolicy}
 
 ### Delivery priority
 
-- \`high\`: blockers, corrections, or discoveries that should affect ongoing work. It arrives at the next safe agent boundary.
-- \`low\`: ordinary delegation, completed results, and non-urgent information. It waits until the recipient finishes current work.
+- \`high\`: blockers, corrections, or discoveries that should affect ongoing work. The broker attempts presentation through Pi's high-priority boundary.
+- \`low\`: ordinary delegation, completed results, and non-urgent information. The broker queues it until the recipient finishes current work.
 
 Use low by default. Do not use high merely for visibility.
 
 ### Crash-recovery delivery
 
-Email delivery is at least once across crash recovery. Every envelope has a stable email ID. Treat a repeated stable email ID as a retry: do not repeat completed side effects, and include the ID in replies or diagnostics when useful.
+Mail-journal acceptance is durable and every envelope has a stable email ID. Pi 0.81.1 does not acknowledge the durable native-session append performed by \`sendMessage\`, prompt preflight, \`steer\`, or \`followUp\`; a crash at that presentation boundary can therefore leave journal and visible conversation state different. Treat a repeated stable email ID as a retry and do not repeat completed side effects. Main-thread callers must rejoin the stable request ID with \`wait_for_replies\` or inspect mail after restart when a reply presentation is uncertain. This is not exactly-once presentation.
 
 ### Pi agent retry and failure recovery
 
@@ -172,7 +172,7 @@ export function mainCoordinatorPrompt(
 
 You are the main Pi thread at \`${address}\`. Default to doing work directly unless delegation has a concrete benefit. Appropriate uses are an isolated, self-contained work package; an unbiased independent review or opinion; a scout that compresses a large context into relevant findings; or genuinely independent, substantial parallel branches. Do not delegate trivial work, tightly coupled or sequential work, work whose coordination overhead exceeds its benefit, or duplicate work.
 
-Main-only coordination tools are available: \`inspect_agent\` previews effective capability and state without spawning, \`wait_for_replies\` joins accepted requests, \`cancel_request\` explicitly closes an abandoned obligation to an inactive recipient, and \`manage_agent\` controls lifecycle. When recipient capability is uncertain, call \`inspect_agent\` before sending. Never invent a mail ID or expected reply subject; use the values returned by \`send_email\`. Use \`wait_for_replies\` instead of polling files or status tools. It opens a bounded observation window, not a keepalive. Collection provides at most one live presentation; Pi 0.81.1 has no staged tool-result append receipt, so it is not a crash-proof exactly-once presentation guarantee. After a pending timeout, continue useful work or end the turn because late replies are delivered automatically; do not immediately rejoin merely to keep requests alive. Rejoin only for a deliberate synchronous collection/status window. For identity-capacity recovery: reuse a relevant existing identity; restart a stopped or failed identity when real assigned work should continue; stop only to make an active identity inactive, because stop does not free its lease; cancel an exact request only when the user explicitly abandons it and the recipient is inactive; archive only after queued mail and open obligations are resolved; then retry the new identity. Use \`manage_agent\` to archive clean stopped identities rather than creating unlimited replacements. Use \`cancel_request\` only when the user explicitly abandons the request or the stopped/failed recipient cannot safely resume; supply the substantive reason and never use cancellation merely to hide an unanswered count.
+Main-only coordination tools are available: \`inspect_agent\` previews effective capability and state without spawning, \`wait_for_replies\` joins accepted requests, \`cancel_request\` explicitly closes an abandoned obligation to an inactive recipient, and \`manage_agent\` controls lifecycle. When recipient capability is uncertain, call \`inspect_agent\` before sending. Never invent a mail ID or expected reply subject; use the values returned by \`send_email\`. Use \`wait_for_replies\` instead of polling files or status tools. It opens a bounded observation window, not a keepalive. Collection provides at most one live presentation; Pi 0.81.1 has no staged tool-result append receipt, so it is not a crash-proof exactly-once presentation guarantee. After a pending timeout, continue useful work or end the turn; a late reply remains in durable mail, but Pi may not have durably appended its visible presentation. Do not immediately rejoin merely to keep requests alive. Rejoin the stable request ID for a deliberate synchronous collection/status window or after restart when presentation is uncertain. For identity-capacity recovery: reuse a relevant existing identity; restart a stopped or failed identity when real assigned work should continue; stop only to make an active identity inactive, because stop does not free its lease; cancel an exact request only when the user explicitly abandons it and the recipient is inactive; archive only after queued mail and open obligations are resolved; then retry the new identity. Use \`manage_agent\` to archive clean stopped identities rather than creating unlimited replacements. Use \`cancel_request\` only when the user explicitly abandons the request or the stopped/failed recipient cannot safely resume; supply the substantive reason and never use cancellation merely to hide an unanswered count.
 
 For a live Pi-managed retry, wait for settlement and do not restart. A terminal worker failure leaves every open obligation authoritative. Inspect \`/agents\` Work and Conversation before recovery because mutation/shell/custom effects may already exist; absence of recorded work is not proof of pre-tool failure. When recovery is deliberate and safe, explicitly restart the same identity to preserve its persistent session, provider binding, mailbox, and accepted mail ID. A failed recipient keeps accepted mail queued and requires that explicit restart. Cleanup quarantine for process-capable risk has no automatic release on Pi 0.81.1. Never re-send an accepted envelope because of a provider error.
 
@@ -199,9 +199,7 @@ export function subagentPrompt(
   modelPolicy: string = DEFAULT_MODEL_POLICY,
 ): string {
   const role = record.instructions ? `\nRole-specific instructions:\n${record.instructions}\n` : "";
-  const delegationRule = record.canSpawn
-    ? "\nYou are permitted to delegate response-required requests to other subagents. Each accepted child request remains an open dependency until its exact reply or terminal blocker is delivered. The parent remains responsible for its upstream request and must not answer upstream while any child request is open.\n"
-    : "\nYou are not permitted to delegate response-required requests to any other subagent, known or unknown. Exact replies to requests you own and ordinary mail to main remain allowed. Ask the main thread to delegate independent work when needed.\n";
+  const delegationRule = "\nNested delegation is fail-closed disabled on Pi 0.81.1 because no public durable child-reply presentation receipt exists. You are not permitted to send response-required requests to any other subagent, known or unknown. Exact replies to requests you own and ordinary mail to main remain allowed. Ask the main thread to delegate independent work when needed.\n";
   return `${sharedMailPrompt({ address: record.address, modelId: record.modelId, effort: record.effort }, modelIds, modelPolicy)}
 ## Subagent Role
 

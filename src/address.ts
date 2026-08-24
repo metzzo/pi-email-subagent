@@ -3,6 +3,10 @@ import type { ModelBinding, ParsedAddress } from "./types.ts";
 
 const SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const MODEL_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$/;
+
+export function isEmailModelId(value: string): boolean {
+  return value === value.trim() && MODEL_DOMAIN.test(value.toLowerCase());
+}
 const MAX_DIAGNOSTIC_CANDIDATES = 8;
 const MAX_DIAGNOSTIC_IDENTIFIER_CHARS = 100;
 
@@ -36,6 +40,7 @@ export class ModelCatalog {
 
   constructor(models: readonly Model<any>[]) {
     for (const model of models) {
+      if (!isEmailModelId(model.id)) continue;
       const key = model.id.toLowerCase();
       const entries = this.byId.get(key) ?? [];
       entries.push(model);
@@ -47,7 +52,7 @@ export class ModelCatalog {
     const result: string[] = [];
     for (const [modelId] of this.byId) {
       try {
-        result.push(this.resolveNew(modelId, preferredProvider).id);
+        result.push(this.resolveNew(modelId, preferredProvider).id.toLowerCase());
       } catch { /* ambiguous for this prospective provider */ }
     }
     return result.sort();
