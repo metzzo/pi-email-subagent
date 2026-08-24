@@ -87,7 +87,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
           `Answered email: ${result.answeredEmailId ?? "none"}`,
         ];
         if (result.recipientDisposition === "failed") {
-          lines.push("Recipient recovery: mail is accepted and queued; the recipient remains failed, no worker was spawned, and explicit manage_agent restart is required after effect review.");
+          lines.push("Recipient recovery: mail is accepted and queued; the recipient remains failed and no worker was spawned. Review Work and Conversation, then use explicit manage_agent restart for the same identity and provider binding only after effect review. Do not redelegate the same scope while the original obligation remains open.");
         }
         if (result.recipientProvider && result.recipientModel) {
           lines.push(`Recipient model: ${result.recipientProvider}/${result.recipientModel}`);

@@ -103,6 +103,8 @@ describe("worker mail tools", () => {
     assert.match(text, /Recipient disposition: failed/);
     assert.match(text, /Delivery state: queued/);
     assert.match(text, /accepted and queued.*remains failed.*no worker was spawned.*explicit manage_agent restart/is);
+    assert.match(text, /review Work and Conversation.*same identity.*provider binding/is);
+    assert.match(text, /do not redelegate.*original obligation remains open/is);
     assert.doesNotMatch(text, /not accepted/i);
   });
 

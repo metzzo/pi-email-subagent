@@ -2035,7 +2035,7 @@ export class AgentBroker {
     const effects = currentBatchHasEffectfulWork(record.work)
       ? "Current batch includes mutation/shell/custom work; effects may exist. Inspect Work and Conversation before explicit same-identity restart."
       : "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure. Inspect Conversation before explicit same-identity restart.";
-    return `Terminal worker run failure · ${record.provider}/${record.modelId} · provider/network cause may be external or unclear. ${obligation} ${effects}`;
+    return `Terminal worker run failure · ${record.provider}/${record.modelId} · provider/network cause may be external or unclear. ${obligation} ${effects} Do not redelegate this possible-effect scope while the original obligation remains open.`;
   }
 
   private onWorkerEvent(address: string, worker: WorkerTransport, event: WorkerEvent): void {

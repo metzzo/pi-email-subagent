@@ -46,5 +46,5 @@ UNANSWERED EMAILS (2)
 ## Usage guidance
 
 - Call at the beginning of mailbox-driven work and again before becoming idle; the broker re-prompts agents that settle with unanswered mail and eventually marks them failed.
-- Answer every returned request substantively with `send_email` using its exact reply subject. A partial result or an honest blocker is acceptable; silence is not.
+- Answer every returned request substantively with `send_email` using its exact reply subject, not only requests judged relevant to the current task. A partial result or an honest blocker is acceptable; silence is not.
 - An empty result means no obligations — plain assistant text is not a substitute for answering listed mail.

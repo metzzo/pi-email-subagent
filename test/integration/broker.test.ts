@@ -344,6 +344,7 @@ describe("AgentBroker end-to-end routing", () => {
       assert.match(main.failures[0]!, /1 delivered request remains unanswered/i);
       assert.match(main.failures[0]!, /current batch includes mutation\/shell\/custom work.*effects may exist/is);
       assert.match(main.failures[0]!, /Work and Conversation.*explicit same-identity restart/is);
+      assert.match(main.failures[0]!, /do not redelegate.*possible-effect scope.*original obligation remains open/is);
       assert.doesNotMatch(main.failures[0]!, /Run provider request|Return a result/);
       const queued = await broker.send(broker.mainAddress, {
         to: request.envelope.to,

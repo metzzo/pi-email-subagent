@@ -143,8 +143,8 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
               ? "No delivered requests remain unanswered."
               : `${open} delivered request${open === 1 ? "" : "s"} remain${open === 1 ? "s" : ""} unanswered.`;
             const effects = currentBatchHasEffectfulWork(record.work)
-              ? "Current batch includes mutation/shell/custom work; effects may exist. Inspect Work and Conversation before explicit same-identity restart."
-              : "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure. Inspect Conversation before explicit same-identity restart.";
+              ? "Current batch includes mutation/shell/custom work; effects may exist. Inspect Work and Conversation before explicit same-identity restart. Do not redelegate this possible-effect scope while the original obligation remains open."
+              : "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure. Inspect Conversation before explicit same-identity restart. Do not redelegate this possible-effect scope while the original obligation remains open.";
             lines.push(`Terminal worker run failure · ${inspection.provider}/${inspection.modelId} · provider/network cause may be external or unclear. ${obligation} ${effects}`);
           }
         }
