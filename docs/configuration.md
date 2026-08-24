@@ -91,6 +91,19 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 - Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
+Configuration-derived prompt content is bounded without changing semantic fields:
+
+- at most 64 canonical roles and 256 canonical exact-address overrides;
+- at most 128 unique effective tools per profile, including the always-required mail tools;
+- each complete tool name is at most 100 UTF-8 bytes;
+- `instructions` and `modelPolicy` are each at most 16 KiB of UTF-8;
+- control and bidirectional-control characters are rejected from those semantic strings (ordinary newline/tab layout remains allowed in instructions and model policy); and
+- at most 64 fixed-size startup warnings are shown, plus one omitted-warning count. Rejected content is never echoed in a warning.
+
+An oversized collection/profile field is ignored as a whole at its semantic boundary. Instructions, model policy, and tool names are never truncated into a different value. Required `send_email` and `fetch_emails` capability is preserved by effective-profile resolution.
+
+The main coordinator receives a separate derived **configured capability intent** display, not a claim of live activation. Built-in role entries are attempted first, at most 24 exact-address overrides can be displayed, and the complete display is capped at 8 KiB / 64 lines. Entries that do not fit are omitted whole with a count taken from parsed canonical roles/addresses; no tool name is shortened and no capability hash is substituted. Use `inspect_agent` for the exact bounded live/prospective decision.
+
 ## Provider/model routing
 
 The email domain remains a model ID. Provider choice is not configured in `subagents.json` and there is no provider override argument:

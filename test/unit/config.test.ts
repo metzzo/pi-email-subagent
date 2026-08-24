@@ -3,7 +3,20 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_MODEL_POLICY, loadConfig, MAX_TIMER_DELAY_MS, resolveAgentProfile, resolveLifecycle } from "../../src/config.ts";
+import {
+  DEFAULT_MODEL_POLICY,
+  loadConfig,
+  MAX_CONFIG_ADDRESS_ENTRIES,
+  MAX_CONFIG_INSTRUCTIONS_BYTES,
+  MAX_CONFIG_MODEL_POLICY_BYTES,
+  MAX_CONFIG_PROFILE_TOOLS,
+  MAX_CONFIG_ROLE_ENTRIES,
+  MAX_CONFIG_TOOL_NAME_BYTES,
+  MAX_CONFIG_WARNINGS,
+  MAX_TIMER_DELAY_MS,
+  resolveAgentProfile,
+  resolveLifecycle,
+} from "../../src/config.ts";
 
 describe("configuration", () => {
   it("applies exact address over role over defaults", async () => {
@@ -202,6 +215,114 @@ describe("configuration", () => {
     assert.equal(loaded.config.lifecycle.runTimeoutMs > 0, true);
     assert.match(loaded.warnings.join("\n"), /runTimeoutMs.*integer from 1/);
     assert.match(loaded.warnings.join("\n"), /unknown/);
+  });
+
+  it("rejects role/address collections beyond their canonical entry bounds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    const roles = Object.fromEntries(Array.from(
+      { length: MAX_CONFIG_ROLE_ENTRIES + 1 },
+      (_, index) => [`custom-${index}`, { tools: ["read"] }],
+    ));
+    const addresses = Object.fromEntries(Array.from(
+      { length: MAX_CONFIG_ADDRESS_ENTRIES + 1 },
+      (_, index) => [`worker.task-${index}@gpt-5.4.com`, { tools: ["read"] }],
+    ));
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ roles, addresses }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.deepEqual(Object.keys(loaded.config.roles).sort(), Object.keys(loadConfig("/missing", root, false).config.roles).sort());
+    assert.deepEqual(loaded.config.addresses, {});
+    assert.match(loaded.warnings.join("\n"), new RegExp(`roles.*at most ${MAX_CONFIG_ROLE_ENTRIES}`, "i"));
+    assert.match(loaded.warnings.join("\n"), new RegExp(`addresses.*at most ${MAX_CONFIG_ADDRESS_ENTRIES}`, "i"));
+  });
+
+  it("rejects oversized semantic fields without truncation or raw rejected content", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    const instructionSentinel = `INSTRUCTION_SENTINEL_${"🙂".repeat(MAX_CONFIG_INSTRUCTIONS_BYTES)}`;
+    const policySentinel = `POLICY_SENTINEL_${"é".repeat(MAX_CONFIG_MODEL_POLICY_BYTES)}`;
+    const toolSentinel = `TOOL_SENTINEL_${"é".repeat(MAX_CONFIG_TOOL_NAME_BYTES)}`;
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      modelPolicy: policySentinel,
+      roles: {
+        semantic: {
+          tools: [toolSentinel],
+          instructions: instructionSentinel,
+        },
+        many: { tools: Array.from({ length: MAX_CONFIG_PROFILE_TOOLS + 1 }, (_, index) => `tool-${index}`) },
+      },
+    }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.equal(loaded.config.modelPolicy, DEFAULT_MODEL_POLICY);
+    assert.equal(loaded.config.roles.semantic?.instructions, undefined);
+    assert.equal(loaded.config.roles.semantic?.tools, undefined);
+    assert.equal(loaded.config.roles.many?.tools, undefined);
+    assert.equal(resolveAgentProfile(loaded.config, "semantic.task@gpt-5.4.com", "semantic").tools.includes("fetch_emails"), true);
+    const warnings = loaded.warnings.join("\n");
+    assert.match(warnings, /modelPolicy.*UTF-8 bytes/i);
+    assert.match(warnings, /instructions.*UTF-8 bytes/i);
+    assert.match(warnings, /tools.*unique names/i);
+    assert.doesNotMatch(warnings, /INSTRUCTION_SENTINEL|POLICY_SENTINEL|TOOL_SENTINEL/);
+  });
+
+  it("accepts exact multibyte semantic limits and rejects the next complete value", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    const exactInstructions = "é".repeat(MAX_CONFIG_INSTRUCTIONS_BYTES / 2);
+    const exactPolicy = "é".repeat(MAX_CONFIG_MODEL_POLICY_BYTES / 2);
+    const exactTool = "é".repeat(MAX_CONFIG_TOOL_NAME_BYTES / 2);
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      modelPolicy: exactPolicy,
+      roles: { exact: { tools: [exactTool], instructions: exactInstructions } },
+    }));
+    const exact = loadConfig(agentDir, root, false);
+    assert.equal(exact.config.modelPolicy, exactPolicy);
+    assert.equal(exact.config.roles.exact?.instructions, exactInstructions);
+    assert.deepEqual(exact.config.roles.exact?.tools, [exactTool]);
+
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      modelPolicy: `${exactPolicy}é`,
+      roles: { exact: { tools: [`${exactTool}é`], instructions: `${exactInstructions}é` } },
+    }));
+    const over = loadConfig(agentDir, root, false);
+    assert.equal(over.config.modelPolicy, DEFAULT_MODEL_POLICY);
+    assert.equal(over.config.roles.exact?.instructions, undefined);
+    assert.equal(over.config.roles.exact?.tools, undefined);
+  });
+
+  it("rejects control and bidi characters in semantic config without echoing them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    const sentinel = "HIDDEN\u202eVALUE\u0007";
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      modelPolicy: `policy ${sentinel}`,
+      roles: { unsafe: { tools: [`tool-${sentinel}`], instructions: `instruction ${sentinel}` } },
+    }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.equal(loaded.config.modelPolicy, DEFAULT_MODEL_POLICY);
+    assert.equal(loaded.config.roles.unsafe?.tools, undefined);
+    assert.equal(loaded.config.roles.unsafe?.instructions, undefined);
+    assert.match(loaded.warnings.join("\n"), /control or bidirectional-control/i);
+    assert.doesNotMatch(loaded.warnings.join("\n"), /HIDDEN|VALUE|\u202e|\u0007/);
+  });
+
+  it("bounds deterministic configuration warnings", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    const roles = Object.fromEntries(Array.from({ length: MAX_CONFIG_ROLE_ENTRIES }, (_, index) => [
+      `invalid-${index}`,
+      { effort: "invalid", tools: 42, instructions: 42, canSpawn: "invalid", lifecycle: { unknown: true } },
+    ]));
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ roles }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.equal(loaded.warnings.length, MAX_CONFIG_WARNINGS + 1);
+    assert.match(loaded.warnings.at(-1)!, /additional configuration warning\(s\) omitted/i);
+    assert.equal(loaded.warnings.every((warning) => Buffer.byteLength(warning, "utf8") <= 512), true);
   });
 
   it("warns and falls back for invalid values", async () => {

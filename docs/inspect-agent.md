@@ -69,7 +69,7 @@ Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true
 
 ## Usage guidance
 
-- Call before delegating when recipient capability is uncertain — in particular before authorizing repository changes, to confirm the address is actually writable.
+- Call before delegating when recipient capability is uncertain — in particular before authorizing repository changes, to confirm the address is actually writable. The main prompt's 8 KiB / 64-line capability block is only a bounded configured-intent display and may omit complete entries; this tool returns the exact bounded live/prospective profile.
 - Also useful before spawning to distinguish identity lease use from run concurrency, check whether this address already holds a lease, and inspect exact bounded blockers.
 - Follow the rendered recovery hint. Reuse a relevant leased identity first; restart real stopped/failed work; stop only to become inactive; cancel only a user-abandoned exact request after final validation; archive only when clean; then retry.
 - When `cleanup` is present, do not interpret a detached worker or elapsed deadline as safety. Restart, archive, and clear-failure remain blocked. A restored `unknown` quarantine has no automatic verification or release path in Pi 0.81.1; accepted mail stays queued and the operator must perform external process/quiescence review rather than being told merely to wait.

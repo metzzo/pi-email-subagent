@@ -3,8 +3,19 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
-import { RegistryStore, parseRegistry } from "../../src/registry-store.ts";
+import {
+  DEFAULT_LIFECYCLE,
+  MAX_CONFIG_INSTRUCTIONS_BYTES,
+  MAX_CONFIG_PROFILE_TOOLS,
+  MAX_CONFIG_TOOL_NAME_BYTES,
+} from "../../src/config.ts";
+import {
+  MAX_REGISTRY_ACTIVITY_ITEMS,
+  MAX_REGISTRY_ACTIVITY_SUMMARY_BYTES,
+  MAX_REGISTRY_DIAGNOSTIC_BYTES,
+  RegistryStore,
+  parseRegistry,
+} from "../../src/registry-store.ts";
 import type { AgentRecord, BrokerRegistry } from "../../src/types.ts";
 import { emptyWorkState, MAX_ACTIVE_WORK, MAX_PATCH_BYTES, MAX_RECENT_WORK } from "../../src/work-ledger.ts";
 
@@ -65,6 +76,22 @@ describe("registry schema", () => {
 
     legacy.agents[0]!.canSpawn = "yes";
     assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);
+  });
+
+  it("rejects restored semantic and display fields that bypass configured bounds", () => {
+    const base = record() as unknown as Record<string, unknown>;
+    const variants: Array<[Record<string, unknown>, RegExp]> = [
+      [{ ...base, tools: Array.from({ length: MAX_CONFIG_PROFILE_TOOLS + 1 }, (_, index) => `tool-${index}`) }, /tools.*at most/i],
+      [{ ...base, tools: ["x".repeat(MAX_CONFIG_TOOL_NAME_BYTES + 1)] }, /tools.*UTF-8 bytes/i],
+      [{ ...base, instructions: "é".repeat((MAX_CONFIG_INSTRUCTIONS_BYTES / 2) + 1) }, /instructions.*UTF-8 bytes/i],
+      [{ ...base, activity: Array.from({ length: MAX_REGISTRY_ACTIVITY_ITEMS + 1 }, () => ({ at: new Date().toISOString(), kind: "status", summary: "ok" })) }, /activity.*items/i],
+      [{ ...base, activity: [{ at: new Date().toISOString(), kind: "status", summary: "é".repeat((MAX_REGISTRY_ACTIVITY_SUMMARY_BYTES / 2) + 1) }] }, /activity.*summary.*UTF-8 bytes/i],
+      [{ ...base, currentActivity: "é".repeat((MAX_REGISTRY_DIAGNOSTIC_BYTES / 2) + 1) }, /currentActivity.*UTF-8 bytes/i],
+      [{ ...base, failure: "é".repeat((MAX_REGISTRY_DIAGNOSTIC_BYTES / 2) + 1) }, /failure.*UTF-8 bytes/i],
+    ];
+    for (const [candidate, pattern] of variants) {
+      assert.throws(() => parseRegistry({ ...registry(), agents: [candidate] }), pattern);
+    }
   });
 
   it("round-trips a bounded worker capability epoch and leaves legacy records explicit", () => {

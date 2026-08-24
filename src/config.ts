@@ -17,6 +17,52 @@ export const DEFAULT_MODEL_POLICY = `- Use model ID \`k3\` (email-domain suffix 
 /** Maximum delay Node setTimeout can represent without overflow/clamping. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
+export const MAX_CONFIG_ROLE_ENTRIES = 64;
+export const MAX_CONFIG_ADDRESS_ENTRIES = 256;
+export const MAX_CONFIG_PROFILE_TOOLS = 128;
+export const MAX_CONFIG_TOOL_NAME_BYTES = 100;
+export const MAX_CONFIG_INSTRUCTIONS_BYTES = 16 * 1024;
+export const MAX_CONFIG_MODEL_POLICY_BYTES = 16 * 1024;
+export const MAX_CONFIG_WARNINGS = 64;
+const MAX_CONFIG_WARNING_BYTES = 512;
+const REQUIRED_MAIL_TOOLS = ["send_email", "fetch_emails"] as const;
+const UNSAFE_INLINE_CONFIG = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+const UNSAFE_MULTILINE_CONFIG = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u;
+
+export function isSafeConfigSemanticText(value: string, allowLayout: boolean): boolean {
+  return !(allowLayout ? UNSAFE_MULTILINE_CONFIG : UNSAFE_INLINE_CONFIG).test(value);
+}
+
+function withinUtf8Bytes(value: string, maximum: number): boolean {
+  return Buffer.byteLength(value, "utf8") <= maximum;
+}
+
+function utf8Prefix(value: string, maximum: number): string {
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maximum) break;
+    result += character;
+    bytes += size;
+  }
+  return result;
+}
+
+function boundedWarning(value: string): string {
+  const safe = value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, "");
+  if (withinUtf8Bytes(safe, MAX_CONFIG_WARNING_BYTES)) return safe;
+  const ellipsis = "…";
+  return `${utf8Prefix(safe, MAX_CONFIG_WARNING_BYTES - Buffer.byteLength(ellipsis, "utf8"))}${ellipsis}`;
+}
+
+function finalizeWarnings(warnings: readonly string[]): string[] {
+  const shown = warnings.slice(0, MAX_CONFIG_WARNINGS).map(boundedWarning);
+  const omitted = warnings.length - shown.length;
+  if (omitted > 0) shown.push(`${omitted} additional configuration warning(s) omitted.`);
+  return shown;
+}
+
 export const DEFAULT_LIFECYCLE: LifecyclePolicy = {
   spawnTimeoutMs: 30_000,
   promptAcceptanceTimeoutMs: 30_000,
@@ -107,12 +153,22 @@ export interface LoadConfigResult {
 
 function readJson(path: string, warnings: string[]): RawConfig | undefined {
   if (!existsSync(path)) return undefined;
+  let content: string;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("top level must be an object");
+    content = readFileSync(path, "utf8");
+  } catch {
+    warnings.push(`Could not read configuration file ${path}; ignoring it.`);
+    return undefined;
+  }
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      warnings.push(`Configuration file ${path} must contain a top-level object; ignoring it.`);
+      return undefined;
+    }
     return parsed as RawConfig;
-  } catch (error) {
-    warnings.push(`Could not load ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  } catch {
+    warnings.push(`Configuration file ${path} is not valid JSON; ignoring it.`);
     return undefined;
   }
 }
@@ -129,7 +185,7 @@ function positiveInt(value: unknown, fallback: number, label: string, warnings: 
 function effort(value: unknown, fallback: ThinkingLevel, label: string, warnings: string[]): ThinkingLevel {
   if (value === undefined) return fallback;
   if (typeof value !== "string" || !EFFORTS.has(value as ThinkingLevel)) {
-    warnings.push(`${label} has invalid effort \"${String(value)}\"; using ${fallback}.`);
+    warnings.push(`${label} has an invalid effort; using ${fallback}.`);
     return fallback;
   }
   return value as ThinkingLevel;
@@ -148,42 +204,64 @@ function profileRecord(
     warnings.push(`${label} must be an object; ignoring it.`);
     return {};
   }
+  const entries = Object.entries(value);
+  const maximum = kind === "role" ? MAX_CONFIG_ROLE_ENTRIES : MAX_CONFIG_ADDRESS_ENTRIES;
+  if (entries.length > maximum) {
+    warnings.push(`${label} must contain at most ${maximum} ${kind} entries; ignoring the entire object.`);
+    return {};
+  }
   const result: Record<string, RoleConfig> = {};
-  for (const [sourceKey, raw] of Object.entries(value)) {
+  for (const [index, [sourceKey, raw]] of entries.entries()) {
+    const entryLabel = `${label} entry ${index + 1}`;
     let key = sourceKey.trim().toLowerCase();
     try {
       if (kind === "role") {
-        if (!ROLE_NAME.test(key)) throw new Error("use lowercase kebab-case");
+        if (!ROLE_NAME.test(key)) throw new Error("invalid role key");
       } else key = parseSubagentAddressShape(key).address;
-    } catch (error) {
-      warnings.push(`${label}.${sourceKey} has an invalid ${kind} key (${error instanceof Error ? error.message : String(error)}); ignoring it.`);
+    } catch {
+      warnings.push(`${entryLabel} has an invalid ${kind} key; ignoring it.`);
       continue;
     }
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      warnings.push(`${label}.${sourceKey} must be an object; ignoring it.`);
+      warnings.push(`${entryLabel} must be an object; ignoring it.`);
       continue;
     }
-    if (result[key]) warnings.push(`${label}.${sourceKey} duplicates canonical key ${key}; later fields override earlier fields.`);
+    if (result[key]) warnings.push(`${entryLabel} duplicates canonical key ${key}; later fields override earlier fields.`);
     const entry = raw as Record<string, unknown>;
     const next: RoleConfig = {};
-    if (entry.effort !== undefined) next.effort = effort(entry.effort, "medium", `${label}.${sourceKey}`, warnings);
+    if (entry.effort !== undefined) next.effort = effort(entry.effort, "medium", entryLabel, warnings);
     if (entry.tools !== undefined) {
-      if (Array.isArray(entry.tools) && entry.tools.every((tool) => typeof tool === "string")) {
-        next.tools = [...new Set(entry.tools as string[])];
-      } else warnings.push(`${label}.${sourceKey}.tools must be an array of strings; ignoring it.`);
+      if (!Array.isArray(entry.tools) || !entry.tools.every((tool) => typeof tool === "string")) {
+        warnings.push(`${entryLabel}.tools must be an array of strings; ignoring the entire tools field.`);
+      } else {
+        const unique = [...new Set(entry.tools as string[])];
+        const effectiveCount = new Set([...unique, ...REQUIRED_MAIL_TOOLS]).size;
+        if (entry.tools.length > MAX_CONFIG_PROFILE_TOOLS || effectiveCount > MAX_CONFIG_PROFILE_TOOLS) {
+          warnings.push(`${entryLabel}.tools must resolve to at most ${MAX_CONFIG_PROFILE_TOOLS} unique names including required mail tools; ignoring the entire tools field.`);
+        } else if (unique.some((tool) => !tool || !withinUtf8Bytes(tool, MAX_CONFIG_TOOL_NAME_BYTES))) {
+          warnings.push(`${entryLabel}.tools names must be non-empty and at most ${MAX_CONFIG_TOOL_NAME_BYTES} UTF-8 bytes; ignoring the entire tools field.`);
+        } else if (unique.some((tool) => !isSafeConfigSemanticText(tool, false))) {
+          warnings.push(`${entryLabel}.tools names must not contain control or bidirectional-control characters; ignoring the entire tools field.`);
+        } else next.tools = unique;
+      }
     }
     if (entry.instructions !== undefined) {
-      if (typeof entry.instructions === "string") next.instructions = entry.instructions;
-      else warnings.push(`${label}.${sourceKey}.instructions must be a string; ignoring it.`);
+      if (typeof entry.instructions !== "string") {
+        warnings.push(`${entryLabel}.instructions must be a string; ignoring the entire instructions field.`);
+      } else if (!withinUtf8Bytes(entry.instructions, MAX_CONFIG_INSTRUCTIONS_BYTES)) {
+        warnings.push(`${entryLabel}.instructions must be at most ${MAX_CONFIG_INSTRUCTIONS_BYTES} UTF-8 bytes; ignoring the entire instructions field.`);
+      } else if (!isSafeConfigSemanticText(entry.instructions, true)) {
+        warnings.push(`${entryLabel}.instructions must not contain control or bidirectional-control characters; ignoring the entire instructions field.`);
+      } else next.instructions = entry.instructions;
     }
     if (entry.canSpawn !== undefined) {
       if (typeof entry.canSpawn === "boolean") next.canSpawn = entry.canSpawn;
-      else warnings.push(`${label}.${sourceKey}.canSpawn must be a boolean; ignoring it.`);
+      else warnings.push(`${entryLabel}.canSpawn must be a boolean; ignoring it.`);
     }
     if (entry.lifecycle !== undefined) {
-      const parsedLifecycle = lifecycleOverride(entry.lifecycle, `${label}.${sourceKey}.lifecycle`, warnings);
+      const parsedLifecycle = lifecycleOverride(entry.lifecycle, `${entryLabel}.lifecycle`, warnings);
       if (parsedLifecycle.brokerShutdownTimeoutMs !== undefined) {
-        warnings.push(`${label}.${sourceKey}.lifecycle.brokerShutdownTimeoutMs is global administrator-only configuration; ignoring it.`);
+        warnings.push(`${entryLabel}.lifecycle.brokerShutdownTimeoutMs is global administrator-only configuration; ignoring it.`);
         delete parsedLifecycle.brokerShutdownTimeoutMs;
       }
       next.lifecycle = parsedLifecycle;
@@ -214,6 +292,19 @@ function mergeProfiles<T extends RoleConfig>(base: Record<string, T>, overlay: R
   return result;
 }
 
+function mergeBoundedProfiles<T extends RoleConfig>(
+  base: Record<string, T>,
+  overlay: Record<string, T>,
+  label: string,
+  maximum: number,
+  warnings: string[],
+): Record<string, T> {
+  const merged = mergeProfiles(base, overlay);
+  if (Object.keys(merged).length <= maximum) return merged;
+  warnings.push(`${label} would exceed the ${maximum}-entry canonical limit; ignoring this layer's entire profile object.`);
+  return base;
+}
+
 function lifecycleOverride(value: unknown, label: string, warnings: string[]): LifecycleOverride {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -229,8 +320,12 @@ function lifecycleOverride(value: unknown, label: string, warnings: string[]): L
       warnings.push(`${label}.${key} must be an integer from 1 to ${MAX_TIMER_DELAY_MS} (the runtime-safe timer maximum); ignoring it.`);
     } else result[key] = candidate as number;
   }
+  let unknownIndex = 0;
   for (const key of Object.keys(raw)) {
-    if (!LIFECYCLE_FIELDS.includes(key as keyof LifecyclePolicy)) warnings.push(`${label}.${key} is unknown; ignoring it.`);
+    if (!LIFECYCLE_FIELDS.includes(key as keyof LifecyclePolicy)) {
+      unknownIndex += 1;
+      warnings.push(`${label} contains unknown field ${unknownIndex}; ignoring it.`);
+    }
   }
   return result;
 }
@@ -244,8 +339,13 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
   const defaultEffort = effort(raw.defaultEffort, base.defaultEffort, `${label}.defaultEffort`, warnings);
   let modelPolicy = base.modelPolicy;
   if (raw.modelPolicy !== undefined) {
-    if (typeof raw.modelPolicy === "string" && raw.modelPolicy.trim()) modelPolicy = raw.modelPolicy;
-    else warnings.push(`${label}.modelPolicy must be a non-empty string; ignoring it.`);
+    if (typeof raw.modelPolicy !== "string" || !raw.modelPolicy.trim()) {
+      warnings.push(`${label}.modelPolicy must be a non-empty string; ignoring it.`);
+    } else if (!withinUtf8Bytes(raw.modelPolicy, MAX_CONFIG_MODEL_POLICY_BYTES)) {
+      warnings.push(`${label}.modelPolicy must be at most ${MAX_CONFIG_MODEL_POLICY_BYTES} UTF-8 bytes; ignoring it.`);
+    } else if (!isSafeConfigSemanticText(raw.modelPolicy, true)) {
+      warnings.push(`${label}.modelPolicy must not contain control or bidirectional-control characters; ignoring it.`);
+    } else modelPolicy = raw.modelPolicy;
   }
   const maxAgents = positiveInt(raw.maxAgents, base.maxAgents, `${label}.maxAgents`, warnings, 64);
   const maxConcurrent = Math.min(
@@ -320,8 +420,20 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
     ),
     lifecycle,
     lifecycleMaxima,
-    roles: mergeProfiles(base.roles, roleRecord(raw.roles, `${label}.roles`, warnings)),
-    addresses: mergeProfiles(base.addresses, addressRecord(raw.addresses, `${label}.addresses`, warnings)),
+    roles: mergeBoundedProfiles(
+      base.roles,
+      roleRecord(raw.roles, `${label}.roles`, warnings),
+      `${label}.roles`,
+      MAX_CONFIG_ROLE_ENTRIES,
+      warnings,
+    ),
+    addresses: mergeBoundedProfiles(
+      base.addresses,
+      addressRecord(raw.addresses, `${label}.addresses`, warnings),
+      `${label}.addresses`,
+      MAX_CONFIG_ADDRESS_ENTRIES,
+      warnings,
+    ),
   };
 }
 
@@ -337,7 +449,7 @@ export function loadConfig(
   if (projectTrusted) {
     config = mergeLayer(config, readJson(join(cwd, configDirName, "subagents.json"), warnings), "project", warnings);
   }
-  return { config, warnings };
+  return { config, warnings: finalizeWarnings(warnings) };
 }
 
 export function resolveAgentProfile(
@@ -347,10 +459,10 @@ export function resolveAgentProfile(
 ): Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions"> {
   const role = config.roles[name] ?? {};
   const exact = config.addresses[address] ?? {};
-  const tools = exact.tools ?? role.tools ?? ["read", "grep", "find", "ls", "send_email", "fetch_emails"];
+  const tools = exact.tools ?? role.tools ?? ["read", "grep", "find", "ls", ...REQUIRED_MAIL_TOOLS];
   const merged = {
     effort: exact.effort ?? role.effort ?? config.defaultEffort,
-    tools: [...new Set([...tools, "send_email", "fetch_emails"])],
+    tools: [...new Set([...tools, ...REQUIRED_MAIL_TOOLS])],
     canSpawn: exact.canSpawn ?? role.canSpawn ?? false,
   } as Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions">;
   const instructions = exact.instructions ?? role.instructions;

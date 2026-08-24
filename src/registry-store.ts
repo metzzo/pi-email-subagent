@@ -2,7 +2,15 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { DEFAULT_LIFECYCLE, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
+import {
+  DEFAULT_LIFECYCLE,
+  isSafeConfigSemanticText,
+  LIFECYCLE_FIELDS,
+  MAX_CONFIG_INSTRUCTIONS_BYTES,
+  MAX_CONFIG_PROFILE_TOOLS,
+  MAX_CONFIG_TOOL_NAME_BYTES,
+  MAX_TIMER_DELAY_MS,
+} from "./config.ts";
 import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
 import { clone, nowIso } from "./util.ts";
@@ -21,7 +29,10 @@ const MAX_CLEANUP_DETAIL_CHARS = 2_000;
 const MAX_CLEANUP_TOOLS = 64;
 const WORKER_EPOCH_PHASES = new Set<WorkerCapabilityEpoch["phase"]>(["spawning", "activated", "verified-clean"]);
 const MAX_WORKER_EPOCH_TOOLS = 128;
-const MAX_WORKER_EPOCH_TOOL_NAME_CHARS = 100;
+export const MAX_REGISTRY_ACTIVITY_ITEMS = 40;
+export const MAX_REGISTRY_ACTIVITY_SUMMARY_BYTES = 2_000;
+export const MAX_REGISTRY_DIAGNOSTIC_BYTES = 2_048;
+const MAX_REGISTRY_SESSION_FILE_BYTES = 4_096;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -46,6 +57,26 @@ function number(value: unknown, label: string): number {
 function stringArray(value: unknown, label: string): string[] {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new Error(`${label} must be an array of strings.`);
   return [...value];
+}
+
+function boundedString(value: unknown, label: string, maximumBytes: number): string {
+  const parsed = string(value, label);
+  if (Buffer.byteLength(parsed, "utf8") > maximumBytes) throw new Error(`${label} exceeds ${maximumBytes} UTF-8 bytes.`);
+  return parsed;
+}
+
+function parseProfileTools(value: unknown, label: string): string[] {
+  const tools = stringArray(value, label);
+  if (tools.length > MAX_CONFIG_PROFILE_TOOLS || new Set(tools).size !== tools.length) {
+    throw new Error(`${label} must contain at most ${MAX_CONFIG_PROFILE_TOOLS} unique names.`);
+  }
+  if (tools.some((tool) => !tool || Buffer.byteLength(tool, "utf8") > MAX_CONFIG_TOOL_NAME_BYTES)) {
+    throw new Error(`${label} names must be non-empty and at most ${MAX_CONFIG_TOOL_NAME_BYTES} UTF-8 bytes.`);
+  }
+  if (tools.some((tool) => !isSafeConfigSemanticText(tool, false))) {
+    throw new Error(`${label} names must not contain control or bidirectional-control characters.`);
+  }
+  return tools;
 }
 
 function parseLifecycle(value: unknown, label: string): LifecyclePolicy {
@@ -77,16 +108,18 @@ function parseUsage(value: unknown, label: string): UsageSnapshot {
 
 function parseActivity(value: unknown, label: string): ActivityItem[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array.`);
+  if (value.length > MAX_REGISTRY_ACTIVITY_ITEMS) throw new Error(`${label} must contain at most ${MAX_REGISTRY_ACTIVITY_ITEMS} items.`);
   return value.map((item, index) => {
     const raw = object(item, `${label}[${index}]`);
     const kind = string(raw.kind, `${label}[${index}].kind`) as ActivityItem["kind"];
     if (!ACTIVITY_KINDS.has(kind)) throw new Error(`${label}[${index}].kind is invalid.`);
+    const summary = boundedString(raw.summary, `${label}[${index}].summary`, MAX_REGISTRY_ACTIVITY_SUMMARY_BYTES);
     return {
       at: string(raw.at, `${label}[${index}].at`),
       kind,
-      summary: /^(?:edit|write)\s+\{/i.test(string(raw.summary, `${label}[${index}].summary`))
-        ? `${String(raw.summary).split(/\s/, 1)[0]} (legacy mutation arguments hidden)`
-        : string(raw.summary, `${label}[${index}].summary`),
+      summary: /^(?:edit|write)\s+\{/i.test(summary)
+        ? `${summary.split(/\s/, 1)[0]} (legacy mutation arguments hidden)`
+        : summary,
     };
   });
 }
@@ -200,8 +233,10 @@ function parseWorkerEpoch(value: unknown, label: string): WorkerCapabilityEpoch 
   if (!WORKER_EPOCH_PHASES.has(phase)) throw new Error(`${label}.phase is invalid.`);
   const tools = stringArray(raw.tools, `${label}.tools`);
   if (tools.length > MAX_WORKER_EPOCH_TOOLS || new Set(tools).size !== tools.length
-    || tools.some((tool) => !tool || tool.length > MAX_WORKER_EPOCH_TOOL_NAME_CHARS)) {
-    throw new Error(`${label}.tools must contain at most ${MAX_WORKER_EPOCH_TOOLS} unique names of at most ${MAX_WORKER_EPOCH_TOOL_NAME_CHARS} characters.`);
+    || tools.some((tool) => !tool
+      || Buffer.byteLength(tool, "utf8") > MAX_CONFIG_TOOL_NAME_BYTES
+      || !isSafeConfigSemanticText(tool, false))) {
+    throw new Error(`${label}.tools must contain at most ${MAX_WORKER_EPOCH_TOOLS} unique safe names of at most ${MAX_CONFIG_TOOL_NAME_BYTES} UTF-8 bytes.`);
   }
   if (typeof raw.mutationCapable !== "boolean") throw new Error(`${label}.mutationCapable must be a boolean.`);
   if (typeof raw.runSlotHeld !== "boolean") throw new Error(`${label}.runSlotHeld must be a boolean.`);
@@ -289,7 +324,7 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     provider: string(raw.provider, `${label}.provider`),
     modelId: string(raw.modelId, `${label}.modelId`),
     effort,
-    tools: stringArray(raw.tools, `${label}.tools`),
+    tools: parseProfileTools(raw.tools, `${label}.tools`),
     // Legacy registries without an explicit delegation grant fail closed.
     canSpawn: raw.canSpawn === undefined ? false : (raw.canSpawn as boolean),
     state,
@@ -306,16 +341,25 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   if (workerEpoch) record.workerEpoch = workerEpoch;
   const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`, record.workerEpoch?.tools ?? record.tools);
   if (cleanup) record.cleanup = cleanup;
-  for (const [key, fieldLabel] of [
-    ["instructions", `${label}.instructions`],
-    ["sessionFile", `${label}.sessionFile`],
-    ["lastActivityAt", `${label}.lastActivityAt`],
-    ["currentActivity", `${label}.currentActivity`],
-    ["failure", `${label}.failure`],
-  ] as const) {
-    let parsed = optionalString(raw[key], fieldLabel);
+  const instructions = raw.instructions === undefined
+    ? undefined
+    : boundedString(raw.instructions, `${label}.instructions`, MAX_CONFIG_INSTRUCTIONS_BYTES);
+  if (instructions !== undefined) {
+    if (!isSafeConfigSemanticText(instructions, true)) throw new Error(`${label}.instructions contains control or bidirectional-control characters.`);
+    record.instructions = instructions;
+  }
+  const sessionFile = raw.sessionFile === undefined
+    ? undefined
+    : boundedString(raw.sessionFile, `${label}.sessionFile`, MAX_REGISTRY_SESSION_FILE_BYTES);
+  if (sessionFile !== undefined) record.sessionFile = sessionFile;
+  const lastActivityAt = optionalString(raw.lastActivityAt, `${label}.lastActivityAt`);
+  if (lastActivityAt !== undefined) record.lastActivityAt = lastActivityAt;
+  for (const key of ["currentActivity", "failure"] as const) {
+    let parsed = raw[key] === undefined
+      ? undefined
+      : boundedString(raw[key], `${label}.${key}`, MAX_REGISTRY_DIAGNOSTIC_BYTES);
     if (key === "currentActivity" && parsed && /^(?:edit|write)\s+\{/i.test(parsed)) parsed = `${parsed.split(/\s/, 1)[0]} (legacy mutation arguments hidden)`;
-    if (parsed !== undefined) (record as unknown as Record<string, unknown>)[key] = parsed;
+    if (parsed !== undefined) record[key] = parsed;
   }
   return record;
 }

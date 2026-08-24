@@ -10,7 +10,15 @@ import {
   parseNewSubagentAddress,
   parseSubagentAddressShape,
 } from "./address.ts";
-import { isThinkingLevel, MAX_TIMER_DELAY_MS, resolveAgentProfile, resolveLifecycle } from "./config.ts";
+import {
+  isSafeConfigSemanticText,
+  isThinkingLevel,
+  MAX_CONFIG_PROFILE_TOOLS,
+  MAX_CONFIG_TOOL_NAME_BYTES,
+  MAX_TIMER_DELAY_MS,
+  resolveAgentProfile,
+  resolveLifecycle,
+} from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
 import { ProviderReadinessError } from "./model-runtime.ts";
@@ -52,8 +60,7 @@ import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverM
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
 const ARCHIVE_BLOCKER_ID_LIMIT = 5;
 const KNOWN_NON_MUTATING_TOOLS = new Set(["read", "grep", "find", "ls", "send_email", "fetch_emails"]);
-const MAX_WORKER_EPOCH_TOOLS = 128;
-const MAX_WORKER_EPOCH_TOOL_NAME_CHARS = 100;
+const MAX_WORKER_EPOCH_TOOLS = MAX_CONFIG_PROFILE_TOOLS;
 
 // Every caught lifecycle/provider/session error uses the shared content-safe
 // boundary before it can enter mail, registry, UI, or a main notification.
@@ -567,8 +574,10 @@ export class AgentBroker {
   private capabilityTools(tools: readonly string[]): string[] {
     const unique = [...new Set(tools)];
     if (unique.length > MAX_WORKER_EPOCH_TOOLS
-      || unique.some((tool) => !tool || tool.length > MAX_WORKER_EPOCH_TOOL_NAME_CHARS)) {
-      throw new Error(`Worker capability exceeds ${MAX_WORKER_EPOCH_TOOLS} tools or ${MAX_WORKER_EPOCH_TOOL_NAME_CHARS} characters per name.`);
+      || unique.some((tool) => !tool
+        || byteLength(tool) > MAX_CONFIG_TOOL_NAME_BYTES
+        || !isSafeConfigSemanticText(tool, false))) {
+      throw new Error(`Worker capability exceeds ${MAX_WORKER_EPOCH_TOOLS} tools or the ${MAX_CONFIG_TOOL_NAME_BYTES}-UTF-8-byte safe name bound.`);
     }
     return unique;
   }

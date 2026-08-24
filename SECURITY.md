@@ -35,7 +35,7 @@ Only delegate to models/providers you trust with the project and credentials acc
 
 ## Sensitive data
 
-Mail bodies, subjects, agent activity, usage, and worker session transcripts are persisted beneath `~/.pi/agent/subagents/<parent-session-id>/`. Protect that directory as sensitive data and delete it according to your retention requirements. Provider/session errors copied out of native worker sessions pass through a bounded targeted redaction helper, but this is risk reduction rather than a secrecy guarantee. Native Conversation retains raw provider detail for diagnosis. Never attach raw state files to public bug reports without reviewing and redacting them, and never put credentials in error messages.
+Mail bodies, subjects, agent activity, usage, and worker session transcripts are persisted beneath `~/.pi/agent/subagents/<parent-session-id>/`. Protect that directory as sensitive data and delete it according to your retention requirements. Provider/session errors copied out of native worker sessions pass through a bounded targeted redaction helper, but this is risk reduction rather than a secrecy guarantee. Native Conversation retains raw provider detail for diagnosis. Configuration semantic fields have explicit UTF-8/count/control bounds; rejected instructions, model policy, tool names, and keys are not echoed in diagnostics, and the coordinator omits derived capability entries only at complete boundaries. These limits are prompt/output safety, not a sandbox or content-trust boundary. Never attach raw state files to public bug reports without reviewing and redacting them, and never put credentials in error messages.
 
 ## Security roadmap
 
