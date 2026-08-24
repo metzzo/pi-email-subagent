@@ -5,6 +5,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import * as TypeBox from "typebox";
 import {
+  assertExtensionApiFeatures,
   assertPiRuntimeFeatures,
   assertSupportedPiRuntime,
   collectedReplyPresentationCapability,
@@ -48,18 +49,28 @@ it("reports an actionable supported-Pi error for a missing required public featu
   );
 });
 
-it("probes the public no-write settings snapshot and auth-status surface before use", () => {
+it("probes every public startup and restore method before use", () => {
+  class IncompleteSessionManager {
+    static open() {}
+    static create() {}
+  }
   class IncompleteSettingsManager {
     static create() {}
+    static fromStorage() {}
     getGlobalSettings() {}
   }
   class IncompleteModelRuntime {
     static create() {}
   }
+  class IncompleteModelRegistry {}
+  class IncompleteAgentSession {}
   const codingAgent = {
     ...PiCodingAgent,
+    SessionManager: IncompleteSessionManager,
     SettingsManager: IncompleteSettingsManager,
     ModelRuntime: IncompleteModelRuntime,
+    ModelRegistry: IncompleteModelRegistry,
+    AgentSession: IncompleteAgentSession,
   } as unknown as Record<string, unknown>;
   assert.throws(
     () => assertPiRuntimeFeatures(
@@ -68,6 +79,76 @@ it("probes the public no-write settings snapshot and auth-status surface before 
       PiTui as unknown as Record<string, unknown>,
       TypeBox as unknown as Record<string, unknown>,
     ),
-    /ModelRuntime\.prototype\.getProviderAuthStatus.*SettingsManager\.fromStorage.*SettingsManager\.prototype\.getProjectSettings/s,
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      for (const feature of [
+        "SessionManager.prototype.getBranch",
+        "SessionManager.prototype.getSessionId",
+        "SessionManager.prototype.appendCustomEntry",
+        "ModelRuntime.prototype.getModel",
+        "ModelRuntime.prototype.getAuth",
+        "ModelRuntime.prototype.getProviderAuthStatus",
+        "ModelRuntime.prototype.registerNativeProvider",
+        "ModelRuntime.prototype.registerProvider",
+        "ModelRegistry.prototype.getRegisteredProviderIds",
+        "ModelRegistry.prototype.getRegisteredNativeProvider",
+        "ModelRegistry.prototype.getRegisteredProviderConfig",
+        "ModelRegistry.prototype.getProviderAuthStatus",
+        "ModelRegistry.prototype.getAvailable",
+        "ModelRegistry.prototype.getAll",
+        "SettingsManager.inMemory",
+        "SettingsManager.prototype.getProjectSettings",
+        "SettingsManager.prototype.drainErrors",
+        "SettingsManager.prototype.applyOverrides",
+        "AgentSession.prototype.subscribe",
+        "AgentSession.prototype.getActiveToolNames",
+        "AgentSession.prototype.prompt",
+      ]) assert.match(error.message, new RegExp(feature.replaceAll(".", "\\.")));
+      return true;
+    },
   );
+});
+
+it("handles malformed constructors and bounds one combined missing-feature diagnostic", () => {
+  const codingAgent = {
+    ...PiCodingAgent,
+    SessionManager: { open() {}, create() {}, prototype: 42 },
+    ModelRuntime: { create() {}, prototype: null },
+    ModelRegistry: { prototype: "malformed" },
+    SettingsManager: { create() {}, fromStorage() {}, inMemory() {}, prototype: false },
+    AgentSession: { prototype: undefined },
+  } as unknown as Record<string, unknown>;
+  assert.throws(
+    () => assertPiRuntimeFeatures(codingAgent, {}, {}, {}),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /SessionManager\.prototype\.getBranch/);
+      assert.match(error.message, /additional required feature\(s\) omitted/);
+      assert.ok(Buffer.byteLength(error.message, "utf8") <= 4_096, `diagnostic was ${Buffer.byteLength(error.message, "utf8")} bytes`);
+      return true;
+    },
+  );
+});
+
+it("load-safely rejects an incompatible ExtensionAPI instance before registration", () => {
+  let touched = false;
+  const incomplete = {
+    registerTool() { touched = true; },
+    registerCommand() { touched = true; },
+  };
+  assert.throws(
+    () => assertExtensionApiFeatures(incomplete),
+    /ExtensionAPI\.registerMessageRenderer.*ExtensionAPI\.sendMessage.*ExtensionAPI\.getThinkingLevel.*ExtensionAPI\.on/s,
+  );
+  assert.equal(touched, false);
+
+  assert.doesNotThrow(() => assertExtensionApiFeatures({
+    registerTool() {},
+    registerMessageRenderer() {},
+    registerCommand() {},
+    registerShortcut() {},
+    sendMessage() {},
+    getThinkingLevel() {},
+    on() {},
+  }));
 });

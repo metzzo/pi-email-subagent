@@ -61,51 +61,121 @@ export function directMutationAliasSerializationCapability(): UnavailablePiCoreC
 
 interface Feature {
   path: string;
-  present: (module: Record<string, unknown>) => boolean;
+  present: (surface: unknown) => boolean;
 }
 
-function callable(value: unknown): boolean {
-  return typeof value === "function";
+const MAX_REPORTED_MISSING_FEATURES = 32;
+
+/** Property access is guarded so a malformed optional constructor/prototype cannot mask the compatibility diagnostic. */
+function member(surface: unknown, path: readonly string[]): unknown {
+  let current = surface;
+  try {
+    for (const part of path) {
+      if ((typeof current !== "object" || current === null) && typeof current !== "function") return undefined;
+      current = Reflect.get(current, part);
+    }
+    return current;
+  } catch {
+    return undefined;
+  }
+}
+
+function callablePath(...path: string[]): Feature["present"] {
+  return (surface) => typeof member(surface, path) === "function";
+}
+
+function objectPath(...path: string[]): Feature["present"] {
+  return (surface) => {
+    const value = member(surface, path);
+    return typeof value === "object" && value !== null;
+  };
+}
+
+function valuePath(type: "string" | "number", ...path: string[]): Feature["present"] {
+  return (surface) => typeof member(surface, path) === type;
 }
 
 const CODING_AGENT_FEATURES: Feature[] = [
-  { path: "getAgentDir", present: (module) => callable(module.getAgentDir) },
-  { path: "defineTool", present: (module) => callable(module.defineTool) },
-  { path: "createAgentSession", present: (module) => callable(module.createAgentSession) },
-  { path: "renderDiff", present: (module) => callable(module.renderDiff) },
-  { path: "truncateHead", present: (module) => callable(module.truncateHead) },
-  { path: "formatSize", present: (module) => callable(module.formatSize) },
-  { path: "SessionManager.open", present: (module) => callable((module.SessionManager as { open?: unknown } | undefined)?.open) },
-  { path: "SessionManager.create", present: (module) => callable((module.SessionManager as { create?: unknown } | undefined)?.create) },
-  { path: "ModelRuntime.create", present: (module) => callable((module.ModelRuntime as { create?: unknown } | undefined)?.create) },
-  { path: "ModelRuntime.prototype.getProviderAuthStatus", present: (module) => callable((module.ModelRuntime as { prototype?: { getProviderAuthStatus?: unknown } } | undefined)?.prototype?.getProviderAuthStatus) },
-  { path: "ModelRegistry.prototype.getProviderAuthStatus", present: (module) => callable((module.ModelRegistry as { prototype?: { getProviderAuthStatus?: unknown } } | undefined)?.prototype?.getProviderAuthStatus) },
-  { path: "SettingsManager.create", present: (module) => callable((module.SettingsManager as { create?: unknown } | undefined)?.create) },
-  { path: "SettingsManager.fromStorage", present: (module) => callable((module.SettingsManager as { fromStorage?: unknown } | undefined)?.fromStorage) },
-  { path: "SettingsManager.prototype.getGlobalSettings", present: (module) => callable((module.SettingsManager as { prototype?: { getGlobalSettings?: unknown } } | undefined)?.prototype?.getGlobalSettings) },
-  { path: "SettingsManager.prototype.getProjectSettings", present: (module) => callable((module.SettingsManager as { prototype?: { getProjectSettings?: unknown } } | undefined)?.prototype?.getProjectSettings) },
-  { path: "DefaultResourceLoader", present: (module) => callable(module.DefaultResourceLoader) },
-  { path: "CONFIG_DIR_NAME", present: (module) => typeof module.CONFIG_DIR_NAME === "string" },
-  { path: "DEFAULT_MAX_BYTES", present: (module) => typeof module.DEFAULT_MAX_BYTES === "number" },
-  { path: "DEFAULT_MAX_LINES", present: (module) => typeof module.DEFAULT_MAX_LINES === "number" },
+  { path: "getAgentDir", present: callablePath("getAgentDir") },
+  { path: "defineTool", present: callablePath("defineTool") },
+  { path: "createAgentSession", present: callablePath("createAgentSession") },
+  { path: "renderDiff", present: callablePath("renderDiff") },
+  { path: "truncateHead", present: callablePath("truncateHead") },
+  { path: "formatSize", present: callablePath("formatSize") },
+  { path: "SessionManager.open", present: callablePath("SessionManager", "open") },
+  { path: "SessionManager.create", present: callablePath("SessionManager", "create") },
+  { path: "SessionManager.prototype.getBranch", present: callablePath("SessionManager", "prototype", "getBranch") },
+  { path: "SessionManager.prototype.getSessionId", present: callablePath("SessionManager", "prototype", "getSessionId") },
+  { path: "SessionManager.prototype.appendCustomEntry", present: callablePath("SessionManager", "prototype", "appendCustomEntry") },
+  { path: "ModelRuntime.create", present: callablePath("ModelRuntime", "create") },
+  { path: "ModelRuntime.prototype.getModel", present: callablePath("ModelRuntime", "prototype", "getModel") },
+  { path: "ModelRuntime.prototype.getAuth", present: callablePath("ModelRuntime", "prototype", "getAuth") },
+  { path: "ModelRuntime.prototype.getProviderAuthStatus", present: callablePath("ModelRuntime", "prototype", "getProviderAuthStatus") },
+  { path: "ModelRuntime.prototype.registerNativeProvider", present: callablePath("ModelRuntime", "prototype", "registerNativeProvider") },
+  { path: "ModelRuntime.prototype.registerProvider", present: callablePath("ModelRuntime", "prototype", "registerProvider") },
+  { path: "ModelRegistry.prototype.getRegisteredProviderIds", present: callablePath("ModelRegistry", "prototype", "getRegisteredProviderIds") },
+  { path: "ModelRegistry.prototype.getRegisteredNativeProvider", present: callablePath("ModelRegistry", "prototype", "getRegisteredNativeProvider") },
+  { path: "ModelRegistry.prototype.getRegisteredProviderConfig", present: callablePath("ModelRegistry", "prototype", "getRegisteredProviderConfig") },
+  { path: "ModelRegistry.prototype.getProviderAuthStatus", present: callablePath("ModelRegistry", "prototype", "getProviderAuthStatus") },
+  { path: "ModelRegistry.prototype.getAvailable", present: callablePath("ModelRegistry", "prototype", "getAvailable") },
+  { path: "ModelRegistry.prototype.getAll", present: callablePath("ModelRegistry", "prototype", "getAll") },
+  { path: "SettingsManager.create", present: callablePath("SettingsManager", "create") },
+  { path: "SettingsManager.fromStorage", present: callablePath("SettingsManager", "fromStorage") },
+  { path: "SettingsManager.inMemory", present: callablePath("SettingsManager", "inMemory") },
+  { path: "SettingsManager.prototype.getGlobalSettings", present: callablePath("SettingsManager", "prototype", "getGlobalSettings") },
+  { path: "SettingsManager.prototype.getProjectSettings", present: callablePath("SettingsManager", "prototype", "getProjectSettings") },
+  { path: "SettingsManager.prototype.drainErrors", present: callablePath("SettingsManager", "prototype", "drainErrors") },
+  { path: "SettingsManager.prototype.applyOverrides", present: callablePath("SettingsManager", "prototype", "applyOverrides") },
+  { path: "AgentSession.prototype.subscribe", present: callablePath("AgentSession", "prototype", "subscribe") },
+  { path: "AgentSession.prototype.dispose", present: callablePath("AgentSession", "prototype", "dispose") },
+  { path: "AgentSession.prototype.getActiveToolNames", present: callablePath("AgentSession", "prototype", "getActiveToolNames") },
+  { path: "AgentSession.prototype.prompt", present: callablePath("AgentSession", "prototype", "prompt") },
+  { path: "AgentSession.prototype.abort", present: callablePath("AgentSession", "prototype", "abort") },
+  { path: "AgentSession.prototype.setThinkingLevel", present: callablePath("AgentSession", "prototype", "setThinkingLevel") },
+  { path: "AgentSession.prototype.setSteeringMode", present: callablePath("AgentSession", "prototype", "setSteeringMode") },
+  { path: "AgentSession.prototype.setFollowUpMode", present: callablePath("AgentSession", "prototype", "setFollowUpMode") },
+  { path: "DefaultResourceLoader", present: callablePath("DefaultResourceLoader") },
+  { path: "CONFIG_DIR_NAME", present: valuePath("string", "CONFIG_DIR_NAME") },
+  { path: "DEFAULT_MAX_BYTES", present: valuePath("number", "DEFAULT_MAX_BYTES") },
+  { path: "DEFAULT_MAX_LINES", present: valuePath("number", "DEFAULT_MAX_LINES") },
 ];
 
 const AI_FEATURES: Feature[] = [
-  { path: "StringEnum", present: (module) => callable(module.StringEnum) },
+  { path: "StringEnum", present: callablePath("StringEnum") },
 ];
 
 const TUI_FEATURES: Feature[] = [
-  { path: "Box", present: (module) => callable(module.Box) },
-  { path: "Key", present: (module) => typeof module.Key === "object" && module.Key !== null },
-  { path: "Text", present: (module) => callable(module.Text) },
-  { path: "matchesKey", present: (module) => callable(module.matchesKey) },
-  { path: "truncateToWidth", present: (module) => callable(module.truncateToWidth) },
-  { path: "wrapTextWithAnsi", present: (module) => callable(module.wrapTextWithAnsi) },
+  { path: "Box", present: callablePath("Box") },
+  { path: "Key", present: objectPath("Key") },
+  { path: "Text", present: callablePath("Text") },
+  { path: "matchesKey", present: callablePath("matchesKey") },
+  { path: "truncateToWidth", present: callablePath("truncateToWidth") },
+  { path: "wrapTextWithAnsi", present: callablePath("wrapTextWithAnsi") },
 ];
 
 const TYPEBOX_FEATURES: Feature[] = [
-  { path: "Type", present: (module) => typeof module.Type === "object" && module.Type !== null },
+  { path: "Type", present: objectPath("Type") },
 ];
+
+const EXTENSION_API_FEATURES: Feature[] = [
+  { path: "registerTool", present: callablePath("registerTool") },
+  { path: "registerMessageRenderer", present: callablePath("registerMessageRenderer") },
+  { path: "registerCommand", present: callablePath("registerCommand") },
+  { path: "registerShortcut", present: callablePath("registerShortcut") },
+  { path: "sendMessage", present: callablePath("sendMessage") },
+  { path: "getThinkingLevel", present: callablePath("getThinkingLevel") },
+  { path: "on", present: callablePath("on") },
+];
+
+function unsupportedRuntimeError(missing: readonly string[]): Error {
+  const shown = missing.slice(0, MAX_REPORTED_MISSING_FEATURES);
+  const omitted = missing.length - shown.length;
+  const omission = omitted > 0 ? `, ... (${omitted} additional required feature(s) omitted)` : "";
+  return new Error(
+    `pi-email-subagent requires the Pi ${SUPPORTED_PI_VERSION} public API surface; missing required feature(s): ${shown.join(", ")}${omission}. `
+    + `Install Pi ${SUPPORTED_PI_VERSION} or use an extension release explicitly tested for your Pi version. Structural probes improve failure diagnostics but do not certify behavioral compatibility.`,
+  );
+}
 
 export function assertPiRuntimeFeatures(
   codingAgent: Record<string, unknown>,
@@ -119,12 +189,15 @@ export function assertPiRuntimeFeatures(
     ...TUI_FEATURES.filter((feature) => !feature.present(tui)).map((feature) => `@earendil-works/pi-tui.${feature.path}`),
     ...TYPEBOX_FEATURES.filter((feature) => !feature.present(typebox)).map((feature) => `typebox.${feature.path}`),
   ];
-  if (missing.length > 0) {
-    throw new Error(
-      `pi-email-subagent requires the Pi ${SUPPORTED_PI_VERSION} public API surface; missing required feature(s): ${missing.join(", ")}. `
-      + `Install Pi ${SUPPORTED_PI_VERSION} or use an extension release explicitly tested for your Pi version.`,
-    );
-  }
+  if (missing.length > 0) throw unsupportedRuntimeError(missing);
+}
+
+/** Verify the actual host facade before any registration or broker/state construction. */
+export function assertExtensionApiFeatures(pi: unknown): void {
+  const missing = EXTENSION_API_FEATURES
+    .filter((feature) => !feature.present(pi))
+    .map((feature) => `ExtensionAPI.${feature.path}`);
+  if (missing.length > 0) throw unsupportedRuntimeError(missing);
 }
 
 export function assertSupportedPiRuntime(): void {
