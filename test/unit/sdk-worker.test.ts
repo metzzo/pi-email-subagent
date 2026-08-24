@@ -191,7 +191,7 @@ describe("SDK worker failures", () => {
     assert.deepEqual(record, recordBefore, "cleanup also suppresses stale session mutation");
   });
 
-  it("keeps cleanup pending through a late successful abort instead of treating its caller deadline as cancellation", async () => {
+  it("attempts disposal at the abort deadline while keeping cleanup pending through a late successful abort", async () => {
     const worker = new SdkWorker({} as never);
     let releaseAbort!: () => void;
     const abortSettled = new Promise<void>((resolve) => { releaseAbort = resolve; });
@@ -211,7 +211,7 @@ describe("SDK worker failures", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(settled, false, "the authoritative cleanup operation remains pending after the broker deadline");
-    assert.equal(disposed, false, "disposal waits for actual abort settlement");
+    assert.equal(disposed, true, "disposal progresses once at the abort response deadline");
 
     releaseAbort();
     const report = await cleanup;
@@ -219,6 +219,68 @@ describe("SDK worker failures", () => {
     assert.equal(report.dispose, "succeeded");
     assert.equal(report.quiescence, "verified");
     assert.equal(disposed, true);
+  });
+
+  it("attempts dispose exactly once when abort never settles and repeated cleanup callers join", async () => {
+    const worker = new SdkWorker({} as never);
+    let aborts = 0;
+    let disposals = 0;
+    const session = {
+      isStreaming: true,
+      abort: async () => { aborts += 1; await new Promise<void>(() => undefined); },
+      dispose: () => { disposals += 1; },
+    };
+    (worker as unknown as { session: typeof session }).session = session;
+    const first = worker.cleanup({ abortTimeoutMs: 15 });
+    const second = worker.cleanup({ abortTimeoutMs: 1 });
+    assert.equal(first, second);
+    let settled = false;
+    void first.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(aborts, 1);
+    assert.equal(disposals, 1);
+    assert.equal(settled, false);
+  });
+
+  it("retains late abort rejection and dispose failure after deadline progression", async () => {
+    const worker = new SdkWorker({} as never);
+    let rejectAbort!: (error: Error) => void;
+    const abort = new Promise<void>((_resolve, reject) => { rejectAbort = reject; });
+    let disposals = 0;
+    const session = {
+      isStreaming: true,
+      abort: async () => abort,
+      dispose: () => { disposals += 1; throw new Error("dispose failed first"); },
+    };
+    (worker as unknown as { session: typeof session }).session = session;
+    const cleanup = worker.cleanup({ abortTimeoutMs: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(disposals, 1);
+    rejectAbort(new Error("late abort failed"));
+    const report = await cleanup;
+    assert.equal(report.abort, "failed");
+    assert.equal(report.dispose, "failed");
+    assert.equal(report.providerQuiescent, false);
+    assert.equal(report.quiescence, "unknown");
+    assert.match(report.detail ?? "", /abort failed|dispose failed/);
+    assert.equal(disposals, 1);
+  });
+
+  it("disposes once after an abort settles just before its deadline", async () => {
+    const worker = new SdkWorker({} as never);
+    let aborts = 0;
+    let disposals = 0;
+    const session = {
+      isStreaming: true,
+      abort: async () => { aborts += 1; await new Promise((resolve) => setTimeout(resolve, 5)); },
+      dispose: () => { disposals += 1; },
+    };
+    (worker as unknown as { session: typeof session }).session = session;
+    const report = await worker.cleanup({ abortTimeoutMs: 50 });
+    assert.equal(aborts, 1);
+    assert.equal(disposals, 1);
+    assert.equal(report.abort, "succeeded");
+    assert.equal(report.dispose, "succeeded");
   });
 
   it("retains generation-level Bash process risk after the tool reports success", async () => {

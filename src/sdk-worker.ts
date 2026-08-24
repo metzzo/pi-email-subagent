@@ -509,7 +509,7 @@ export class SdkWorker implements WorkerTransport {
     }
   }
 
-  cleanup(_options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
+  cleanup(options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
     if (this.cleanupPromise) return this.cleanupPromise;
     this.disposed = true;
     this.startGeneration += 1;
@@ -526,30 +526,48 @@ export class SdkWorker implements WorkerTransport {
     const operation = (async (): Promise<WorkerCleanupReport> => {
       let abort: WorkerCleanupReport["abort"] = "succeeded";
       let dispose: WorkerCleanupReport["dispose"] = "succeeded";
-      let providerQuiescent = !session?.isStreaming;
-      let detail: string | undefined;
-      if (session?.isStreaming) {
-        // The broker owns caller responsiveness. A timeout there is not
-        // cancellation here: this one authoritative operation stays pending
-        // until Pi's abort actually settles, then disposes the session once.
+      const wasStreaming = Boolean(session?.isStreaming);
+      let providerQuiescent = !wasStreaming;
+      const details: string[] = [];
+      let disposeStarted = false;
+      const disposeOnce = (): void => {
+        if (disposeStarted) return;
+        disposeStarted = true;
         try {
-          await session.abort();
-          abort = "succeeded";
-          providerQuiescent = true;
+          session?.dispose();
         } catch (error) {
-          abort = "failed";
-          providerQuiescent = false;
-          detail = safeErrorSummary(error);
+          dispose = "failed";
+          details.push(safeErrorSummary(error));
+        } finally {
+          this.listeners.clear();
         }
-      }
-      try {
-        session?.dispose();
-      } catch (error) {
-        dispose = "failed";
-        detail = safeErrorSummary(error);
-      } finally {
-        this.listeners.clear();
-      }
+      };
+
+      if (wasStreaming) {
+        // Transform Pi's abort into an always-observed outcome. The response
+        // deadline progresses disposal but never cancels or settles this one
+        // authoritative cleanup operation.
+        const abortOutcome = Promise.resolve().then(() => session!.abort()).then(
+          () => ({ state: "succeeded" as const }),
+          (error: unknown) => ({ state: "failed" as const, detail: safeErrorSummary(error) }),
+        );
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadlineMs = Math.max(1, Math.min(MAX_TIMER_DELAY_MS, options.abortTimeoutMs));
+        await Promise.race([
+          abortOutcome.then(() => "abort" as const),
+          new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), deadlineMs); }),
+        ]);
+        if (timer) clearTimeout(timer);
+        // Exactly one disposal attempt follows the first abort-settlement or
+        // deadline boundary, even while a late abort remains observed.
+        disposeOnce();
+        const outcome = await abortOutcome;
+        abort = outcome.state;
+        providerQuiescent = outcome.state === "succeeded";
+        if (outcome.state === "failed") details.push(outcome.detail);
+      } else disposeOnce();
+
+      const detail = details.length > 0 ? safeErrorSummary(details.join("; ")) : undefined;
       const tools = activeTools.map((tool) => ({
         ...tool,
         quiescence: "unknown" as const,
