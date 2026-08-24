@@ -207,10 +207,49 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
+  it("leaves requests from different senders open when a worker emits only final text", async () => {
+    const { broker, workers, main, root } = await setup({ roles: delegatingRoles() });
+    try {
+      const mainRequest = await broker.send(broker.mainAddress, {
+        to: "worker.multi-sender-target@gpt-5.4.com",
+        subject: "Main obligation",
+        message: "Reply exactly to main.",
+        priority: "low",
+      });
+      await broker.send(broker.mainAddress, {
+        to: "worker.multi-sender-parent@gpt-5.4.com",
+        subject: "Parent obligation",
+        message: "Delegate one independent request.",
+        priority: "low",
+      });
+      const parentRequest = await workers[1]!.send({
+        to: mainRequest.envelope.to,
+        subject: "Parent child obligation",
+        message: "Reply exactly to the parent.",
+        priority: "high",
+      });
+      workers[0]!.settle("Combined final assistant text cannot be attributed to either sender.");
+      await eventually(() => assert.equal(workers[0]!.prompts.length, 2));
+
+      assert.deepEqual(
+        broker.fetchUnanswered(mainRequest.envelope.to).map((email) => email.id).sort(),
+        [mainRequest.envelope.id, parentRequest.envelope.id].sort(),
+      );
+      assert.equal(main.deliveries.length, 0);
+      const journal = (await readFile(join(root, "state", "mail.jsonl"), "utf8"))
+        .split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; id?: string });
+      for (const id of [mainRequest.envelope.id, parentRequest.envelope.id]) {
+        assert.equal(journal.some((event) => event.type === "email.answered" && event.id === id), false);
+      }
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("automatically follows up twice, then escalates a truly silent worker", async () => {
     const { broker, workers, main } = await setup({ responseReminderLimit: 2 });
     try {
-      await broker.send(broker.mainAddress, {
+      const request = await broker.send(broker.mainAddress, {
         to: "worker.forgetful@gpt-5.4.com",
         subject: "Must answer",
         message: "Return a result.",
@@ -231,6 +270,8 @@ describe("AgentBroker end-to-end routing", () => {
         assert.equal(main.failures.length, 1);
       });
       assert.match(main.failures[0]!, /unanswered email/);
+      assert.equal(broker.mailStore.get(request.envelope.id)?.answeredAt, undefined);
+      assert.deepEqual(broker.fetchUnanswered(request.envelope.to).map((email) => email.id), [request.envelope.id]);
     } finally {
       await broker.shutdown();
     }
@@ -267,7 +308,7 @@ describe("AgentBroker end-to-end routing", () => {
   it("surfaces terminal worker errors once with open-obligation and possible-effect recovery guidance", async () => {
     const { broker, workers, main } = await setup({ responseReminderLimit: 2 });
     try {
-      await broker.send(broker.mainAddress, {
+      const request = await broker.send(broker.mainAddress, {
         to: "worker.provider-error@gpt-5.4.com",
         subject: "Run provider request",
         message: "Return a result.",
@@ -299,6 +340,15 @@ describe("AgentBroker end-to-end routing", () => {
       assert.match(main.failures[0]!, /current batch includes mutation\/shell\/custom work.*effects may exist/is);
       assert.match(main.failures[0]!, /Work and Conversation.*explicit same-identity restart/is);
       assert.doesNotMatch(main.failures[0]!, /Run provider request|Return a result/);
+      const queued = await broker.send(broker.mainAddress, {
+        to: request.envelope.to,
+        subject: "Queue after possible effect",
+        message: "Do not implicitly restart after recorded effect evidence.",
+        priority: "low",
+      });
+      assert.equal(queued.recipientDisposition, "failed");
+      assert.equal(queued.envelope.deliveryState, "queued");
+      assert.equal(workers.length, 1);
     } finally {
       await broker.shutdown();
     }
