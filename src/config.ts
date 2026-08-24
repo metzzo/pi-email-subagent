@@ -207,7 +207,7 @@ function profileRecord(
   const entries = Object.entries(value);
   const maximum = kind === "role" ? MAX_CONFIG_ROLE_ENTRIES : MAX_CONFIG_ADDRESS_ENTRIES;
   if (entries.length > maximum) {
-    warnings.push(`${label} must contain at most ${maximum} ${kind} entries; ignoring the entire object.`);
+    warnings.push(`${label} must contain at most ${maximum} source properties before canonicalization; ignoring the entire object.`);
     return {};
   }
   const result: Record<string, RoleConfig> = {};

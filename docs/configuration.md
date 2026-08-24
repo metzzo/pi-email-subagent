@@ -86,14 +86,14 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
 - Resolution order per configured profile field: exact address → role → defaults. An initial `send_email.effort` overrides those three levels only while creating an unknown identity; the resulting effort is persisted. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
-- `canSpawn` is retained as the compatibility key for **subagent delegation permission**, not creation-only permission. It defaults to `false`. When false, a subagent cannot send a new response-required request to any other subagent, known or unknown; exact replies it owns and ordinary mail to main remain allowed. Main is never delegation-restricted. Set `canSpawn: true` explicitly on a role or exact address only when nested dependency parking/blocker semantics are wanted.
+- `canSpawn` is parsed only for configuration compatibility. Nested response-required delegation is fail-closed disabled for every subagent on Pi 0.81.1 because child-reply presentation has no durable recoverable append receipt. Exact replies the worker owns and ordinary mail to main remain allowed.
 - Unknown tool names are dropped at worker start and noted in the agent's activity log.
 - Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
 Configuration-derived prompt content is bounded without changing semantic fields:
 
-- at most 64 canonical roles and 256 canonical exact-address overrides;
+- each source layer accepts at most 64 raw role properties and 256 raw address properties before canonicalization (canonical collisions still count toward that raw input bound), and the merged result separately stays within 64/256 canonical keys;
 - at most 128 unique effective tools per profile, including the always-required mail tools;
 - each complete tool name is at most 100 UTF-8 bytes;
 - `instructions` and `modelPolicy` are each at most 16 KiB of UTF-8;
@@ -114,7 +114,7 @@ The email domain remains a model ID. Provider choice is not configured in `subag
 - an existing identity always resolves its persisted exact provider/model; and
 - a missing exact tuple remains unavailable and is never replaced by a same-ID candidate from another provider.
 
-The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Legacy accepted mail without that field migrates only when the model ID has one global candidate; duplicates remain unavailable because the original provider cannot be inferred. Provider definitions, exact API/long-cache compatibility metadata, and non-secret auth-source status are immutable extension-start snapshots, so removal/reintroduction, metadata changes, and credential-source changes take effect only after reload. See [Provider-aware durable model routing](provider-aware-model-routing.md).
+The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Before that event, the extension prepares the exact isolated runtime/model object later consumed by worker execution and matches all non-secret request model fields. Header-bearing and dynamic OAuth/catalog extension providers fail closed because Pi 0.81.1 cannot prove their isolated provenance. Self-contained native/static provider registrations reuse the same public object/config and await public `getAvailable()` to join Pi's pending auth/availability refresh before readiness. Legacy accepted mail without binding intent migrates only when the model ID has one global candidate; duplicates remain unavailable. See [Provider-aware durable model routing](provider-aware-model-routing.md).
 
 ## Pi retry and transport settings
 
@@ -127,7 +127,7 @@ Provider retry/transport policy is not duplicated in `subagents.json`. At extens
 - later session setters, concurrent effort changes, and resumed sessions write only worker memory; and
 - Pi defaults are not raised. `retry.provider.maxRetries` remains `0` unless the user explicitly configures it.
 
-The snapshot preserves effective retry/provider-retry values, transport, HTTP/WebSocket timeouts, compaction, branch summary, shell path/prefix, package/resource paths, and thinking budgets. Invalid settings use Pi's scope fallback and are never rewritten by a worker. Settings changes require extension reload.
+The snapshot preserves effective retry/provider-retry values, transport, HTTP/WebSocket timeouts, compaction, branch summary, shell path/prefix, and thinking budgets. Package, extension, skill, prompt-template, and theme sources are stripped from the worker-local snapshot before resource reload so worker startup cannot install/execute missing packages or inherit main-session extension hooks. Invalid settings use Pi's scope fallback and are never rewritten by a worker. Settings changes require extension reload.
 
 ## Credential-source readiness
 
@@ -153,11 +153,11 @@ See [Provider retry visibility and recovery](provider-retry-recovery.md).
 | `reviewer` | high | read, grep, find, ls + mail | Review with findings and validation; read-only |
 | `worker` | medium | read, grep, find, ls, bash, edit, write + mail | Implement and validate changes |
 
-All default roles explicitly set `canSpawn: false`; nested delegation requires an explicit role or exact-address opt-in. Unknown role names also default to delegation disabled.
+All runtime profiles report nested delegation disabled. Legacy `canSpawn` values do not create an opt-in on Pi 0.81.1.
 
 ## Notes
 
-- A single formatted envelope must fit the smaller of `maxBatchBytes` and the context-safe tool payload budget (currently 48 KB with reserved result overhead), and at most 1952 lines. This ensures the same mail remains retrievable through `fetch_emails`; XML escaping counts toward the byte limit.
+- A single formatted envelope and every complete batch prefix must fit `maxBatchBytes`, the context-safe tool payload budget (currently 48 KB with reserved result overhead), and a conservative selected-model budget of one quarter of `contextWindow - maxTokens`; boundaries never split an envelope. At most 1952 lines are returned by the mail tool. This ensures the same mail remains retrievable through `fetch_emails`; XML escaping counts toward the byte limit.
 - `modelPolicy` replaces the entire model-selection policy bullet list in both the main coordinator prompt and every subagent prompt. The available-model list reflects prospective IDs routable under the current main provider; existing exact bindings can remain usable even when a different provider is preferred.
 - Live-session journal maintenance compacts after more than 8192 excess transition events. It also prunes the oldest terminal mail above `maxRetainedEmails`; queued mail, open obligations, reservations, and retained request/reply pairs remain intact. The cap is soft when protected mail alone exceeds it.
 - Provider, model catalog, and credential changes require an extension reload; worker runtimes snapshot them at session start.

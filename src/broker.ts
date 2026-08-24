@@ -1279,7 +1279,7 @@ export class AgentBroker {
     const effects = currentBatchHasEffectfulWork(record.work)
       ? "Current work evidence indicates mutation, shell, or custom effects may exist."
       : "Current work evidence does not indicate mutation, shell, or custom effects; this is not proof of pre-tool failure.";
-    return `Dependency blocker for child request ${requestId}: ${record.address} failed (${record.provider}/${record.modelId}). ${effects} This is terminal failure status, not a successful result. Ask main to inspect Work and Conversation, perform effect review, and explicitly restart the same identity if recovery is safe; do not resend, redelegate, or switch providers automatically.`;
+    return `Broker-generated dependency blocker (not a worker-authored completion) for child request ${requestId}: ${record.address} failed (${record.provider}/${record.modelId}). ${effects} This is terminal failure status, not a successful result. Ask main to inspect Work and Conversation, perform effect review, and explicitly restart the same identity if recovery is safe; do not resend, redelegate, or switch providers automatically.`;
   }
 
   private async ensureTerminalChildBlockers(record: AgentRecord): Promise<void> {
@@ -1553,6 +1553,7 @@ export class AgentBroker {
         recipientTools: [...(this.liveActiveTools(recipientRecord.address) ?? recipientRecord.tools)],
         recipientState: recipientRecord.state,
         recipientLifecycle: { ...recipientRecord.lifecycle },
+        ...(recipientRecord.cleanup ? { recipientCleanup: clone(recipientRecord.cleanup) } : {}),
       } : {}),
       ...(answeredEmailId ? { answeredEmailId } : {}),
     };

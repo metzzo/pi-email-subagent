@@ -253,6 +253,7 @@ export interface SendEmailResult {
   recipientTools?: string[];
   recipientState?: AgentStatus;
   recipientLifecycle?: LifecyclePolicy;
+  recipientCleanup?: CleanupDiagnostic;
   recipientDisposition: RecipientDisposition;
   expectedReplySubject?: string;
   correlationId: string;

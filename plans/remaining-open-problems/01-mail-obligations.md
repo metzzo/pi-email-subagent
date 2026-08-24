@@ -1,7 +1,7 @@
 # Cluster 1 — Durable Mail and Obligation Semantics
 
-Status: proposed — implementation not started
-Revalidated at: `f32aa1efeb2991cd591cf70f497c7d510d46af01`
+Status: implemented; nested delegation remains deliberately disabled pending an upstream durable presentation receipt
+Implementation commits: historical cluster commits through `16f54eb`, remediation `018f25b` and `1465343`
 Priority: P1
 Depends on: existing `MailStore` reservation/answer atomicity and exact settlement ownership
 Blocks: release, truthful failed-recipient recovery, safe nested delegation

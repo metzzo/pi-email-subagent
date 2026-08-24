@@ -448,7 +448,7 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.equal(result.timedOut, true);
       assert.deepEqual(result.items.map((item) => [item.requestId, item.state]), [[requestId, "pending"]]);
       assert.match(toolText(waitEnd), /pending requests remain correlated/i);
-      assert.match(toolText(waitEnd), /later replies.*delivered automatically.*main/i);
+      assert.match(toolText(waitEnd), /ordinary main presentation is attempted.*no durable.*acknowledgement/i);
       assert.match(toolText(waitEnd), /no immediate.*wait_for_replies.*keep.*alive/i);
 
       const mainCompletion = await client.waitFor(
@@ -638,7 +638,7 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
-  it("parks an opted-in real nested parent until the exact child reply closes its dependency", { timeout: 300_000 }, async () => {
+  it.skip("legacy real nested parent (nested delegation is fail-closed disabled on Pi 0.81.1)", { timeout: 300_000 }, async () => {
     const { client, agentDir, sessionId } = await start({ config: { roles: { scout: { canSpawn: true } } } });
     try {
       const mark = client.mark();

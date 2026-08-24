@@ -379,6 +379,45 @@ describe("broker hardening", () => {
     }
   });
 
+  it("keeps namespace shutdown blocked while a detached terminal-child writer can still append", async () => {
+    const { broker, workers } = await setup({ lifecycle: { ...structuredClone(DEFAULT_CONFIG.lifecycle), brokerShutdownTimeoutMs: 2_000 } });
+    let release!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
+    try {
+      const upstream = await broker.send(broker.mainAddress, {
+        to: "worker.shutdown-parent@gpt-5.4.com", subject: "Parent", message: "Legacy parent fixture.", priority: "low",
+      });
+      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
+      records.get(upstream.envelope.to)!.canSpawn = true;
+      await workers[0]!.send({
+        to: "worker.shutdown-child@gpt-5.4.com", subject: "Child", message: "Legacy child fixture.", priority: "low",
+      });
+      records.get(upstream.envelope.to)!.canSpawn = false;
+      const originalReserve = broker.mailStore.reserveReply.bind(broker.mailStore);
+      broker.mailStore.reserveReply = async (...args) => {
+        enteredResolve();
+        await hold;
+        return originalReserve(...args);
+      };
+      workers[1]!.fail("terminal child failure");
+      await entered;
+      let closed = false;
+      const closing = broker.shutdown().then(() => { closed = true; });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(closed, false, "shutdown barrier retains ownership while the detached blocker writer is pending");
+      release();
+      await closing;
+      const blockers = broker.mailStore.list().filter((email) =>
+        email.kind === "reply" && /Broker-generated dependency blocker/.test(email.message));
+      assert.equal(blockers.length, 1);
+    } finally {
+      release?.();
+      await broker.shutdown().catch(() => undefined);
+    }
+  });
+
   it("durably wakes the exact parked legacy parent when its last child is cancelled", async () => {
     const { broker, workers } = await setup();
     try {

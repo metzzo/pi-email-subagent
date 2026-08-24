@@ -119,6 +119,7 @@ const CODING_AGENT_FEATURES: Feature[] = [
   { path: "SessionManager.prototype.appendCustomEntry", present: callablePath("SessionManager", "prototype", "appendCustomEntry") },
   { path: "ModelRuntime.create", present: callablePath("ModelRuntime", "create") },
   { path: "ModelRuntime.prototype.getModel", present: callablePath("ModelRuntime", "prototype", "getModel") },
+  { path: "ModelRuntime.prototype.getAvailable", present: callablePath("ModelRuntime", "prototype", "getAvailable") },
   { path: "ModelRuntime.prototype.getProviderAuthStatus", present: callablePath("ModelRuntime", "prototype", "getProviderAuthStatus") },
   { path: "ModelRuntime.prototype.registerNativeProvider", present: callablePath("ModelRuntime", "prototype", "registerNativeProvider") },
   { path: "ModelRuntime.prototype.registerProvider", present: callablePath("ModelRuntime", "prototype", "registerProvider") },

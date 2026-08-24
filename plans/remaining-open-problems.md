@@ -1,10 +1,11 @@
 # Remaining Open Problems — Clustered Release Plan
 
 Date: 2026-08-23
-Status: proposed — implementation not started
-Implementation baseline: `770da60d99278e45cf691698a0edbe62a84e9ed8`
-Revalidation/planning baseline: `f32aa1efeb2991cd591cf70f497c7d510d46af01`
-Release posture: **no-go while any enabled-by-default P1 extension defect remains open**
+Status: extension-owned work implemented; final evidence regeneration in progress
+Historical implementation baseline: `770da60d99278e45cf691698a0edbe62a84e9ed8`
+Explicit release evidence base: `4a494e06a1258a26898ec4bba8c9f8123b6613c2`
+Remediation commits: `018f25b` (presentation/lock/redaction), `1465343` (runtime/admission/start quarantine), final docs/evidence commit recorded by release metadata
+Release posture: extension-owned P1 findings are closed; generic Pi process receipt, durable session-presentation receipt, and mutation-alias identity remain external gates
 
 Every finding in these cluster plans was revalidated against `f32aa1e`; the only repository change between the implementation and revalidation baselines was the first overview plan.
 
@@ -12,7 +13,7 @@ Every finding in these cluster plans was revalidated against `f32aa1e`; the only
 
 This is the index and shared release contract for the remaining work. Detailed mechanisms, failure timelines, decisions, work packages, and red/green gates are split into five implementation clusters so one large plan does not become a second source of truth.
 
-The local baseline artifacts `/tmp/pi-subagent-final-770da60/validate.log`, `check-package.log`, and `check-secrets.log` record a green deterministic suite and passing package/secret policy at the implementation baseline. Those local artifacts are not repository fixtures, and those results do not cover the open branches below.
+Historical `/tmp` artifacts are not release evidence. The final candidate evidence is regenerated under `.test-workspaces/review-remediation/` from the explicit base above and records base/candidate metadata, canonical changed files, complete command logs, and exit statuses.
 
 ## Cluster map
 

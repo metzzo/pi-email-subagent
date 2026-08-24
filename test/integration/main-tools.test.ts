@@ -43,7 +43,7 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   const wait = tools[1];
   assert.equal(wait.executionMode, "sequential");
   assert.match(wait.description, /bounded (observation|collection) window/i);
-  assert.match(wait.description, /late replies.*delivered automatically/i);
+  assert.match(wait.description, /late replies remain durable.*ordinary main presentation is attempted.*without a durable append receipt/i);
   assert.match(wait.description, /at-most-one live presentation.*not crash-proof exactly once.*no staged tool-result append receipt/i);
   const waitGuidelines = wait.promptGuidelines ?? [];
   assert.match(waitGuidelines.join("\n"), /do not.*rejoin.*keep.*alive/i);
@@ -381,10 +381,10 @@ it("guides timed-out pending waits without changing exact structured results", a
   assert.match(text, /at most one live presentation.*Pi 0\.81\.1.*no staged tool-result append receipt/is);
   assert.match(text, /mail journal answered.*before.*tool result.*durably present/is);
   assert.match(text, /pending requests remain correlated/i);
-  assert.match(text, /later replies.*delivered automatically.*main/i);
-  assert.match(text, /no immediate.*wait_for_replies.*keep.*alive/i);
-  assert.match(text, /rejoin only.*deliberate synchronous.*(collection|status).*window/i);
-  assert.match(text, /broker\/session restoration/i, "the same structured branch remains accurate during pending shutdown");
+  assert.match(text, /ordinary main presentation is attempted.*no durable sendMessage append acknowledgement/i);
+  assert.match(text, /no immediate keepalive rejoin/i);
+  assert.match(text, /rejoin.*stable request ID.*deliberate (collection|status).*after restart/is);
+  assert.match(text, /after restart.*presentation uncertainty/i, "the same structured branch remains accurate during pending shutdown");
   assert.doesNotMatch(text, /request (expired|was lost)|reply already exists/i);
 
   const details = rendered.details as { result: WaitForRepliesResult };
@@ -440,7 +440,7 @@ it("keeps timeout guidance and exact IDs within output bounds for the largest no
   const rendered = await renderWait({ complete: false, timedOut: true, items });
   const text = (rendered.content[0] as { text: string }).text;
   assert.match(text, /pending requests remain correlated/i);
-  assert.match(text, /no immediate.*wait_for_replies/i);
+  assert.match(text, /no immediate keepalive rejoin/i);
   for (const item of items) assert.match(text, new RegExp(item.requestId));
   assert.ok(Buffer.byteLength(text) <= DEFAULT_MAX_BYTES);
   assert.ok(text.split("\n").length <= DEFAULT_MAX_LINES);

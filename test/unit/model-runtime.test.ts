@@ -27,12 +27,17 @@ const model = {
 function sourceRegistry(
   status: CredentialStatus = { configured: true, source: "stored" },
   sourceModel: Model<any> = model,
-  registered: readonly string[] = [],
+  registered: "safe" | "unsafe" | undefined = undefined,
 ): ModelRegistry {
+  const config = registered === "unsafe"
+    ? { oauth: { name: "dynamic" } }
+    : registered === "safe"
+      ? { api: "custom", baseUrl: "https://example.invalid", apiKey: "$FIXTURE_KEY", streamSimple() {} }
+      : undefined;
   return {
     getAll: () => [sourceModel],
-    getRegisteredProviderIds: () => registered,
-    getRegisteredProviderConfig: () => undefined,
+    getRegisteredProviderIds: () => registered ? [sourceModel.provider] : [],
+    getRegisteredProviderConfig: () => config,
     getRegisteredNativeProvider: () => undefined,
     getProviderAuthStatus: () => status,
   } as unknown as ModelRegistry;
@@ -45,6 +50,9 @@ function targetRuntime(
   return {
     getModel: (provider: string, id: string) => provider === runtimeModel.provider && id === runtimeModel.id ? runtimeModel : undefined,
     getProviderAuthStatus: () => status,
+    registerProvider() {},
+    registerNativeProvider() {},
+    getAvailable: async () => [runtimeModel],
     getAuth: async () => { throw new Error("secret resolution must not be used for equivalence"); },
   } as unknown as ModelRuntime;
 }
@@ -117,8 +125,9 @@ describe("worker model runtime", () => {
 
   it("rejects header provenance and extension-registered provider hooks without exposing values", async () => {
     const withHeaders = { ...structuredClone(model), headers: { authorization: "SENTINEL_SECRET_HEADER" } } as Model<any>;
-    assert.throws(
-      () => new WorkerRuntimeFactory(sourceRegistry(undefined, withHeaders), {}, async () => targetRuntime()),
+    await assert.rejects(
+      new WorkerRuntimeFactory(sourceRegistry(undefined, withHeaders), {}, async () => targetRuntime())
+        .create("builtin-provider", "model-a"),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /header.*provenance.*cannot be proven/i);
@@ -129,12 +138,27 @@ describe("worker model runtime", () => {
 
     let created = false;
     const factory = new WorkerRuntimeFactory(
-      sourceRegistry(undefined, model, ["builtin-provider"]),
+      sourceRegistry(undefined, model, "unsafe"),
       {},
       async () => { created = true; return targetRuntime(); },
     );
-    await assert.rejects(factory.create("builtin-provider", "model-a"), /extension-registered.*readiness receipt.*no email was accepted/i);
-    assert.equal(created, false, "custom hooks are not replayed into a worker runtime");
+    await assert.rejects(factory.create("builtin-provider", "model-a"), /dynamic OAuth.*cannot be proven self-contained.*no email was accepted/i);
+    assert.equal(created, false, "dynamic hooks are not replayed into a worker runtime");
+  });
+
+  it("awaits the public availability refresh after safe static provider registration", async () => {
+    let registered = 0;
+    let readiness = 0;
+    const runtime = targetRuntime() as unknown as ModelRuntime & {
+      registerProvider(): void;
+      getAvailable(): Promise<readonly Model<any>[]>;
+    };
+    runtime.registerProvider = () => { registered += 1; };
+    runtime.getAvailable = async () => { readiness += 1; return [model]; };
+    await new WorkerRuntimeFactory(sourceRegistry(undefined, model, "safe"), {}, async () => runtime)
+      .create("builtin-provider", "model-a");
+    assert.equal(registered, 1);
+    assert.equal(readiness, 1);
   });
 
   it("rejects unsupported source classes before a model request", async () => {

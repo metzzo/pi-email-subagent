@@ -1,7 +1,7 @@
 # Cluster 4 — Crash Recovery and OS Containment
 
-Status: proposed — partly blocked on Pi core
-Revalidated at: `f32aa1efeb2991cd591cf70f497c7d510d46af01`
+Status: extension-owned containment implemented; generic process receipt and mutation-alias identity remain blocked on Pi core/OS
+Implementation commits: historical cluster commits through `16f54eb`, remediation `018f25b` and `1465343`
 Priority: P1 extension defect plus P1 external guarantee
 Depends on: Cluster 3 activated-tool and unknown-effect contracts
 Blocks: writable abandoned-owner recovery and generic cleanup claims

@@ -1,7 +1,7 @@
 # Cluster 2 — Isolated Worker and Provider Boundary
 
-Status: proposed — implementation not started
-Revalidated at: `f32aa1efeb2991cd591cf70f497c7d510d46af01`
+Status: implemented with header-bearing and extension-registered worker routes narrowed fail-closed on Pi 0.81.1
+Implementation commits: historical cluster commits through `16f54eb`, remediation `1465343`
 Priority: P1
 Depends on: exact persisted provider/model binding already implemented
 Blocks: reliable worker startup, effort changes, external-provider release

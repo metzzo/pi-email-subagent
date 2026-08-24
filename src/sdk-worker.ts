@@ -88,7 +88,9 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
           `Answered email: ${result.answeredEmailId ?? "none"}`,
         ];
         if (result.recipientDisposition === "failed") {
-          lines.push("Recipient recovery: mail is accepted and queued; the recipient remains failed and no worker was spawned. Review Work and Conversation, then use explicit manage_agent restart for the same identity and provider binding only after effect review. Do not redelegate the same scope while the original obligation remains open.");
+          lines.push(result.recipientCleanup
+            ? "Recipient recovery: mail is accepted and queued, but cleanup quiescence is unknown. Restart/archive are blocked and capacity remains held; external exact-generation quiescence review is required. Do not resend or redelegate the original scope."
+            : "Recipient recovery: mail is accepted and queued; the recipient remains failed and no worker was spawned. Review Work and Conversation, then use explicit manage_agent restart for the same identity and provider binding only after effect review. Do not redelegate the same scope while the original obligation remains open.");
         }
         if (result.recipientProvider && result.recipientModel) {
           lines.push(`Recipient model: ${result.recipientProvider}/${result.recipientModel}`);
@@ -99,6 +101,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientTools) lines.push(`Recipient tools: ${result.recipientTools.join(", ")}`);
         if (result.recipientState) lines.push(`Recipient state: ${result.recipientState}`);
         if (result.recipientLifecycle) lines.push(`Recipient lifecycle: ${JSON.stringify(result.recipientLifecycle)}`);
+        if (result.recipientCleanup) lines.push(`Recipient cleanup: ${result.recipientCleanup.state} · generation ${result.recipientCleanup.workerGeneration} · quiescence unknown`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
         const message = safeErrorSummary(error);

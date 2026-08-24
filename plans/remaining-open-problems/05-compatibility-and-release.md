@@ -1,7 +1,7 @@
 # Cluster 5 — Pi Compatibility, Operator Contract, and Release Proof
 
-Status: proposed — implementation not started
-Revalidated at: `f32aa1efeb2991cd591cf70f497c7d510d46af01`
+Status: implemented; final full-range evidence regeneration in progress
+Implementation commits: historical cluster commits through `16f54eb`, remediation `018f25b` and `1465343`, final evidence commit recorded in release metadata
 Priority: P2/P3 plus final release gate
 Depends on: settled contracts from Clusters 1–4
 Blocks: compatibility claim and release-ready declaration

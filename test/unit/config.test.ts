@@ -233,8 +233,8 @@ describe("configuration", () => {
     const loaded = loadConfig(agentDir, root, false);
     assert.deepEqual(Object.keys(loaded.config.roles).sort(), Object.keys(loadConfig("/missing", root, false).config.roles).sort());
     assert.deepEqual(loaded.config.addresses, {});
-    assert.match(loaded.warnings.join("\n"), new RegExp(`roles.*at most ${MAX_CONFIG_ROLE_ENTRIES}`, "i"));
-    assert.match(loaded.warnings.join("\n"), new RegExp(`addresses.*at most ${MAX_CONFIG_ADDRESS_ENTRIES}`, "i"));
+    assert.match(loaded.warnings.join("\n"), new RegExp(`roles.*at most ${MAX_CONFIG_ROLE_ENTRIES} source properties before canonicalization`, "i"));
+    assert.match(loaded.warnings.join("\n"), new RegExp(`addresses.*at most ${MAX_CONFIG_ADDRESS_ENTRIES} source properties before canonicalization`, "i"));
   });
 
   it("rejects oversized semantic fields without truncation or raw rejected content", async () => {

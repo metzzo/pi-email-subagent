@@ -1,7 +1,7 @@
 # Cluster 3 — Run Liveness, Capability Truth, and Effect Evidence
 
-Status: proposed — implementation not started
-Revalidated at: `f32aa1efeb2991cd591cf70f497c7d510d46af01`
+Status: implemented; unknown effect evidence remains fail-closed
+Implementation commits: historical cluster commits through `16f54eb`, remediation `1465343`
 Priority: P1/P2
 Depends on: Cluster 2 worker-local settings for reliable real Pi tests
 Blocks: short idle policies, trustworthy capability inspection, safe restart guidance
