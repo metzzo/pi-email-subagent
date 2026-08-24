@@ -32,11 +32,9 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 
 Reply subjects are checked strictly, in order: the referenced email must exist, require a response, be unanswered and not administratively cancelled, have no other reply pending delivery, and be delivered; the sender/recipient pair must match the original exactly; the original subject text must match byte-for-byte. A successful reply atomically reserves the obligation, and the original is marked answered when the reply is delivered. If reply delivery fails, the reservation is released and the requester is re-prompted.
 
-### Mechanical completion replies
+### Completion ownership
 
-When a successful worker run settles with visible final assistant text but leaves a delivered request unanswered, the broker sends that text as the exact reply automatically. The generated reply uses the same durable reservation → delivery → commit protocol as an explicit `send_email`, so an explicit or already-reserved reply remains authoritative and cannot be duplicated. Oversized final text is UTF-8 safely truncated to `maxMessageBytes` with a notice.
-
-If one settled batch contains unanswered requests from multiple senders, the broker sends an honest completion notice instead of forwarding combined text across sender boundaries. A truly silent run, failed automatic delivery, or terminal model error continues through the existing reminder/failure path rather than fabricating a result.
+Only a valid exact `send_email` reply closes a response obligation. Visible final assistant text stays in the worker session and is never copied to one or more request IDs, because the broker cannot prove which request that text substantively answers. A worker that settles with delivered unanswered mail receives bounded mailbox-enforcement prompts. Exhausting those prompts marks the worker failed while leaving every request unanswered and recoverable; no generic terminal notice is created.
 
 ### Limits (defaults; see [configuration.md](configuration.md))
 
