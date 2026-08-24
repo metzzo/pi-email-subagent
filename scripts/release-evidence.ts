@@ -48,6 +48,19 @@ if (JSON.stringify(canonicalPaths) !== JSON.stringify(entryPaths)) {
 git(["diff", "--check", `${base}..${candidate}`]);
 
 const porcelain = String(git(["status", "--porcelain=v1"]));
+const outputDir = resolve(outputInput);
+await mkdir(outputDir, { recursive: true });
+const auditCommand = ["audit", "--omit=dev", "--omit=peer"];
+const audit = spawnSync("npm", auditCommand, { encoding: "utf8" });
+const auditArtifact = "production-audit.log";
+await writeFile(
+  resolve(outputDir, auditArtifact),
+  `$ npm ${auditCommand.join(" ")}\n${audit.stdout ?? ""}${audit.stderr ?? ""}`,
+);
+if (audit.status !== 0) {
+  throw new Error(`npm ${auditCommand.join(" ")} failed (${audit.status}); see ${resolve(outputDir, auditArtifact)}.`);
+}
+
 const metadata = {
   schemaVersion: 1,
   generatedAt: new Date().toISOString(),
@@ -63,8 +76,11 @@ const metadata = {
   changedFileCount: entries.length,
   changedFiles: entries,
   canonicalChangedFileVerification: "parsed git diff --name-status -z equals parsed git diff --name-only -z; git diff --check passed",
+  productionAudit: {
+    command: "npm audit --omit=dev --omit=peer",
+    status: audit.status,
+    artifact: auditArtifact,
+  },
 };
-const outputDir = resolve(outputInput);
-await mkdir(outputDir, { recursive: true });
 await writeFile(resolve(outputDir, "range-metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
 process.stdout.write(`${JSON.stringify(metadata, null, 2)}\n`);

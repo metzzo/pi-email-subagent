@@ -87,14 +87,13 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
 - Resolution order per configured profile field: exact address → role → defaults. An initial `send_email.effort` overrides those three levels only while creating an unknown identity; the resulting effort is persisted. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
 - `canSpawn` is parsed only for configuration compatibility. Nested response-required delegation is fail-closed disabled for every subagent on Pi 0.81.1 because child-reply presentation has no durable recoverable append receipt. Exact replies the worker owns and ordinary mail to main remain allowed.
-- Unknown tool names are dropped at worker start and noted in the agent's activity log.
-- Whether an agent is *writable* is derived from its effective tools (`bash`/`edit`/`write`) — never from the role label. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
+- An unavailable tool name is dropped at worker start and noted in the agent's activity log. Before exact activation is known, every unknown/custom configured tool is classified conservatively as writable and effect-capable; after activation, live capability uses Pi's exact active tool names. Role labels never grant safety or authority. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
 Configuration-derived prompt content is bounded without changing semantic fields:
 
 - each source layer accepts at most 64 raw role properties and 256 raw address properties before canonicalization (canonical collisions still count toward that raw input bound), and the merged result separately stays within 64/256 canonical keys;
-- at most 128 unique effective tools per profile, including the always-required mail tools;
+- each source tools array contains at most 128 raw items before deduplication, and its effective set contains at most 128 unique names including the always-required mail tools;
 - each complete tool name is at most 100 UTF-8 bytes;
 - `instructions` and `modelPolicy` are each at most 16 KiB of UTF-8;
 - control and bidirectional-control characters are rejected from those semantic strings (ordinary newline/tab layout remains allowed in instructions and model policy); and
@@ -102,7 +101,7 @@ Configuration-derived prompt content is bounded without changing semantic fields
 
 An oversized collection/profile field is ignored as a whole at its semantic boundary. Instructions, model policy, and tool names are never truncated into a different value. Required `send_email` and `fetch_emails` capability is preserved by effective-profile resolution.
 
-The main coordinator receives a separate derived **configured capability intent** display, not a claim of live activation. Built-in role entries are attempted first, at most 24 exact-address overrides can be displayed, and the complete display is capped at 8 KiB / 64 lines. Entries that do not fit are omitted whole with a count taken from parsed canonical roles/addresses; no tool name is shortened and no capability hash is substituted. Use `inspect_agent` for the exact bounded live/prospective decision.
+The main coordinator receives a separate derived **configured capability intent** display, not a claim of live activation. Built-in role entries are attempted first, at most 24 exact-address overrides can be displayed, and the complete display is capped at 8 KiB / 64 lines. Entries that do not fit are omitted whole with a count taken from parsed canonical roles/addresses; no tool name is shortened and no capability hash is substituted. The independently bounded available-model section is capped at 6 KiB / 52 lines / 48 entries, includes only complete valid email-domain IDs, labels partial output, reports the exact omitted routable count, and directs exact routing to `inspect_agent`; omitted IDs remain routable. Use `inspect_agent` for the exact bounded live/prospective decision.
 
 ## Provider/model routing
 
@@ -114,7 +113,7 @@ The email domain remains a model ID. Provider choice is not configured in `subag
 - an existing identity always resolves its persisted exact provider/model; and
 - a missing exact tuple remains unavailable and is never replaced by a same-ID candidate from another provider.
 
-The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Before that event, the extension prepares the exact isolated runtime/model object later consumed by worker execution and matches all non-secret request model fields. Header-bearing and dynamic OAuth/catalog extension providers fail closed because Pi 0.81.1 cannot prove their isolated provenance. Self-contained native/static provider registrations reuse the same public object/config and await public `getAvailable()` to join Pi's pending auth/availability refresh before readiness. Legacy accepted mail without binding intent migrates only when the model ID has one global candidate; duplicates remain unavailable. See [Provider-aware durable model routing](provider-aware-model-routing.md).
+The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Before that event, the extension prepares the exact isolated runtime/model object later consumed by worker execution and matches all non-secret request model fields. Header-bearing and dynamic OAuth/catalog extension providers fail closed because Pi 0.81.1 cannot prove their isolated provenance. Native public providers with provider-wide headers, OAuth, refresh hooks, or filter hooks are rejected before worker runtime creation or registration. Demonstrably static registrations reuse the same public object/config, await public `getAvailable()` to join Pi's pending auth/availability refresh, and require the exact provider/model in that available set before readiness. Legacy accepted mail without binding intent migrates only when the model ID has one global candidate; duplicates remain unavailable. See [Provider-aware durable model routing](provider-aware-model-routing.md).
 
 ## Pi retry and transport settings
 
