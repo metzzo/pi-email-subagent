@@ -278,6 +278,14 @@ describe("broker hardening", () => {
       assert.equal(childReply.envelope.deliveryState, "queued");
       assert.equal(broker.mailStore.get(childRequest.envelope.id)?.replyReservedBy, childReply.envelope.id);
       assert.equal(broker.mailStore.get(childRequest.envelope.id)?.answeredAt, undefined);
+      const pendingInspection = broker.inspectAgent(upstream.envelope.to);
+      assert.equal(pendingInspection.archiveBlockers.pendingReplies.count, 1);
+      assert.deepEqual(pendingInspection.archiveBlockers.pendingReplies.requestIds, [childRequest.envelope.id]);
+      assert.equal(
+        pendingInspection.pendingReplies,
+        pendingInspection.archiveBlockers.pendingReplies.count,
+        "inspection uses the canonical blocker classifier for outbound reservations",
+      );
       assert.equal(workers.length, 2);
 
       await broker.restart(upstream.envelope.to);

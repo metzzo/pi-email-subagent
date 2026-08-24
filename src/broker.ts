@@ -2479,7 +2479,6 @@ export class AgentBroker {
     }
     const profile = resolveAgentProfile(this.options.config, address, name);
     const tools = record?.tools ?? profile.tools;
-    const mail = this.mailStore.list();
     const holdsActivationLease = this.activationLeases.has(address);
     const archiveBlockers = this.classifyArchiveBlockers(address, record, this.workers.get(address));
     const cleanup = record?.cleanup
@@ -2507,7 +2506,7 @@ export class AgentBroker {
       queued: this.mailStore.queued(address).length,
       unanswered: archiveBlockers.incomingUnanswered.count,
       outgoingUnanswered: archiveBlockers.outgoingUnanswered.count,
-      pendingReplies: mail.filter((email) => email.to === address && Boolean(email.replyReservedBy) && !email.answeredAt).length,
+      pendingReplies: archiveBlockers.pendingReplies.count,
       archiveEligible: this.archiveEligible(record, archiveBlockers),
       archiveBlockers,
       usage: clone(record?.usage ?? emptyUsage()),

@@ -52,7 +52,7 @@ function inspectionRecovery(inspection: AgentInspection): string {
     + inspection.archiveBlockers.incomingUnanswered.count
     + inspection.archiveBlockers.outgoingUnanswered.count
     + inspection.archiveBlockers.pendingReplies.count;
-  if (inspection.cleanup) return "Wait for affirmative cleanup quiescence; restart/archive remain blocked and capacity stays held.";
+  if (inspection.cleanup) return "Cleanup quiescence is unknown. Pi 0.81.1 cannot automatically verify or release a restored unknown quarantine; restart/archive remain blocked and capacity stays held. Perform external process/quiescence review under operator recovery policy.";
   if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity or ask main to resolve real obligations and archive a clean identity before retrying.";
   if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity or archive another clean identity first.";
   if (inspection.state === "paused" && !inspection.holdsActivationLease) return "This overflow identity needs free identity capacity before restart; retain or resolve its obligations through main.";
