@@ -132,10 +132,10 @@ describe("mail prompts", () => {
       0,
       config,
     );
-    assert.match(prompt, /worker: read, grep, send_email, fetch_emails \(read-only, can spawn\)/);
-    assert.match(prompt, /scout: read, bash, edit, send_email, fetch_emails \(writable, can spawn\)/);
-    assert.match(prompt, /reviewer: read, send_email, fetch_emails \(read-only, spawn disabled\)/);
-    assert.match(prompt, /worker\.special@gpt-5\.6-sol\.com: read, write, send_email, fetch_emails \(writable, can spawn\)/);
+    assert.match(prompt, /worker: read, grep, send_email, fetch_emails \(read-only, delegation disabled\)/);
+    assert.match(prompt, /scout: read, bash, edit, send_email, fetch_emails \(writable, delegation disabled\)/);
+    assert.match(prompt, /reviewer: read, send_email, fetch_emails \(read-only, delegation disabled\)/);
+    assert.match(prompt, /worker\.special@gpt-5\.6-sol\.com: read, write, send_email, fetch_emails \(writable, delegation disabled\)/);
     assert.doesNotMatch(prompt, /built-in `worker` role has writable/);
   });
 
@@ -158,9 +158,11 @@ describe("mail prompts", () => {
       activity: [],
     };
     const prompt = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
-    assert.doesNotMatch(prompt, /not permitted to create new agents/);
+    assert.match(prompt, /permitted to delegate response-required requests to other subagents/);
     const restricted = subagentPrompt({ ...record, canSpawn: false }, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
-    assert.match(restricted, /not permitted to create new agents/);
+    assert.match(restricted, /not permitted to delegate response-required requests to any other subagent/i);
+    assert.match(restricted, /known or unknown/i);
+    assert.match(restricted, /exact replies.*mail to main.*remain allowed/i);
     assert.match(prompt, /Use model ID `k3`/);
     const custom = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"], "- Always use `gpt-5.4`.");
     assert.match(custom, /Always use `gpt-5\.4`/);

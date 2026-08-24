@@ -49,11 +49,11 @@ describe("registry schema", () => {
     assert.equal(restored.agents[0]?.state, "archived");
   });
 
-  it("defaults canSpawn for registries written before spawn control", () => {
+  it("fails closed when legacy registries omit delegation permission", () => {
     const legacy = registry() as unknown as { agents: Record<string, unknown>[] };
     delete legacy.agents[0]!.canSpawn;
     const parsed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
-    assert.equal(parsed.agents[0]?.canSpawn, true);
+    assert.equal(parsed.agents[0]?.canSpawn, false);
     assert.deepEqual(parsed.agents[0]?.work, emptyWorkState());
     legacy.agents[0]!.currentActivity = 'write {"content":"SENTINEL_SECRET"}';
     legacy.agents[0]!.activity = [{ at: new Date().toISOString(), kind: "tool", summary: 'edit {"newText":"SENTINEL_SECRET"}' }];

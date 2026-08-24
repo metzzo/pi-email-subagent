@@ -24,7 +24,7 @@ Existing agent: reviewer.audit@gpt-5.6-sol.com
 State: idle
 Model: openai/gpt-5.6-sol · effort high
 Binding: persisted exact provider/model · existing identity ignores current main-provider preference
-Role: reviewer · read-only · spawn disabled
+Role: reviewer · read-only · delegation disabled
 Tools: read, grep, find, ls, send_email, fetch_emails
 Identity capacity: 8/8 used · this address holds a lease: yes · capacity available for this address: yes
 Run concurrency: 2/4 slots used
@@ -53,7 +53,7 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `holdsActivationLease` | Whether this exact address currently consumes identity capacity |
 | `modelId`, `provider`, `effort`, `role`, `tools`, `instructions` | Effective profile (record if live, resolved config otherwise) |
 | `writable` | Effective tools include a mutation tool |
-| `canSpawn` | Whether the agent may create new identities by mailing unknown addresses |
+| `canSpawn` | Whether the subagent may delegate response-required requests to other subagents, known or unknown |
 | `state` | `new` for prospective addresses, otherwise the lifecycle state |
 | `currentActivity` | Latest activity summary, when present |
 | `queued` / `unanswered` / `outgoingUnanswered` / `pendingReplies` | Queued inbound, incoming open requests, requests sent by this identity that remain open, and replies reserved but not yet delivered |
