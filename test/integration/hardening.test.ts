@@ -379,6 +379,47 @@ describe("broker hardening", () => {
     }
   });
 
+  it("joins the exact child-answer commit before a fast resumed parent replies upstream", async () => {
+    const { broker, workers } = await setup({ roles: delegatingRoles() });
+    try {
+      const upstream = await broker.send(broker.mainAddress, {
+        to: "worker.fast-parent@gpt-5.4.com", subject: "Fast parent", message: "Delegate and answer after the child.", priority: "low",
+      });
+      const child = await workers[0]!.send({
+        to: "worker.fast-child@gpt-5.4.com", subject: "Fast child", message: "Reply quickly.", priority: "low",
+      });
+      workers[0]!.settle();
+      await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "parked"));
+
+      const originalPrompt = workers[0]!.prompt.bind(workers[0]!);
+      let fastUpstreamReply: Promise<unknown> | undefined;
+      workers[0]!.prompt = async (message) => {
+        await originalPrompt(message);
+        if (message.includes("Fast child result")) {
+          fastUpstreamReply = workers[0]!.send({
+            to: broker.mainAddress,
+            subject: upstream.expectedReplySubject!,
+            message: "Upstream result after the committed child answer.",
+            priority: "low",
+          });
+        }
+      };
+
+      const childReply = await workers[1]!.send({
+        to: upstream.envelope.to,
+        subject: child.expectedReplySubject!,
+        message: "Fast child result.",
+        priority: "low",
+      });
+      assert.ok(fastUpstreamReply, "resumed parent issued its upstream reply during the accepted prompt run");
+      await fastUpstreamReply;
+      assert.equal(broker.mailStore.get(child.envelope.id)?.answeredBy, childReply.envelope.id);
+      assert.ok(broker.mailStore.get(upstream.envelope.id)?.answeredAt);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
   it("atomically serializes concurrent child delegation against an upstream reply", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
