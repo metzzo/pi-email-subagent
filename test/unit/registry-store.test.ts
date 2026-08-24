@@ -129,6 +129,40 @@ describe("registry schema", () => {
     }
   });
 
+  it("round-trips bounded unknown-effect work without accepting false path attribution", () => {
+    const base = record();
+    const at = new Date().toISOString();
+    base.work = {
+      ...emptyWorkState(),
+      currentBatchId: 2,
+      effectEvidenceUnavailable: true,
+      recent: [{
+        toolCallId: "orphan-write",
+        batchId: 2,
+        toolName: "write",
+        kind: "write",
+        attribution: "unverified",
+        status: "unknown",
+        startedAt: at,
+        endedAt: at,
+        durationMs: 0,
+        observedResult: "success",
+        reasonCode: "orphan-result",
+      }],
+    };
+    const parsed = parseRegistry({ ...registry(), agents: [base] });
+    assert.deepEqual(parsed.agents[0]?.work, base.work);
+
+    for (const item of [
+      { ...base.work.recent[0], attribution: "explicit" },
+      { ...base.work.recent[0], observedResult: "maybe" },
+      { ...base.work.recent[0], reasonCode: "free form" },
+      { ...base.work.recent[0], path: "/tmp/falsely-attributed" },
+    ]) {
+      assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, work: { ...base.work, recent: [item] } }] }), /work/i);
+    }
+  });
+
   it("bounds registry work caches and rejects malformed or duplicate work IDs", () => {
     const base = record();
     const item = {

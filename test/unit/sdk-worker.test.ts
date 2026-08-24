@@ -399,20 +399,44 @@ describe("SDK worker failures", () => {
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "edit", toolName: "edit", result: { details: { patch: "--- a\n+++ b\n-x\n+y" } }, isError: false });
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "write", toolName: "write", result: {}, isError: false });
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "orphan", toolName: "bash", result: {}, isError: false });
-    assert.deepEqual(work.recent.map((item) => item.toolCallId), ["edit", "write", "orphan"]);
+    internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "orphan-edit", toolName: "edit", result: { private: "SECRET RESULT" }, isError: false });
+    internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "orphan-write-error", toolName: "write", result: { private: "SECRET ERROR" }, isError: true });
+    assert.deepEqual(work.recent.map((item) => item.toolCallId), ["edit", "write", "orphan", "orphan-edit", "orphan-write-error"]);
     assert.equal(work.recent[0]?.linesAdded, 1);
     assert.equal(work.recent[0]?.linesRemoved, 1);
+    const orphanEdit = work.recent.find((item) => item.toolCallId === "orphan-edit")!;
+    assert.deepEqual({
+      toolName: orphanEdit.toolName,
+      kind: orphanEdit.kind,
+      attribution: orphanEdit.attribution,
+      status: orphanEdit.status,
+      observedResult: orphanEdit.observedResult,
+      reasonCode: orphanEdit.reasonCode,
+      path: orphanEdit.path,
+    }, {
+      toolName: "edit",
+      kind: "edit",
+      attribution: "unverified",
+      status: "unknown",
+      observedResult: "success",
+      reasonCode: "missing-start",
+      path: undefined,
+    });
+    assert.equal(work.recent.find((item) => item.toolCallId === "orphan-write-error")?.status, "unknown");
+    assert.equal(work.recent.find((item) => item.toolCallId === "orphan-write-error")?.observedResult, "error");
     assert.equal(JSON.stringify(record).includes("TOP SECRET RAW"), false);
     assert.equal(JSON.stringify(record).includes("SECRET NEW"), false);
 
     internal.onSessionEvent({ type: "tool_execution_start", toolCallId: "mismatch", toolName: "edit", args: { path: "c", edits: [] } });
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "mismatch", toolName: "write", result: {}, isError: false });
-    assert.equal(work.recent.find((item) => item.toolCallId === "mismatch")?.status, "failed");
-    assert.match(record.activity.at(-1)?.summary ?? "", /failed/);
+    assert.equal(work.recent.find((item) => item.toolCallId === "mismatch")?.status, "unknown");
+    assert.equal(work.recent.find((item) => item.toolCallId === "mismatch")?.reasonCode, "mismatched-tool");
+    assert.match(record.activity.at(-1)?.summary ?? "", /effect unknown\/unverified/);
     internal.onSessionEvent({ type: "tool_execution_start", toolCallId: "pathless", toolName: "write", args: { path: "bad\nname", content: "SECRET" } });
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "pathless", toolName: "write", result: {}, isError: false });
-    assert.equal(work.recent.find((item) => item.toolCallId === "pathless")?.status, "failed");
-    assert.match(record.activity.at(-1)?.summary ?? "", /failed/);
+    assert.equal(work.recent.find((item) => item.toolCallId === "pathless")?.status, "unknown");
+    assert.equal(work.recent.find((item) => item.toolCallId === "pathless")?.reasonCode, "unsafe-path");
+    assert.match(record.activity.at(-1)?.summary ?? "", /effect unknown\/unverified/);
     assert.doesNotMatch(JSON.stringify(record), /SECRET/);
   });
 });

@@ -146,7 +146,10 @@ export function startWorkItem(toolCallId: string, toolName: string, args: unknow
     toolCallId: safeId, batchId, toolName: safeName, kind: toolClass === "shell" ? "shell" : toolClass as WorkKind,
     attribution: toolClass === "edit" || toolClass === "write" ? "explicit" : "unverified", status: "running", startedAt: at,
   };
-  if (toolClass === "edit" || toolClass === "write") Object.assign(base, displayWorkPath(input.path ?? input.file_path, cwd));
+  if (toolClass === "edit" || toolClass === "write") {
+    Object.assign(base, displayWorkPath(input.path ?? input.file_path, cwd));
+    if (!base.path) base.attribution = "unverified";
+  }
   if (toolClass === "edit") {
     let edits = input.edits;
     if (typeof edits === "string") { try { edits = JSON.parse(edits); } catch { /* invalid raw intent */ } }
@@ -167,12 +170,46 @@ export function noteInspection(counters: WorkCounters, toolName: string): void {
   else if (toolName === "ls") counters.listings += 1;
 }
 
+export function unknownWorkItem(
+  item: WorkItem,
+  observedResult: "success" | "error",
+  reasonCode: NonNullable<WorkItem["reasonCode"]>,
+  endedAt = new Date().toISOString(),
+  toolName = item.toolName,
+): WorkItem {
+  const toolClass = classifyTool(toolName);
+  const kind: WorkKind = toolClass === "shell" ? "shell"
+    : toolClass === "edit" || toolClass === "write" ? toolClass
+      : "custom";
+  const unknown: WorkItem = {
+    toolCallId: capText(item.toolCallId, 200) ?? "unknown",
+    batchId: item.batchId,
+    toolName: capText(toolName, 100) ?? "unknown",
+    kind,
+    attribution: "unverified",
+    status: "unknown",
+    startedAt: item.startedAt,
+    endedAt,
+    observedResult,
+    reasonCode,
+  };
+  const start = Date.parse(item.startedAt); const end = Date.parse(endedAt);
+  if (Number.isFinite(start) && Number.isFinite(end)) unknown.durationMs = Math.max(0, end - start);
+  return unknown;
+}
+
 export function finishWorkItem(item: WorkItem, result: unknown, isError: boolean, endedAt = new Date().toISOString()): WorkItem {
-  const complete: WorkItem = { ...item, status: isError ? "failed" : "succeeded", endedAt };
+  if ((item.kind === "edit" || item.kind === "write") && (item.attribution !== "explicit" || !item.path)) {
+    return unknownWorkItem(item, isError ? "error" : "success", "unsafe-path", endedAt);
+  }
+  const complete: WorkItem = {
+    ...item,
+    status: isError ? "failed" : "succeeded",
+    endedAt,
+    observedResult: isError ? "error" : "success",
+  };
   const start = Date.parse(item.startedAt); const end = Date.parse(endedAt);
   if (Number.isFinite(start) && Number.isFinite(end)) complete.durationMs = Math.max(0, end - start);
-  if (!isError && item.attribution === "explicit" && !item.path) isError = true;
-  complete.status = isError ? "failed" : "succeeded";
   if (isError) complete.error = item.attribution === "explicit" ? `${item.toolName} failed` : extractError(result);
   if (!isError && item.kind === "edit" && result && typeof result === "object") {
     const details = (result as Record<string, unknown>).details;
@@ -200,6 +237,7 @@ export function beginBatch(state: AgentWorkState, at = new Date().toISOString())
   interruptActive(state, at);
   const batch = Math.max(1, state.nextBatchId);
   state.currentBatchId = batch; state.nextBatchId = batch + 1; state.batchStartedAt = at; delete state.batchEndedAt;
+  delete state.effectEvidenceUnavailable;
   state.inspection = { reads: 0, searches: 0, listings: 0 };
   return batch;
 }
@@ -217,7 +255,9 @@ export function aggregateWork(state: AgentWorkState, batchId = state.currentBatc
 }
 
 export function currentBatchHasEffectfulWork(state: AgentWorkState | undefined): boolean {
-  if (!state || state.currentBatchId === undefined) return false;
+  if (!state) return false;
+  if (state.effectEvidenceUnavailable) return true;
+  if (state.currentBatchId === undefined) return false;
   const batchId = state.currentBatchId;
   return [...state.active, ...state.recent].some((item) => item.batchId === batchId);
 }
@@ -236,9 +276,13 @@ export function recoverMutationWork(entries: readonly unknown[], cwd: string, ex
   interruptActive(state);
   const calls = new Map<string, WorkItem>();
   let recoveredBatch = 0;
+  if (entries.length > 10_000) state.effectEvidenceUnavailable = true;
   for (const candidate of entries.slice(-10_000)) {
     if (!candidate || typeof candidate !== "object") continue;
     const entry = candidate as Record<string, unknown>;
+    const at = typeof entry.timestamp === "string" && Number.isFinite(Date.parse(entry.timestamp))
+      ? entry.timestamp
+      : new Date().toISOString();
     if (entry.type === "custom" && entry.customType === "pi-email-subagent-work-batch" && entry.data && typeof entry.data === "object") {
       const marker = entry.data as Record<string, unknown>;
       if (Number.isSafeInteger(marker.batchId) && (marker.batchId as number) > 0) {
@@ -255,21 +299,49 @@ export function recoverMutationWork(entries: readonly unknown[], cwd: string, ex
     if (raw.role === "assistant" && Array.isArray(raw.content)) for (const block of raw.content) {
       if (!block || typeof block !== "object") continue;
       const part = block as Record<string, unknown>;
-      if (part.type !== "toolCall" || typeof part.id !== "string" || (part.name !== "edit" && part.name !== "write")) continue;
-      const call = startWorkItem(part.id, part.name, part.arguments, recoveredBatch, cwd, typeof entry.timestamp === "string" ? entry.timestamp : new Date().toISOString());
+      if (part.type !== "toolCall" || typeof part.id !== "string" || typeof part.name !== "string") continue;
+      const toolClass = classifyTool(part.name);
+      if (toolClass === "inspection" || toolClass === "mailbox") continue;
+      const call = startWorkItem(part.id, part.name, part.arguments, recoveredBatch, cwd, at);
       if (call) calls.set(part.id, call);
     }
-    if (raw.role === "toolResult" && typeof raw.toolCallId === "string" && (raw.toolName === "edit" || raw.toolName === "write")) {
-      const call = calls.get(raw.toolCallId);
-      if (!call || call.toolName !== raw.toolName || !call.path) continue;
-      const cached = state.recent.find((item) => item.toolCallId === raw.toolCallId);
-      const base: WorkItem = cached && cached.attribution === "explicit" && cached.kind === call.kind
-        ? { ...call, startedAt: cached.startedAt, batchId: cached.batchId, path: cached.path ?? call.path, displayPath: cached.displayPath ?? call.displayPath }
-        : call;
-      const terminal = finishWorkItem(base, { content: raw.content, details: raw.details }, raw.isError === true, typeof entry.timestamp === "string" ? entry.timestamp : new Date().toISOString());
-      if (terminal.patchPreview) terminal.patchSource = "session";
-      appendRecent(state, terminal);
+    if (raw.role !== "toolResult" || typeof raw.toolCallId !== "string" || typeof raw.toolName !== "string") continue;
+    const toolClass = classifyTool(raw.toolName);
+    if (toolClass === "inspection" || toolClass === "mailbox") continue;
+    const call = calls.get(raw.toolCallId);
+    const observedResult = raw.isError === true ? "error" as const : "success" as const;
+    if (!call) {
+      const orphan = startWorkItem(raw.toolCallId, raw.toolName, undefined, recoveredBatch, cwd, at)!;
+      appendRecent(state, unknownWorkItem(orphan, observedResult, "orphan-result", at));
+      if (toolClass !== "edit" && toolClass !== "write") state.effectEvidenceUnavailable = true;
+      continue;
     }
+    if (call.toolName !== raw.toolName) {
+      appendRecent(state, unknownWorkItem(call, observedResult, "mismatched-tool", at, raw.toolName));
+      continue;
+    }
+    if ((toolClass === "edit" || toolClass === "write") && (call.attribution !== "explicit" || !call.path)) {
+      appendRecent(state, unknownWorkItem(call, observedResult, "unsafe-path", at));
+      continue;
+    }
+    const cached = state.recent.find((item) => item.toolCallId === raw.toolCallId);
+    const base: WorkItem = cached && cached.kind === call.kind
+      ? {
+          ...call,
+          startedAt: cached.startedAt,
+          batchId: cached.batchId,
+          ...(cached.path ? { path: cached.path, displayPath: cached.displayPath } : {}),
+        }
+      : call;
+    const terminal = finishWorkItem(
+      base,
+      base.attribution === "explicit" ? { content: raw.content, details: raw.details } : undefined,
+      raw.isError === true,
+      at,
+    );
+    if (terminal.attribution === "unverified") delete terminal.commandPreview;
+    if (terminal.patchPreview) terminal.patchSource = "session";
+    appendRecent(state, terminal);
   }
   return state;
 }

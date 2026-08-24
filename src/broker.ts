@@ -101,6 +101,7 @@ function lightweightWork(work: AgentWorkState): AgentWorkState {
     ...(work.batchStartedAt !== undefined ? { batchStartedAt: work.batchStartedAt } : {}),
     ...(work.batchEndedAt !== undefined ? { batchEndedAt: work.batchEndedAt } : {}),
     ...(work.recoveryError !== undefined ? { recoveryError: work.recoveryError } : {}),
+    ...(work.effectEvidenceUnavailable ? { effectEvidenceUnavailable: true } : {}),
     active: work.active.map(lightweightWorkItem),
     recent: work.recent.map(lightweightWorkItem),
     inspection: { ...work.inspection },

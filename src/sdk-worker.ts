@@ -24,7 +24,7 @@ import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
 import { clone, nowIso, truncateText } from "./util.ts";
-import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem } from "./work-ledger.ts";
+import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem, unknownWorkItem } from "./work-ledger.ts";
 
 const { Type } = TypeBox;
 
@@ -349,6 +349,7 @@ export class SdkWorker implements WorkerTransport {
       case "tool_execution_update":
         break;
       case "tool_execution_end": {
+        if (event.toolName.toLowerCase() === "bash") this.processCapableRisk = true;
         this.activeToolCalls.delete(event.toolCallId);
         this.emit({
           type: "tool_lifecycle",
@@ -358,15 +359,36 @@ export class SdkWorker implements WorkerTransport {
         });
         const work = this.record.work ??= emptyWorkState();
         const index = work.active.findIndex((candidate) => candidate.toolCallId === event.toolCallId);
-        let item = index >= 0 ? work.active[index] : startWorkItem(event.toolCallId, event.toolName, undefined, work.currentBatchId ?? 0, this.cwd);
+        const orphan = index < 0;
+        let item = orphan
+          ? startWorkItem(event.toolCallId, event.toolName, undefined, work.currentBatchId ?? 0, this.cwd)
+          : work.active[index];
         if (index >= 0) work.active.splice(index, 1);
         if (item) {
           const mismatch = item.toolName !== event.toolName;
-          item = finishWorkItem(item, mismatch ? undefined : event.result, event.isError || mismatch);
+          const mutationPathUnknown = (item.kind === "edit" || item.kind === "write")
+            && (item.attribution !== "explicit" || !item.path);
+          if (orphan || mismatch || mutationPathUnknown) {
+            item = unknownWorkItem(
+              item,
+              event.isError ? "error" : "success",
+              orphan ? "missing-start" : mismatch ? "mismatched-tool" : "unsafe-path",
+              undefined,
+              mismatch ? event.toolName : item.toolName,
+            );
+          } else {
+            item = finishWorkItem(item, item.attribution === "explicit" ? event.result : undefined, event.isError);
+          }
           appendRecent(work, item);
           this.emit({ type: "work", workItem: clone(item) });
-          const failed = item.status === "failed";
-          this.activity(failed ? "error" : "tool", `${item.toolName} ${failed ? `failed${item.error ? `: ${item.error}` : ""}` : "completed"}`);
+          if (item.status === "unknown") {
+            this.activity("error", `${item.toolName} effect unknown/unverified (${item.observedResult ?? "terminal result unknown"}; ${item.reasonCode})`);
+          } else if (item.attribution === "unverified") {
+            this.activity(event.isError ? "error" : "tool", `${item.toolName} terminal ${event.isError ? "error" : "success"} observed; effects unverified`);
+          } else {
+            const failed = item.status === "failed";
+            this.activity(failed ? "error" : "tool", `${item.toolName} ${failed ? `failed${item.error ? `: ${item.error}` : ""}` : "completed"}`);
+          }
         } else if (classifyTool(event.toolName) === "mailbox") {
           this.activity(event.isError ? "error" : "tool", `${event.toolName} ${event.isError ? "failed" : "completed"}`);
         }
