@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -199,7 +201,122 @@ function eventTypes(events: RelevantEvent[]): string[] {
   return events.map((event) => event.type);
 }
 
-describe("real Pi retry lifecycle characterization", () => {
+async function characterizeLongCacheRequest(supportsLongCacheRetention: boolean): Promise<{
+  payloads: Array<Record<string, unknown>>;
+  events: RelevantEvent[];
+  messages: AgentSession["messages"];
+}> {
+  const payloads: Array<Record<string, unknown>> = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on("end", () => {
+      const payload = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+      payloads.push(payload);
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        error: {
+          message: "prompt_cache_retention is not supported on this model",
+          type: "invalid_request_error",
+          code: "unsupported_parameter",
+        },
+      }));
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const root = await mkdtemp(join(tmpdir(), "pi-cache-retention-characterization-"));
+  const previousRetention = process.env.PI_CACHE_RETENTION;
+  const previousAuth = process.env.PI_EMAIL_CACHE_FIXTURE_AUTH;
+  process.env.PI_CACHE_RETENTION = "long";
+  process.env.PI_EMAIL_CACHE_FIXTURE_AUTH = "configured";
+  let session: AgentSession | undefined;
+  try {
+    const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+    runtime.registerProvider("cache-retention-characterization", {
+      name: "Cache Retention Characterization",
+      baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      apiKey: "$PI_EMAIL_CACHE_FIXTURE_AUTH",
+      api: "openai-responses",
+      models: [{
+        id: "cache-retention-model",
+        name: "Cache Retention Model",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 32_000,
+        maxTokens: 2_000,
+        compat: { supportsLongCacheRetention },
+      }],
+    });
+    const model = runtime.getModel("cache-retention-characterization", "cache-retention-model");
+    assert.ok(model);
+    const settingsManager = SettingsManager.inMemory({ retry: { enabled: false, provider: { maxRetries: 0 } } });
+    const loader = new DefaultResourceLoader({
+      cwd: root,
+      agentDir: root,
+      settingsManager,
+      noExtensions: true,
+      noThemes: true,
+    });
+    await loader.reload();
+    ({ session } = await createAgentSession({
+      cwd: root,
+      agentDir: root,
+      modelRuntime: runtime,
+      model,
+      resourceLoader: loader,
+      settingsManager,
+      sessionManager: SessionManager.inMemory(root),
+      tools: [],
+    }));
+    const events: RelevantEvent[] = [];
+    session.subscribe((event) => {
+      const projected = projectEvent(event);
+      if (projected) events.push(projected);
+    });
+    await session.prompt("characterize one rejected cache-retention request");
+    return { payloads, events, messages: [...session.messages] };
+  } finally {
+    session?.dispose();
+    if (previousRetention === undefined) delete process.env.PI_CACHE_RETENTION;
+    else process.env.PI_CACHE_RETENTION = previousRetention;
+    if (previousAuth === undefined) delete process.env.PI_EMAIL_CACHE_FIXTURE_AUTH;
+    else process.env.PI_EMAIL_CACHE_FIXTURE_AUTH = previousAuth;
+    server.close();
+    await once(server, "close");
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+describe("real Pi retry lifecycle characterization", { concurrency: false }, () => {
+  it("lets Pi serialize long cache retention from metadata and never replays a rejecting route", async () => {
+    const supported = await characterizeLongCacheRequest(true);
+    assert.equal(supported.payloads.length, 1);
+    assert.equal(supported.payloads[0]?.prompt_cache_retention, "24h");
+    assert.deepEqual(eventTypes(supported.events), [
+      "agent_start",
+      "message_end",
+      "agent_end",
+      "agent_settled",
+    ]);
+    assert.deepEqual(
+      supported.events.filter((event) => event.type === "agent_end"),
+      [{ type: "agent_end", stopReason: "error", willRetry: false }],
+    );
+    assert.equal(supported.messages.filter((message) => message.role === "user").length, 1);
+    const protectedError = supported.messages.find((message): message is AssistantMessage => message.role === "assistant" && message.stopReason === "error");
+    assert.match(protectedError?.errorMessage ?? "", /prompt_cache_retention is not supported on this model/);
+
+    const unsupported = await characterizeLongCacheRequest(false);
+    assert.equal(unsupported.payloads.length, 1);
+    assert.equal(Object.hasOwn(unsupported.payloads[0]!, "prompt_cache_retention"), false);
+    assert.equal(unsupported.events.some((event) => event.type === "auto_retry_start"), false);
+    assert.equal(unsupported.messages.filter((message) => message.role === "user").length, 1);
+  });
+
   it("orders a retryable failure, Pi-managed recovery, and one final settlement", async () => {
     const run = await characterizedSession([
       { kind: "error", message: "WebSocket error: deterministic first attempt" },
