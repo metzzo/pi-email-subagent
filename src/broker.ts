@@ -351,11 +351,20 @@ export class AgentBroker {
           };
         }
         if (record.cleanup) {
-          record.cleanup.state = "unknown";
-          record.cleanup.updatedAt = nowIso();
-          if (record.cleanup.abort === "pending") record.cleanup.abort = "timed-out";
-          if (record.cleanup.dispose === "pending") record.cleanup.dispose = "timed-out";
-          record.cleanup.detail = "Cleanup promise owner was lost across process restart; authoritative quiescence remains unknown.";
+          const cleanupOwnerWasLive = record.cleanup.state === "pending"
+            || record.cleanup.abort === "pending"
+            || record.cleanup.dispose === "pending";
+          if (cleanupOwnerWasLive) {
+            const priorDetail = record.cleanup.detail;
+            record.cleanup.state = "unknown";
+            record.cleanup.updatedAt = nowIso();
+            if (record.cleanup.abort === "pending") record.cleanup.abort = "timed-out";
+            if (record.cleanup.dispose === "pending") record.cleanup.dispose = "timed-out";
+            record.cleanup.detail = truncateText(
+              `Cleanup promise owner was lost across process restart; authoritative quiescence remains unknown.${priorDetail ? ` Prior detail: ${priorDetail}` : ""}`,
+              1_500,
+            );
+          }
           record.state = "failed";
           const cleanupFailure = `Cleanup quarantine restored for worker generation ${record.cleanup.workerGeneration}; capacity held.`;
           if (!record.failure) record.failure = cleanupFailure;
@@ -476,10 +485,15 @@ export class AgentBroker {
       const ordinary = registered.filter((record) => !record.cleanup);
       for (const record of ordinary.slice(0, ordinaryCapacity)) this.activationLeases.add(record.address);
       for (const record of ordinary.slice(ordinaryCapacity)) {
-        record.state = "paused";
         this.interruptRecordWork(record);
-        record.currentActivity = `Paused by maxAgents capacity (${this.options.config.maxAgents})`;
-        record.updatedAt = nowIso();
+        // Capacity filtering must not rewrite durable terminal lifecycle facts.
+        // A stopped or failed identity can reacquire its lease only through its
+        // existing explicit recovery path after capacity becomes available.
+        if (record.state !== "stopped" && record.state !== "failed") {
+          record.state = "paused";
+          record.currentActivity = `Paused by maxAgents capacity (${this.options.config.maxAgents})`;
+          record.updatedAt = nowIso();
+        }
       }
       await this.persistRegistry(true);
       this.checkpoint(generation);

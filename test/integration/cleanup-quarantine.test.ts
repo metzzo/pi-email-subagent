@@ -435,9 +435,27 @@ describe("worker cleanup quarantine", () => {
     const activatedMutable = "worker.epoch-mutable@gpt-5.4.com";
     const activatedReadonly = "worker.epoch-readonly@gpt-5.4.com";
     const activatedOmitted = "worker.epoch-omitted@gpt-5.4.com";
+    const spawningMutable = "worker.spawning-mutable@gpt-5.4.com";
     const legacyMutable = "worker.legacy-mutable@gpt-5.4.com";
+    const legacyFailedBash = "worker.legacy-failed-bash@gpt-5.4.com";
+    const legacyReadonly = "worker.legacy-readonly@gpt-5.4.com";
+    const alreadyQuarantined = "worker.existing-cleanup@gpt-5.4.com";
     const verifiedClean = "worker.verified-clean@gpt-5.4.com";
     const archivedLegacy = "worker.archived-legacy@gpt-5.4.com";
+    const existingCleanup = {
+      state: "unknown",
+      reasonCode: "EXISTING_EXACT_CLEANUP",
+      workerGeneration: 15,
+      startedAt: now,
+      updatedAt: now,
+      abort: "failed",
+      dispose: "succeeded",
+      quiescence: "unknown",
+      mutationCapableAtStart: true,
+      heldRunSlot: false,
+      activeTools: [{ toolCallId: "prior-bash-call", toolName: "bash" }],
+      detail: "Preserve this exact prior cleanup diagnosis.",
+    };
     const agents = [
       base(activatedMutable, "failed", ["bash", "send_email", "fetch_emails"], {
         generation: 11, phase: "activated", tools: ["bash", "send_email", "fetch_emails"], mutationCapable: true, runSlotHeld: true,
@@ -448,9 +466,15 @@ describe("worker cleanup quarantine", () => {
       base(activatedOmitted, "failed", ["write", "send_email", "fetch_emails"], {
         generation: 13, phase: "activated", tools: ["read", "send_email", "fetch_emails"], mutationCapable: false, runSlotHeld: false,
       }),
+      base(spawningMutable, "failed", ["read", "send_email", "fetch_emails"], {
+        generation: 14, phase: "spawning", tools: ["write", "send_email", "fetch_emails"], mutationCapable: true, runSlotHeld: false,
+      }),
       base(legacyMutable, "stopped", ["write", "send_email", "fetch_emails"]),
+      base(legacyFailedBash, "failed", ["bash", "send_email", "fetch_emails"]),
+      base(legacyReadonly, "failed", ["read", "send_email", "fetch_emails"]),
+      { ...base(alreadyQuarantined, "failed", ["bash", "send_email", "fetch_emails"]), cleanup: existingCleanup },
       base(verifiedClean, "stopped", ["bash", "send_email", "fetch_emails"], {
-        generation: 14, phase: "verified-clean", tools: ["bash", "send_email", "fetch_emails"], mutationCapable: true, runSlotHeld: false,
+        generation: 16, phase: "verified-clean", tools: ["bash", "send_email", "fetch_emails"], mutationCapable: true, runSlotHeld: false,
       }),
       base(archivedLegacy, "archived", ["write", "send_email", "fetch_emails"]),
     ];
@@ -495,14 +519,46 @@ describe("worker cleanup quarantine", () => {
       assert.equal(legacy.cleanup?.heldRunSlot, true, "legacy stopped ownership is ambiguous without an epoch");
       assert.equal(legacy.tools.includes("write"), false);
 
+      const spawning = broker.inspectAgent(spawningMutable);
+      assert.equal(spawning.cleanup?.reasonCode, "ABANDONED_OWNER_RECOVERY");
+      assert.equal(spawning.cleanup?.workerGeneration, 14);
+      assert.equal(spawning.cleanup?.heldRunSlot, false);
+
+      const legacyBash = broker.inspectAgent(legacyFailedBash);
+      assert.equal(legacyBash.cleanup?.reasonCode, "ABANDONED_OWNER_RECOVERY");
+      assert.equal(legacyBash.cleanup?.mutationCapableAtStart, true);
+      assert.equal(legacyBash.cleanup?.heldRunSlot, true);
+
+      assert.deepEqual(broker.inspectAgent(alreadyQuarantined).cleanup, existingCleanup,
+        "an exact persisted unknown diagnostic is restored rather than replaced by a new abandoned-owner diagnosis");
       assert.equal(broker.inspectAgent(activatedReadonly).cleanup, undefined);
+      assert.equal(broker.inspectAgent(activatedReadonly).state, "failed", "quarantine capacity overcommit does not erase a read-only failure fact");
       assert.equal(broker.inspectAgent(activatedOmitted).cleanup, undefined, "configured write omitted from the activated epoch is not sticky");
+      assert.equal(broker.inspectAgent(activatedOmitted).state, "failed");
+      assert.equal(broker.inspectAgent(legacyReadonly).cleanup, undefined);
+      assert.equal(broker.inspectAgent(legacyReadonly).state, "failed");
       assert.equal(broker.inspectAgent(verifiedClean).cleanup, undefined);
       assert.equal(broker.inspectAgent(verifiedClean).state, "stopped");
       assert.equal(broker.inspectAgent(archivedLegacy).cleanup, undefined);
       assert.equal(broker.inspectAgent(archivedLegacy).state, "archived");
       assert.equal((broker as any).active.has(activatedMutable), true);
+      assert.equal((broker as any).active.has(spawningMutable), false);
       assert.equal((broker as any).active.has(legacyMutable), true);
+      assert.equal((broker as any).active.has(legacyFailedBash), true);
+      assert.equal((broker as any).activationLeases.has(alreadyQuarantined), true);
+      assert.equal((broker as any).active.has(alreadyQuarantined), false);
+
+      await assert.rejects(broker.restart(activatedMutable), /cleanup.*quarantin|quiescence.*unknown/i);
+      await assert.rejects(broker.archive(activatedMutable), /cleanup.*quarantin|quiescence.*unknown/i);
+      const queued = await broker.send(broker.mainAddress, {
+        to: activatedMutable,
+        subject: "Preserve queued takeover mail",
+        message: "This exact envelope must remain queued under the quarantine.",
+        priority: "low",
+      });
+      assert.equal(queued.recipientDisposition, "failed");
+      assert.equal(queued.envelope.deliveryState, "queued");
+      assert.equal(broker.mailStore.get(queued.envelope.id)?.deliveryState, "queued");
     } finally {
       await broker.shutdown().catch(() => undefined);
       await (broker as any).releaseNamespaceLock();
