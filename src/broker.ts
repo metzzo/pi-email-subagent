@@ -1046,16 +1046,20 @@ export class AgentBroker {
 
     const toMain = this.isMainIdentity(requestedTo);
     let parsed: ParsedAddress | undefined;
+    let failedKnown = false;
     let to = requestedTo;
     let initialEffort: ThinkingLevel | undefined;
     let initialLifecycle: LifecyclePolicy | undefined;
     if (!toMain) {
       const shape = parseSubagentAddressShape(requestedTo);
       const existingRecord = this.records.get(shape.address);
-      parsed = existingRecord
-        ? this.resolveExistingRecord(existingRecord)
-        : parseNewSubagentAddress(shape.address, this.catalog, this.mainRouting.preferredProvider);
-      to = parsed.address;
+      to = shape.address;
+      failedKnown = existingRecord?.state === "failed";
+      if (!failedKnown) {
+        parsed = existingRecord
+          ? this.resolveExistingRecord(existingRecord)
+          : parseNewSubagentAddress(shape.address, this.catalog, this.mainRouting.preferredProvider);
+      }
       if (this.sameIdentity(sender, to)) throw new Error("Sending email to yourself is not supported.");
       if (input.effort !== undefined && existingRecord) {
         throw new Error(`Effort overrides are accepted only on the first delegation to an unknown address. ${to} already exists (${existingRecord.state}); omit effort and use its persisted value. Archived restoration also preserves its original effort.`);
@@ -1065,13 +1069,13 @@ export class AgentBroker {
       }
       initialEffort = existingRecord?.effort
         ?? input.effort
-        ?? resolveAgentProfile(this.options.config, to, parsed.name).effort;
-      initialLifecycle = existingRecord?.lifecycle ?? resolveLifecycle(this.options.config, to, parsed.name, input.lifecycle);
+        ?? resolveAgentProfile(this.options.config, to, parsed!.name).effort;
+      initialLifecycle = existingRecord?.lifecycle ?? resolveLifecycle(this.options.config, to, parsed!.name, input.lifecycle);
       const senderRecord = this.records.get(sender);
       if (senderRecord && !senderRecord.canSpawn && !this.records.has(to)) {
         throw new Error(`Agent ${sender} is not permitted to spawn new agents; reuse an existing address.`);
       }
-      if (!this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
+      if (!failedKnown && !this.activationLeases.has(to) && this.activeIdentityCount() >= this.options.config.maxAgents) {
         throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
       }
     } else {
@@ -1112,11 +1116,14 @@ export class AgentBroker {
         const currentRecord = this.records.get(to);
         const acceptedCreation = toMain ? undefined : this.firstBindingIntent(to);
         if (!toMain) {
-          if (currentRecord) parsed = this.resolveExistingRecord(currentRecord);
-          else if (acceptedCreation?.modelBindingIntent) {
-            parsed = parseBoundSubagentAddress(to, this.catalog, acceptedCreation.modelBindingIntent);
+          failedKnown = currentRecord?.state === "failed";
+          if (!failedKnown) {
+            if (currentRecord) parsed = this.resolveExistingRecord(currentRecord);
+            else if (acceptedCreation?.modelBindingIntent) {
+              parsed = parseBoundSubagentAddress(to, this.catalog, acceptedCreation.modelBindingIntent);
+            }
+            if (!parsed) throw new Error(`Recipient ${to} has no model binding.`);
           }
-          if (!parsed) throw new Error(`Recipient ${to} has no model binding.`);
           if (input.effort !== undefined && (currentRecord || acceptedCreation)) {
             throw new Error(`Effort overrides are accepted only on the first delegation to an unknown address. ${to} already has durable identity intent; omit effort and use its persisted value.`);
           }
@@ -1126,11 +1133,11 @@ export class AgentBroker {
           initialEffort = currentRecord?.effort
             ?? acceptedCreation?.effortIntent
             ?? input.effort
-            ?? resolveAgentProfile(this.options.config, to, parsed.name).effort;
+            ?? resolveAgentProfile(this.options.config, to, parsed!.name).effort;
           initialLifecycle = currentRecord?.lifecycle
             ?? acceptedCreation?.lifecycleIntent
-            ?? resolveLifecycle(this.options.config, to, parsed.name, input.lifecycle);
-          if (!this.activationLeases.has(to)) {
+            ?? resolveLifecycle(this.options.config, to, parsed!.name, input.lifecycle);
+          if (!failedKnown && !this.activationLeases.has(to)) {
             if (this.activeIdentityCount() >= this.options.config.maxAgents) {
               throw new Error(this.capacityFullDiagnostic(this.isMainIdentity(sender)));
             }
@@ -1188,7 +1195,7 @@ export class AgentBroker {
           if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
         }
       } else {
-        const ensured = await this.ensureWorker(parsed!, envelope);
+        const ensured = await this.ensureWorker(to, parsed, envelope);
         spawned = ensured.spawned;
         disposition = ensured.disposition;
         recipientRecord = this.records.get(to);
@@ -1246,13 +1253,18 @@ export class AgentBroker {
     return this.mailStore.unanswered(address);
   }
 
-  private async ensureWorker(parsed: ParsedAddress, envelope: EmailEnvelope): Promise<{
+  private async ensureWorker(address: string, parsed: ParsedAddress | undefined, envelope: EmailEnvelope): Promise<{
     worker?: WorkerTransport;
     spawned: boolean;
     disposition: SendEmailResult["recipientDisposition"];
   }> {
-    return this.withAddressOperation(parsed.address, async () => {
-      let record = this.records.get(parsed.address);
+    return this.withAddressOperation(address, async () => {
+      let record = this.records.get(address);
+      if (record?.state === "failed") {
+        return { spawned: false, disposition: "failed" as const };
+      }
+      parsed ??= record ? this.resolveExistingRecord(record) : undefined;
+      if (!parsed) throw new Error(`Recipient ${address} has no model binding.`);
       const profile = record ?? { tools: resolveAgentProfile(this.options.config, parsed.address, parsed.name).tools };
       if (this.cleanupQuarantines.has(parsed.address)
         || record?.cleanup

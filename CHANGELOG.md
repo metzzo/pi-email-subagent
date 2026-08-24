@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - Removed mechanical completion replies: only an exact successful `send_email` reply closes a mail obligation, while final assistant text remains session-local and exhausted enforcement leaves requests unanswered.
+- Known failed recipients now accept and preserve queued mail without catalog re-resolution, attached-worker routing, or implicit replacement; only explicit same-identity restart can resume delivery.
 
 ## [0.1.0] - 2026-08-23
 

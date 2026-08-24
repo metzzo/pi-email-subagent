@@ -78,6 +78,34 @@ describe("worker mail tools", () => {
     assert.equal(lifecycleObject?.properties?.brokerShutdownTimeoutMs, undefined, "global shutdown is not delegable");
   });
 
+  it("reports accepted queued mail to a failed recipient without contradiction", async () => {
+    const failedEnvelope = { ...envelope, to: "worker.failed@gpt-5.4.com" };
+    const [send] = createWorkerMailTools({
+      sendEmail: async () => ({
+        envelope: failedEnvelope,
+        spawned: false,
+        recipientDisposition: "failed",
+        recipientState: "failed",
+        correlationId: failedEnvelope.id,
+      }),
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const result = await send.execute(
+      "tool-failed-recipient",
+      { to: failedEnvelope.to, subject: failedEnvelope.subject, message: failedEnvelope.message, priority: "low" },
+      undefined,
+      undefined,
+      {} as never,
+    );
+    const text = (result.content[0] as { text: string }).text;
+    assert.match(text, /Email accepted/);
+    assert.match(text, /Spawned recipient: no/);
+    assert.match(text, /Recipient disposition: failed/);
+    assert.match(text, /Delivery state: queued/);
+    assert.match(text, /accepted and queued.*remains failed.*no worker was spawned.*explicit manage_agent restart/is);
+    assert.doesNotMatch(text, /not accepted/i);
+  });
+
   it("throws failed sends so Pi records a native tool error", async () => {
     const [send] = createWorkerMailTools({
       sendEmail: async () => { throw new Error("mailbox unavailable"); },
