@@ -24,6 +24,7 @@ const MODEL = "deterministic-retry";
 type ProviderStep =
   | { kind: "error"; message: string }
   | { kind: "text"; text: string }
+  | { kind: "thinking"; thinking: string }
   | { kind: "tool"; id: string; name: string; arguments: Record<string, unknown> };
 
 type RelevantEvent =
@@ -81,6 +82,7 @@ interface CharacterizedSession {
   root: string;
   session: AgentSession;
   events: RelevantEvent[];
+  modelEvents: Array<{ type: "message_start" | "message_end" } | { type: "message_update"; updateType: string }>;
   calls: Array<{ transport?: string; timeoutMs?: number; websocketConnectTimeoutMs?: number; maxRetries?: number; maxRetryDelayMs?: number }>;
   dispose(): Promise<void>;
 }
@@ -130,6 +132,12 @@ async function characterizedSession(
       result.push({ type: "toolcall_end", contentIndex: 0, toolCall: call, partial: output });
       output.stopReason = "toolUse";
       result.push({ type: "done", reason: "toolUse", message: output });
+    } else if (step.kind === "thinking") {
+      output.content.push({ type: "thinking", thinking: step.thinking });
+      result.push({ type: "thinking_start", contentIndex: 0, partial: output });
+      result.push({ type: "thinking_delta", contentIndex: 0, delta: step.thinking, partial: output });
+      result.push({ type: "thinking_end", contentIndex: 0, content: step.thinking, partial: output });
+      result.push({ type: "done", reason: "stop", message: output });
     } else {
       output.content.push({ type: "text", text: step.text });
       result.push({ type: "text_start", contentIndex: 0, partial: output });
@@ -181,14 +189,21 @@ async function characterizedSession(
     sessionManager: SessionManager.inMemory(root),
   });
   const events: RelevantEvent[] = [];
+  const modelEvents: CharacterizedSession["modelEvents"] = [];
   session.subscribe((event) => {
     const projected = projectEvent(event);
     if (projected) events.push(projected);
+    if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "assistant") {
+      modelEvents.push({ type: event.type });
+    } else if (event.type === "message_update" && event.message.role === "assistant") {
+      modelEvents.push({ type: "message_update", updateType: event.assistantMessageEvent.type });
+    }
   });
   return {
     root,
     session,
     events,
+    modelEvents,
     calls,
     async dispose() {
       session.dispose();
@@ -315,6 +330,28 @@ describe("real Pi retry lifecycle characterization", { concurrency: false }, () 
     assert.equal(Object.hasOwn(unsupported.payloads[0]!, "prompt_cache_retention"), false);
     assert.equal(unsupported.events.some((event) => event.type === "auto_retry_start"), false);
     assert.equal(unsupported.messages.filter((message) => message.role === "user").length, 1);
+  });
+
+  it("characterizes content-free model boundaries for text and thinking-only streams", async () => {
+    for (const step of [
+      { kind: "text", text: "PRIVATE TEXT DELTA" },
+      { kind: "thinking", thinking: "PRIVATE THINKING DELTA" },
+    ] as const) {
+      const run = await characterizedSession([step], { retry: { enabled: false, maxRetries: 0, baseDelayMs: 1 } });
+      try {
+        await run.session.prompt("characterize stream boundaries");
+        assert.deepEqual(run.modelEvents.map((event) => event.type), [
+          "message_start", "message_update", "message_update", "message_update", "message_end",
+        ]);
+        assert.deepEqual(run.modelEvents.filter((event) => event.type === "message_update").map((event) => event.updateType),
+          step.kind === "text"
+            ? ["text_start", "text_delta", "text_end"]
+            : ["thinking_start", "thinking_delta", "thinking_end"]);
+        assert.doesNotMatch(JSON.stringify(run.modelEvents), /PRIVATE|TEXT DELTA|THINKING DELTA/);
+      } finally {
+        await run.dispose();
+      }
+    }
   });
 
   it("orders a retryable failure, Pi-managed recovery, and one final settlement", async () => {

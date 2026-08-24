@@ -314,6 +314,7 @@ export class SdkWorker implements WorkerTransport {
     switch (event.type) {
       case "agent_start":
         this.runFailure = undefined;
+        this.emit({ type: "run_liveness", phase: "model_start" });
         this.setState("running");
         this.activity("status", "Agent run started");
         break;
@@ -371,6 +372,9 @@ export class SdkWorker implements WorkerTransport {
         }
         break;
       }
+      case "message_update":
+        if (event.message.role === "assistant") this.emit({ type: "run_liveness", phase: "model_progress" });
+        break;
       case "message_end": {
         if (event.message.role !== "assistant") break;
         const text = event.message.content
@@ -392,13 +396,16 @@ export class SdkWorker implements WorkerTransport {
         break;
       }
       case "auto_retry_start":
+        this.emit({ type: "run_liveness", phase: "retry_start", delayMs: Math.max(0, Math.min(MAX_TIMER_DELAY_MS, event.delayMs)) });
         this.activity("status", `Pi agent retry ${event.attempt}/${event.maxAttempts} scheduled in ${event.delayMs}ms: ${safeErrorSummary(event.errorMessage)}`);
         break;
       case "auto_retry_end":
+        this.emit({ type: "run_liveness", phase: "retry_end" });
         if (event.success) this.activity("status", `Pi agent retry recovered after attempt ${event.attempt}`);
         else this.activity("error", `Pi agent retry ended after attempt ${event.attempt}: ${safeErrorSummary(event.finalError)}`);
         break;
       case "agent_end": {
+        this.emit({ type: "run_liveness", phase: "model_end" });
         const failure = terminalAgentError(event.messages, event.willRetry);
         if (failure) {
           this.runFailure = failure;
