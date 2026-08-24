@@ -220,6 +220,20 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
     (unavailable.content[0] as { text: string }).text,
     /Binding: persisted exact provider\/model.*unavailable in current catalog.*no provider substitution/i,
   );
+
+  (inspection as any).cleanup = {
+    state: "unknown", reasonCode: "ABANDONED_OWNER_RECOVERY", workerGeneration: 1,
+    startedAt: "2026-08-23T00:00:00.000Z", updatedAt: "2026-08-23T00:00:01.000Z",
+    abort: "timed-out", dispose: "timed-out", quiescence: "unknown",
+    mutationCapableAtStart: true, heldRunSlot: false, activeTools: [],
+  };
+  const quarantined = await createMainCoordinationTools(() => broker)[0].execute(
+    "inspect-cleanup", { address: inspection.address }, undefined, undefined, {} as never,
+  );
+  const quarantineText = (quarantined.content[0] as { text: string }).text;
+  assert.match(quarantineText, /Pi 0\.81\.1 cannot automatically verify or release.*unknown quarantine/is);
+  assert.match(quarantineText, /external process\/quiescence review.*operator recovery policy/i);
+  assert.doesNotMatch(quarantineText, /wait for.*cleanup/i);
 });
 
 it("renders terminal recovery from existing failure, mailbox, and current-batch work without private payloads", async () => {

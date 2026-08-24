@@ -669,7 +669,7 @@ export class DashboardComponent {
               + inspection.archiveBlockers.outgoingUnanswered.count
               + inspection.archiveBlockers.pendingReplies.count;
             const recovery = inspection.cleanup
-              ? "wait for cleanup proof; capacity stays held"
+              ? "no automatic cleanup release in Pi 0.81.1; external quiescence review required; capacity stays held"
               : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
                 ? "restart real obligations; cancel only an explicitly abandoned exact request; then archive when clean"
                 : inspection.archiveEligible && inspection.holdsActivationLease
