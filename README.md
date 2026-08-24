@@ -141,7 +141,7 @@ Provider/catalog changes require extension reload. Version 0.1.0 supports Pi 0.8
 ## Development and support
 
 - `npm run validate`: TypeScript, production dependency-license policy, all deterministic tests, real scripted-provider Pi RPC E2E, and a clean packed-artifact install/load smoke.
-- `npm run check:secrets`: local Gitleaks 8.30.1 scan using the same policy as required CI; see [`docs/release-security-checks.md`](docs/release-security-checks.md).
+- `npm run check:package`: authoritative package file/size/link policy; `npm run check:secrets`: local Gitleaks 8.30.1 history scan. Release evidence comes from one clean pushed commit and must retain complete logs plus an explicit not-tested list; see [`docs/release-security-checks.md`](docs/release-security-checks.md).
 - `CONTRIBUTING.md`: development and pull-request expectations.
 - `SECURITY.md`: vulnerability reporting, sensitive data, and the current trusted-worker threat boundary.
 - `CHANGELOG.md`: release changes and the `v0.1.0` initial-tag strategy.
