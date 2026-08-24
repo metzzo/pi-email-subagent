@@ -51,6 +51,9 @@ import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverM
 
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
 const ARCHIVE_BLOCKER_ID_LIMIT = 5;
+const KNOWN_NON_MUTATING_TOOLS = new Set(["read", "grep", "find", "ls", "send_email", "fetch_emails"]);
+const MAX_WORKER_EPOCH_TOOLS = 128;
+const MAX_WORKER_EPOCH_TOOL_NAME_CHARS = 100;
 
 // Every caught lifecycle/provider/session error uses the shared content-safe
 // boundary before it can enter mail, registry, UI, or a main notification.
@@ -308,28 +311,40 @@ export class AgentBroker {
         currentMain,
       ])];
 
+      this.nextWorkerGeneration = this.registry.agents.reduce((maximum, record) => Math.max(
+        maximum,
+        record.workerEpoch?.generation ?? 0,
+        record.cleanup?.workerGeneration ?? 0,
+      ), this.nextWorkerGeneration);
       const startupFailures: string[] = [];
       for (const loaded of this.registry.agents) {
         const shape = parseSubagentAddressShape(loaded.address);
         const record = clone(loaded);
         sanitizePersistedRecordErrors(record);
         record.address = shape.address;
+        const rawLegacyTools = [...record.tools];
+        const abandonedEpoch = record.workerEpoch;
+        const abandonedMutationCapable = abandonedEpoch
+          ? abandonedEpoch.phase !== "verified-clean" && abandonedEpoch.mutationCapable
+          : this.isToolSetMutationCapable(rawLegacyTools);
         if (this.namespaceLock.abandonedOwner
           && !record.cleanup
-          && !["stopped", "failed", "archived"].includes(record.state)
-          && this.isMutationCapable(record)) {
+          && record.state !== "archived"
+          && abandonedMutationCapable) {
           const now = nowIso();
           record.cleanup = {
             state: "unknown",
             reasonCode: "ABANDONED_OWNER_RECOVERY",
-            workerGeneration: 1,
+            workerGeneration: abandonedEpoch?.generation ?? 1,
             startedAt: now,
             updatedAt: now,
             abort: "timed-out",
             dispose: "timed-out",
             quiescence: "unknown",
             mutationCapableAtStart: true,
-            heldRunSlot: record.state === "running" || record.state === "spawning",
+            // Without an epoch, even a failed/stopped label cannot prove that
+            // the prior generation released its exact run slot before loss.
+            heldRunSlot: abandonedEpoch?.runSlotHeld ?? true,
             activeTools: [],
             detail: "The prior broker owner ended abruptly; Pi exposes no receipt proving that its completed or active process-capable tools are quiescent.",
           };
@@ -534,23 +549,43 @@ export class AgentBroker {
     if (record.work?.active.length) interruptActive(record.work);
   }
 
-  private isMutationCapable(record: Pick<AgentRecord, "tools">): boolean {
-    return record.tools.some((tool) => tool === "bash" || tool === "edit" || tool === "write");
+  private capabilityTools(tools: readonly string[]): string[] {
+    const unique = [...new Set(tools)];
+    if (unique.length > MAX_WORKER_EPOCH_TOOLS
+      || unique.some((tool) => !tool || tool.length > MAX_WORKER_EPOCH_TOOL_NAME_CHARS)) {
+      throw new Error(`Worker capability exceeds ${MAX_WORKER_EPOCH_TOOLS} tools or ${MAX_WORKER_EPOCH_TOOL_NAME_CHARS} characters per name.`);
+    }
+    return unique;
   }
 
-  private mutationSchedulingQuarantined(record: Pick<AgentRecord, "tools">): boolean {
+  private isToolSetMutationCapable(tools: readonly string[]): boolean {
+    return tools.some((tool) => !KNOWN_NON_MUTATING_TOOLS.has(tool));
+  }
+
+  private isMutationCapable(record: AgentRecord): boolean {
+    const worker = this.workers.get(record.address);
+    const generation = worker ? this.workerGenerations.get(worker) : undefined;
+    if (record.workerEpoch
+      && record.workerEpoch.phase !== "verified-clean"
+      && ((worker && generation === record.workerEpoch.generation) || record.state === "spawning")) {
+      return record.workerEpoch.mutationCapable;
+    }
+    return this.isToolSetMutationCapable(record.tools);
+  }
+
+  private mutationSchedulingQuarantined(record: AgentRecord): boolean {
     if (!this.isMutationCapable(record)) return false;
     if ([...this.cleanupQuarantines.values()].some((lease) => lease.mutationCapable)) return true;
     return [...this.records.values()].some((candidate) => candidate.cleanup?.mutationCapableAtStart);
   }
 
-  private mutationAdmission(record: Pick<AgentRecord, "tools">): number | undefined {
+  private mutationAdmission(record: AgentRecord): number | undefined {
     if (!this.isMutationCapable(record)) return undefined;
     if (this.mutationSchedulingQuarantined(record)) throw this.cleanupError("mutable scheduling");
     return this.mutationAdmissionEpoch;
   }
 
-  private mutationAdmissionCurrent(record: Pick<AgentRecord, "tools">, epoch: number | undefined): boolean {
+  private mutationAdmissionCurrent(record: AgentRecord, epoch: number | undefined): boolean {
     return epoch === undefined
       || (epoch === this.mutationAdmissionEpoch && !this.mutationSchedulingQuarantined(record));
   }
@@ -565,12 +600,15 @@ export class AgentBroker {
     if (this.cleanupQuarantines.has(address) || this.records.get(address)?.cleanup) throw this.cleanupError(address);
   }
 
-  private workerGeneration(worker: WorkerTransport, address: string): number {
+  private workerGeneration(worker: WorkerTransport, address: string, assignedGeneration?: number): number {
     let generation = this.workerGenerations.get(worker);
     if (!generation) {
-      generation = ++this.nextWorkerGeneration;
+      generation = assignedGeneration ?? ++this.nextWorkerGeneration;
+      this.nextWorkerGeneration = Math.max(this.nextWorkerGeneration, generation);
       this.workerGenerations.set(worker, generation);
       this.workerAddresses.set(worker, address);
+    } else if (assignedGeneration !== undefined && generation !== assignedGeneration) {
+      throw new Error(`Worker generation assignment changed for ${address}.`);
     }
     return generation;
   }
@@ -610,6 +648,9 @@ export class AgentBroker {
       }))
       : [];
     const workerGeneration = this.workerGeneration(worker, address);
+    const exactEpoch = record?.workerEpoch?.generation === workerGeneration
+      ? record.workerEpoch
+      : undefined;
     const lease: WorkerCleanupLease = {
       address,
       worker,
@@ -617,8 +658,8 @@ export class AgentBroker {
       reasonCode,
       startedAt: nowIso(),
       activeToolsAtStart,
-      heldRunSlot: this.active.has(address),
-      mutationCapable: record ? this.isMutationCapable(record) : true,
+      heldRunSlot: exactEpoch?.runSlotHeld ?? this.active.has(address),
+      mutationCapable: exactEpoch?.mutationCapable ?? true,
       targetState,
       alerted: false,
       operation: undefined as never,
@@ -721,6 +762,9 @@ export class AgentBroker {
     if (!record?.cleanup || record.cleanup.workerGeneration !== lease.workerGeneration) return;
     const previous = clone(record);
     delete record.cleanup;
+    if (record.workerEpoch?.generation === lease.workerGeneration) {
+      record.workerEpoch = { ...record.workerEpoch, phase: "verified-clean", runSlotHeld: false };
+    }
     if (lease.targetState === "stopped") {
       record.state = "stopped";
       record.currentActivity = "Stopped after verified cleanup";
@@ -908,10 +952,17 @@ export class AgentBroker {
       email.kind === "reply" && Boolean(email.inReplyTo && blockers.has(email.inReplyTo))));
   }
 
+  private setEpochRunSlot(record: AgentRecord, held: boolean): void {
+    if (record.workerEpoch?.phase === "activated") {
+      record.workerEpoch = { ...record.workerEpoch, runSlotHeld: held };
+    }
+  }
+
   private async parkWorker(address: string, record: AgentRecord): Promise<void> {
     const dependencies = this.outgoingDependencies(address);
     this.clearWatchdog(address);
     this.active.delete(address);
+    this.setEpochRunSlot(record, false);
     for (let index = this.pendingStarts.length - 1; index >= 0; index -= 1) {
       if (this.pendingStarts[index] === address) this.pendingStarts.splice(index, 1);
     }
@@ -1391,7 +1442,7 @@ export class AgentBroker {
         recipientProvider: recipientRecord.provider,
         recipientEffort: recipientRecord.effort,
         recipientRole: recipientRecord.name,
-        recipientTools: [...recipientRecord.tools],
+        recipientTools: [...(this.liveActiveTools(recipientRecord.address) ?? recipientRecord.tools)],
         recipientState: recipientRecord.state,
         recipientLifecycle: { ...recipientRecord.lifecycle },
       } : {}),
@@ -1430,10 +1481,15 @@ export class AgentBroker {
       }
       parsed ??= record ? this.resolveExistingRecord(record) : undefined;
       if (!parsed) throw new Error(`Recipient ${address} has no model binding.`);
-      const profile = record ?? { tools: resolveAgentProfile(this.options.config, parsed.address, parsed.name).tools };
+      const prospectiveTools = record?.tools ?? resolveAgentProfile(this.options.config, parsed.address, parsed.name).tools;
+      const mutationQuarantined = record
+        ? this.mutationSchedulingQuarantined(record)
+        : this.isToolSetMutationCapable(prospectiveTools)
+          && ([...this.cleanupQuarantines.values()].some((lease) => lease.mutationCapable)
+            || [...this.records.values()].some((candidate) => candidate.cleanup?.mutationCapableAtStart));
       if (this.cleanupQuarantines.has(parsed.address)
         || record?.cleanup
-        || this.mutationSchedulingQuarantined(profile)) {
+        || mutationQuarantined) {
         const spawned = !record;
         if (!record) {
           record = this.makeRecord(parsed, envelope.lifecycleIntent, envelope.effortIntent);
@@ -1551,9 +1607,18 @@ export class AgentBroker {
     record.updatedAt = nowIso();
     this.records.set(record.address, record);
     this.routableRecords.add(record.address);
-    // A newly accepted identity (and its lifecycle) is durable before provider startup.
-    // Restored records were already loaded from durable registry state.
-    if (!restored) await this.persistRegistry(true);
+    const assignedWorkerGeneration = ++this.nextWorkerGeneration;
+    const configuredTools = this.capabilityTools(record.tools);
+    record.workerEpoch = {
+      generation: assignedWorkerGeneration,
+      phase: "spawning",
+      tools: configuredTools,
+      mutationCapable: this.isToolSetMutationCapable(configuredTools),
+      runSlotHeld: false,
+    };
+    // Configured capability intent and its exact generation are durable before
+    // the factory or Pi session can perform startup work.
+    await this.persistRegistry(true);
     const spawnStartedAt = Date.now();
     let worker: WorkerTransport;
     const factoryPromise = Promise.resolve(this.options.workerFactory(parsed.model));
@@ -1563,7 +1628,7 @@ export class AgentBroker {
       // A late factory result is still owned: register one cleanup lease rather
       // than treating the factory deadline as cancellation.
       swallow(factoryPromise.then(async (late) => {
-        this.workerGeneration(late, record.address);
+        this.workerGeneration(late, record.address, assignedWorkerGeneration);
         const lease = this.beginWorkerCleanup(record.address, late, "LIFECYCLE_SPAWN_TIMEOUT", "failed");
         await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
       }));
@@ -1576,7 +1641,7 @@ export class AgentBroker {
       }
       throw error;
     }
-    this.workerGeneration(worker, record.address);
+    this.workerGeneration(worker, record.address, assignedWorkerGeneration);
     if (this.cancelled(generation)) {
       const lease = this.beginWorkerCleanup(record.address, worker, "BROKER_START_CANCELLED", "paused");
       await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs).catch(() => undefined);
@@ -1601,6 +1666,14 @@ export class AgentBroker {
       if (this.cancelled(generation)) throw new Error("Worker creation was cancelled by broker shutdown.");
       const previous = this.workers.get(record.address);
       if (previous && previous !== worker) throw new Error(`Agent ${record.address} already has a live worker.`);
+      const activeTools = this.capabilityTools(worker.getSnapshot().activeTools);
+      record.workerEpoch = {
+        generation: assignedWorkerGeneration,
+        phase: "activated",
+        tools: activeTools,
+        mutationCapable: this.isToolSetMutationCapable(activeTools),
+        runSlotHeld: false,
+      };
       this.workers.set(record.address, worker);
       this.clearToolLifecycle(record.address);
       this.toolLifecycles.set(record.address, { worker, calls: new Map() });
@@ -1899,6 +1972,16 @@ export class AgentBroker {
     this.publish();
   }
 
+  private liveActiveTools(address: string): string[] | undefined {
+    const worker = this.workers.get(address);
+    if (!worker) return undefined;
+    try {
+      return [...worker.getSnapshot().activeTools];
+    } catch {
+      return undefined;
+    }
+  }
+
   private syncWorker(address: string, worker: WorkerTransport): void {
     const current = this.records.get(address);
     if (!current) return;
@@ -2103,6 +2186,7 @@ export class AgentBroker {
 
   private async deferMutationAdmission(address: string, record: AgentRecord): Promise<void> {
     this.active.delete(address);
+    this.setEpochRunSlot(record, false);
     this.enqueueStart(address);
     record.currentActivity = "Deferred by cleanup quarantine";
     record.updatedAt = nowIso();
@@ -2199,6 +2283,7 @@ export class AgentBroker {
 
     this.scheduling.add(address);
     this.active.add(address);
+    this.setEpochRunSlot(record, true);
     record.state = "running";
     record.currentActivity = `Receiving ${queued.length} email${queued.length === 1 ? "" : "s"}`;
     record.updatedAt = nowIso();
@@ -2210,6 +2295,9 @@ export class AgentBroker {
     const requestIds = queued.filter((email) => email.kind === "request").map((email) => email.id);
     const replyIds = queued.filter((email) => email.kind !== "request").map((email) => email.id);
     try {
+      // The exact generation/run-slot claim is durable before any Pi prompt can
+      // be admitted. The prompt acceptance deadline does not move this boundary.
+      await this.persistRegistry();
       if (requestIds.length > 0) await this.mailStore.markDelivered(requestIds);
       if (!this.mutationAdmissionCurrent(record, admissionEpoch)) {
         await this.deferMutationAdmission(address, record);
@@ -2245,6 +2333,7 @@ export class AgentBroker {
       this.clearWatchdog(address);
       this.clearToolLifecycle(address, worker);
       this.active.delete(address);
+      this.setEpochRunSlot(record, false);
       record.state = "failed";
       record.failure = errorMessage(error);
       record.updatedAt = nowIso();
@@ -2283,9 +2372,11 @@ export class AgentBroker {
       return;
     }
     this.active.add(address);
+    this.setEpochRunSlot(record, true);
     record.state = "running";
     record.enforcementAttempts += 1;
     try {
+      await this.persistRegistry();
       // No await between the epoch check and synchronous prompt invocation.
       if (!this.mutationAdmissionCurrent(record, admissionEpoch)) {
         await this.deferMutationAdmission(address, record);
@@ -2305,6 +2396,7 @@ export class AgentBroker {
       this.clearWatchdog(address);
       this.clearToolLifecycle(address, worker);
       this.active.delete(address);
+      this.setEpochRunSlot(record, false);
       record.state = "failed";
       record.failure = errorMessage(error);
       await this.persistRegistry();
@@ -2327,6 +2419,7 @@ export class AgentBroker {
       this.interruptRecordWork(record);
       if (this.queuedDependencyReplies(address).length > 0) {
         this.active.delete(address);
+        this.setEpochRunSlot(record, false);
         record.state = "queued";
         record.currentActivity = "Receiving a completed child dependency";
         record.updatedAt = nowIso();
@@ -2374,6 +2467,7 @@ export class AgentBroker {
         record.state = "failed";
         record.failure = `Stopped with ${outstanding.length} unanswered email(s) after ${record.enforcementAttempts} reminder(s).`;
         this.active.delete(address);
+        this.setEpochRunSlot(record, false);
         await this.persistRegistry();
         if (!this.settlementCurrent(settlement)) return;
         await this.ensureTerminalChildBlockers(record);
@@ -2391,6 +2485,7 @@ export class AgentBroker {
       record.currentActivity = "Idle";
       record.updatedAt = nowIso();
       this.active.delete(address);
+      this.setEpochRunSlot(record, false);
       await this.persistRegistry();
       if (!this.settlementCurrent(settlement)) return;
       if (this.mailStore.queued(address).length > 0) swallow(this.schedule(address));
@@ -2411,6 +2506,7 @@ export class AgentBroker {
         record.failure = errorMessage(error);
         record.updatedAt = nowIso();
         this.active.delete(address);
+        this.setEpochRunSlot(record, false);
       }
       if (!this.settlementCurrent(settlement)) return;
       await this.persistRegistry();
@@ -2464,6 +2560,7 @@ export class AgentBroker {
       if (!worker) {
         this.assertNoCleanupQuarantine(address);
         this.active.delete(address);
+        this.setEpochRunSlot(record, false);
         record.state = "stopped";
         record.currentActivity = "Stopped by user";
         record.updatedAt = nowIso();
@@ -2588,6 +2685,7 @@ export class AgentBroker {
       }
       this.assertActive();
       this.active.delete(address);
+      this.setEpochRunSlot(record, false);
       const pendingIndex = this.pendingStarts.indexOf(address);
       if (pendingIndex >= 0) this.pendingStarts.splice(pendingIndex, 1);
       record.state = "archived";
@@ -2649,6 +2747,8 @@ export class AgentBroker {
     }
     const profile = resolveAgentProfile(this.options.config, address, name);
     const tools = record?.tools ?? profile.tools;
+    const activeTools = record ? this.liveActiveTools(address) : undefined;
+    const effectiveTools = activeTools ?? tools;
     const holdsActivationLease = this.activationLeases.has(address);
     const archiveBlockers = this.classifyArchiveBlockers(address, record, this.workers.get(address));
     const cleanup = record?.cleanup
@@ -2659,7 +2759,10 @@ export class AgentBroker {
       wouldSpawn: !record,
       capacityAvailable: (!record || holdsActivationLease || this.routableRecords.has(address))
         && !cleanup
-        && !this.mutationSchedulingQuarantined({ tools })
+        && !(record
+          ? this.mutationSchedulingQuarantined(record)
+          : this.isToolSetMutationCapable(tools)
+            && [...this.records.values()].some((candidate) => candidate.cleanup?.mutationCapableAtStart))
         && (holdsActivationLease || this.activeIdentityCount() < this.options.config.maxAgents),
       capacity: this.capacitySnapshot(),
       holdsActivationLease,
@@ -2668,8 +2771,9 @@ export class AgentBroker {
       effort: record?.effort ?? effortOverride ?? profile.effort,
       role: name,
       tools: [...tools],
+      ...(activeTools ? { activeTools } : {}),
       ...(record?.instructions ?? profile.instructions ? { instructions: record?.instructions ?? profile.instructions } : {}),
-      writable: tools.some((tool) => ["bash", "edit", "write"].includes(tool)),
+      writable: this.isToolSetMutationCapable(effectiveTools),
       canSpawn: record?.canSpawn ?? profile.canSpawn,
       state: record?.state ?? "new",
       ...(record?.currentActivity ? { currentActivity: record.currentActivity } : {}),
@@ -2829,11 +2933,13 @@ export class AgentBroker {
 
   getSnapshot(): BrokerSnapshot {
     const agents = [...this.records.values()].map((source) => {
-      const { work, ...withoutWork } = source;
+      const { work, activeTools: _derivedActiveTools, ...withoutWork } = source;
       const cleanup = source.cleanup
         ?? (this.cleanupQuarantines.get(source.address) ? this.cleanupDiagnostic(this.cleanupQuarantines.get(source.address)!) : undefined);
+      const liveActiveTools = this.liveActiveTools(source.address);
       return {
         ...clone(withoutWork),
+        ...(liveActiveTools ? { activeTools: liveActiveTools } : {}),
         ...(cleanup ? { cleanup: clone(cleanup) } : {}),
         ...(work ? { work: lightweightWork(work) } : {}),
       } as AgentRecord;

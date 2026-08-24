@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { DEFAULT_LIFECYCLE, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
-import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem } from "./types.ts";
+import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
 import { clone, nowIso } from "./util.ts";
 
@@ -17,6 +17,9 @@ const CLEANUP_STATES = new Set<CleanupDiagnostic["state"]>(["pending", "unknown"
 const CLEANUP_PHASES = new Set<CleanupDiagnostic["abort"]>(["pending", "succeeded", "failed", "timed-out"]);
 const MAX_CLEANUP_DETAIL_CHARS = 2_000;
 const MAX_CLEANUP_TOOLS = 64;
+const WORKER_EPOCH_PHASES = new Set<WorkerCapabilityEpoch["phase"]>(["spawning", "activated", "verified-clean"]);
+const MAX_WORKER_EPOCH_TOOLS = 128;
+const MAX_WORKER_EPOCH_TOOL_NAME_CHARS = 100;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
@@ -166,6 +169,30 @@ function parseWork(value: unknown, label: string): AgentWorkState {
   return work;
 }
 
+function parseWorkerEpoch(value: unknown, label: string): WorkerCapabilityEpoch | undefined {
+  if (value === undefined) return undefined;
+  const raw = object(value, label);
+  if (!Number.isSafeInteger(raw.generation) || (raw.generation as number) < 1) {
+    throw new Error(`${label}.generation must be a positive safe integer.`);
+  }
+  const phase = string(raw.phase, `${label}.phase`) as WorkerCapabilityEpoch["phase"];
+  if (!WORKER_EPOCH_PHASES.has(phase)) throw new Error(`${label}.phase is invalid.`);
+  const tools = stringArray(raw.tools, `${label}.tools`);
+  if (tools.length > MAX_WORKER_EPOCH_TOOLS || new Set(tools).size !== tools.length
+    || tools.some((tool) => !tool || tool.length > MAX_WORKER_EPOCH_TOOL_NAME_CHARS)) {
+    throw new Error(`${label}.tools must contain at most ${MAX_WORKER_EPOCH_TOOLS} unique names of at most ${MAX_WORKER_EPOCH_TOOL_NAME_CHARS} characters.`);
+  }
+  if (typeof raw.mutationCapable !== "boolean") throw new Error(`${label}.mutationCapable must be a boolean.`);
+  if (typeof raw.runSlotHeld !== "boolean") throw new Error(`${label}.runSlotHeld must be a boolean.`);
+  return {
+    generation: raw.generation as number,
+    phase,
+    tools,
+    mutationCapable: raw.mutationCapable,
+    runSlotHeld: raw.runSlotHeld,
+  };
+}
+
 function parseCleanup(value: unknown, label: string, fallbackTools: readonly string[]): CleanupDiagnostic | undefined {
   if (value === undefined) return undefined;
   const raw = object(value, label);
@@ -254,7 +281,9 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     activity: parseActivity(raw.activity, `${label}.activity`),
     work: parseWork(raw.work, `${label}.work`),
   };
-  const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`, record.tools);
+  const workerEpoch = parseWorkerEpoch(raw.workerEpoch, `${label}.workerEpoch`);
+  if (workerEpoch) record.workerEpoch = workerEpoch;
+  const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`, record.workerEpoch?.tools ?? record.tools);
   if (cleanup) record.cleanup = cleanup;
   for (const [key, fieldLabel] of [
     ["instructions", `${label}.instructions`],

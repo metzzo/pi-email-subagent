@@ -295,19 +295,23 @@ describe("broker lifecycle races", () => {
     await initial.shutdown();
 
     const workers: FakeWorker[] = [];
-    const restoring = makeBroker(root, () => {
+    let restoring!: AgentBroker;
+    let injected = false;
+    class FailingPostRestoreMain extends FakeMainAdapter {
+      override updateState(snapshot: Parameters<FakeMainAdapter["updateState"]>[0]): void {
+        if (!injected && (restoring as any)?.lifecycle === "active" && snapshot.agents.length > 0) {
+          injected = true;
+          throw new Error("post-restore publication failed");
+        }
+        super.updateState(snapshot);
+      }
+    }
+    restoring = makeBroker(root, () => {
       const worker = new FakeWorker();
       workers.push(worker);
       return worker;
-    });
-    const originalSave = restoring.registryStore.save.bind(restoring.registryStore);
-    let saves = 0;
-    restoring.registryStore.save = async (registry) => {
-      saves += 1;
-      if (saves === 3) throw new Error("post-restore persistence failed");
-      await originalSave(registry);
-    };
-    await assert.rejects(restoring.init(), /post-restore persistence failed/);
+    }, new FailingPostRestoreMain());
+    await assert.rejects(restoring.init(), /post-restore publication failed/);
     assert.equal(workers.length, 1);
     assert.equal(workers[0]?.disposed, true);
     await restoring.shutdown();
