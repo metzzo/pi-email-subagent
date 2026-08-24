@@ -38,7 +38,7 @@ persisted. Later mail cannot mutate it. Addresses use:
 <name>.<task-slug>@<registered-model>.com
 ```
 
-The main thread is `main@<model>.com`. The domain is a model ID, not a provider ID. A globally unique model ID is selected directly for a new identity; duplicates use the current main provider only when it identifies exactly one candidate. The first accepted mail persists that exact provider/model binding. Existing, stopped, archived, and restored identities always preserve their original binding across main-model changes and later duplicate IDs; unavailable bindings are never silently substituted. See [provider-aware durable model routing](docs/provider-aware-model-routing.md). Replies must copy the exact subject returned by `fetch_emails()`:
+The main thread is `main@<model>.com`. The domain is a model ID, not a provider ID. A globally unique model ID is selected directly for a new identity; duplicates use the current main provider only when it identifies exactly one candidate. The first accepted mail persists that exact provider/model binding. Existing, failed, stopped, archived, and restored identities always preserve their original binding across main-model changes and later duplicate IDs; unavailable bindings are never silently substituted. Ordinary mail to a known failed identity is accepted and queued under its stable ID without catalog re-resolution or implicit restart; only explicit same-identity restart can resume it. See [provider-aware durable model routing](docs/provider-aware-model-routing.md). Replies must copy the exact subject returned by `fetch_emails()`:
 
 ```text
 Re: [mail-id] Original subject

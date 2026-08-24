@@ -185,6 +185,130 @@ describe("broker hardening", () => {
     }
   });
 
+  it("accepts ordinary mail for a failed identity without routing or implicit restart", async () => {
+    const { broker, workers } = await setup();
+    try {
+      const initial = await broker.send(broker.mainAddress, {
+        to: "worker.failed-queued@gpt-5.4.com", subject: "Initial", message: "Answer before failure.", priority: "low",
+      });
+      await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: initial.expectedReplySubject!,
+        message: "Initial request complete.",
+        priority: "low",
+      });
+      workers[0]!.settle();
+      await eventually(() => assert.equal(broker.inspectAgent(initial.envelope.to).state, "idle"));
+      workers[0]!.fail("terminal provider failure");
+      await eventually(() => assert.equal(broker.inspectAgent(initial.envelope.to).state, "failed"));
+
+      const firstQueued = await broker.send(broker.mainAddress, {
+        to: initial.envelope.to, subject: "Queued one", message: "Preserve this accepted ID.", priority: "low",
+      });
+      const secondQueued = await broker.send(broker.mainAddress, {
+        to: initial.envelope.to, subject: "Queued two", message: "Preserve this accepted ID too.", priority: "high",
+      });
+      for (const queued of [firstQueued, secondQueued]) {
+        assert.equal(queued.spawned, false);
+        assert.equal(queued.recipientDisposition, "failed");
+        assert.equal(queued.recipientState, "failed");
+        assert.equal(queued.envelope.deliveryState, "queued");
+      }
+      assert.equal(workers.length, 1, "ordinary accepted mail never creates a replacement worker");
+
+      await broker.restart(initial.envelope.to);
+      assert.equal(workers.length, 2, "only explicit restart creates the replacement worker");
+      await eventually(() => assert.equal(workers[1]!.prompts.length, 1));
+      assert.match(workers[1]!.prompts[0]!, new RegExp(firstQueued.envelope.id));
+      assert.match(workers[1]!.prompts[0]!, new RegExp(secondQueued.envelope.id));
+      assert.equal(broker.mailStore.get(firstQueued.envelope.id)?.deliveryState, "delivered");
+      assert.equal(broker.mailStore.get(secondQueued.envelope.id)?.deliveryState, "delivered");
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("checks failed state before an attached worker and keeps the accepted envelope queued", async () => {
+    const { broker, workers } = await setup();
+    try {
+      const initial = await broker.send(broker.mainAddress, {
+        to: "worker.failed-attached@gpt-5.4.com", subject: "Initial", message: "Remain attached.", priority: "low",
+      });
+      workers[0]!.emit({ type: "state", state: "failed" });
+      assert.equal(broker.inspectAgent(initial.envelope.to).state, "failed");
+
+      const queued = await broker.send(broker.mainAddress, {
+        to: initial.envelope.to, subject: "Must queue", message: "Do not route to the attached worker.", priority: "high",
+      });
+      assert.equal(queued.recipientDisposition, "failed");
+      assert.equal(queued.envelope.deliveryState, "queued");
+      assert.equal(workers[0]!.steers.length, 0);
+      assert.equal(workers.length, 1);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("queues a child reply for a failed parent without answering until explicit parent restart", async () => {
+    const { broker, workers } = await setup();
+    try {
+      const upstream = await broker.send(broker.mainAddress, {
+        to: "worker.failed-parent@gpt-5.4.com", subject: "Parent", message: "Delegate once.", priority: "low",
+      });
+      const childRequest = await workers[0]!.send({
+        to: "worker.failed-child@gpt-5.4.com", subject: "Child", message: "Return a child result.", priority: "low",
+      });
+      workers[0]!.fail("parent failed before child reply");
+      await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "failed"));
+
+      const childReply = await workers[1]!.send({
+        to: upstream.envelope.to,
+        subject: childRequest.expectedReplySubject!,
+        message: "Durable child result.",
+        priority: "low",
+      });
+      assert.equal(childReply.recipientDisposition, "failed");
+      assert.equal(childReply.envelope.deliveryState, "queued");
+      assert.equal(broker.mailStore.get(childRequest.envelope.id)?.replyReservedBy, childReply.envelope.id);
+      assert.equal(broker.mailStore.get(childRequest.envelope.id)?.answeredAt, undefined);
+      assert.equal(workers.length, 2);
+    } finally {
+      await broker.shutdown();
+    }
+  });
+
+  it("accepts mail for a known failed binding that is absent from the current catalog", async () => {
+    const first = await setup();
+    await first.broker.send(first.broker.mainAddress, {
+      to: "worker.removed-failed@gpt-5.4.com", subject: "Persist", message: "Persist the identity.", priority: "low",
+    });
+    first.workers[0]!.fail("terminal before model removal");
+    await eventually(() => assert.equal(first.broker.inspectAgent("worker.removed-failed@gpt-5.4.com").state, "failed"));
+    await first.broker.shutdown();
+
+    const registryPath = join(first.root, "state", "registry.json");
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as { agents: Array<Record<string, unknown>> };
+    registry.agents[0]!.provider = "removed-provider";
+    registry.agents[0]!.modelId = "gpt-5.4";
+    registry.agents[0]!.state = "failed";
+    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+
+    const restored = await setup({}, first.root);
+    try {
+      const accepted = await restored.broker.send(restored.broker.mainAddress, {
+        to: "worker.removed-failed@gpt-5.4.com", subject: "Queue while unavailable", message: "Do not consult the catalog.", priority: "low",
+      });
+      assert.equal(accepted.recipientDisposition, "failed");
+      assert.equal(accepted.envelope.deliveryState, "queued");
+      assert.equal(accepted.spawned, false);
+      assert.equal(restored.workers.length, 0);
+      await assert.rejects(restored.broker.restart(accepted.envelope.to), /removed-provider\/gpt-5\.4.*not rebound/i);
+      assert.equal(restored.broker.mailStore.get(accepted.envelope.id)?.deliveryState, "queued");
+    } finally {
+      await restored.broker.shutdown();
+    }
+  });
+
   it("re-enforces the original sender when a queued agent-to-agent reply later fails delivery", async () => {
     const { broker, workers } = await setup();
     try {

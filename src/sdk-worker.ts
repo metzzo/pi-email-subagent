@@ -82,6 +82,9 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
           `Expected reply subject: ${result.expectedReplySubject ?? "none"}`,
           `Answered email: ${result.answeredEmailId ?? "none"}`,
         ];
+        if (result.recipientDisposition === "failed") {
+          lines.push("Recipient recovery: mail is accepted and queued; the recipient remains failed, no worker was spawned, and explicit manage_agent restart is required after effect review.");
+        }
         if (result.recipientProvider && result.recipientModel) {
           lines.push(`Recipient model: ${result.recipientProvider}/${result.recipientModel}`);
           lines.push("Binding: persisted for this identity");

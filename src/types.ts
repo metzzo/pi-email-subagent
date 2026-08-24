@@ -219,7 +219,7 @@ export interface SendEmailInput {
   lifecycle?: LifecycleOverride;
 }
 
-export type RecipientDisposition = "main" | "spawned" | "reused" | "restored" | "stopped";
+export type RecipientDisposition = "main" | "spawned" | "reused" | "restored" | "stopped" | "failed";
 
 export interface SendEmailResult {
   envelope: EmailEnvelope;
