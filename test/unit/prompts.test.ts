@@ -100,6 +100,8 @@ describe("mail prompts", () => {
     assert.match(prompt, /late replies.*delivered automatically/i);
     assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
     assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
+    assert.match(prompt, /collection provides at most one live presentation.*Pi 0\.81\.1.*no staged tool-result append receipt/is);
+    assert.match(prompt, /not a crash-proof exactly-once presentation guarantee/i);
     assert.match(prompt, /continue useful work or end the turn/i);
     assert.match(prompt, /identity-capacity recovery.*reuse.*relevant existing identity/is);
     assert.match(prompt, /restart.*stopped or failed.*real assigned work/is);

@@ -9,6 +9,7 @@ import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 
 const { Type } = TypeBox;
 const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated. Later replies are delivered automatically to the main thread when they arrive (or after broker/session restoration). No immediate wait_for_replies rejoin is needed merely to keep requests alive. Rejoin only for a deliberate synchronous collection/status window.";
+const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live presentation. Pi 0.81.1 exposes no staged tool-result append receipt, so a process crash can leave the mail journal answered before this exact tool result is durably present in the main session. Recover by inspecting Conversation/mail and rejoining the stable request ID; this is not a crash-proof exactly-once guarantee.";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
@@ -156,7 +157,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
-      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. Returns completed and pending results together. With collection enabled, replies received during the window do not trigger separate model turns; after a pending timeout, late replies are delivered automatically to main.",
+      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. Returns completed and pending results together. Collection suppresses a separate live turn and is at-most-one live presentation, not crash-proof exactly once: Pi 0.81.1 has no staged tool-result append receipt. After a pending timeout, late replies are delivered automatically to main.",
     promptSnippet: "Open a bounded observation window for replies to delegated email request IDs.",
     promptGuidelines: [
       "Use request IDs returned by send_email; never invent IDs.",
@@ -181,6 +182,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
         );
         const lines = [
           `Replies: ${result.complete ? "complete" : result.timedOut ? "timed out with pending work" : "partial"}`,
+          ...((params.collect ?? true) ? [COLLECTION_PRESENTATION_LIMIT] : []),
         ];
         const omitted: string[] = [];
         for (const item of result.items) {
