@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
+import * as PiAi from "@earendil-works/pi-ai";
+import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import * as PiTui from "@earendil-works/pi-tui";
+import * as TypeBox from "typebox";
 import {
   assertPiRuntimeFeatures,
   assertSupportedPiRuntime,
@@ -21,5 +25,29 @@ it("reports an actionable supported-Pi error for a missing required public featu
   assert.throws(
     () => assertPiRuntimeFeatures({ SessionManager: { open() {} } }, {}, {}, {}),
     /requires the Pi 0\.81\.1 public API surface.*@earendil-works\/pi-coding-agent\.getAgentDir.*Install Pi 0\.81\.1/s,
+  );
+});
+
+it("probes the public no-write settings snapshot and auth-status surface before use", () => {
+  class IncompleteSettingsManager {
+    static create() {}
+    getGlobalSettings() {}
+  }
+  class IncompleteModelRuntime {
+    static create() {}
+  }
+  const codingAgent = {
+    ...PiCodingAgent,
+    SettingsManager: IncompleteSettingsManager,
+    ModelRuntime: IncompleteModelRuntime,
+  } as unknown as Record<string, unknown>;
+  assert.throws(
+    () => assertPiRuntimeFeatures(
+      codingAgent,
+      PiAi as unknown as Record<string, unknown>,
+      PiTui as unknown as Record<string, unknown>,
+      TypeBox as unknown as Record<string, unknown>,
+    ),
+    /ModelRuntime\.prototype\.getProviderAuthStatus.*SettingsManager\.fromStorage.*SettingsManager\.prototype\.getProjectSettings/s,
   );
 });

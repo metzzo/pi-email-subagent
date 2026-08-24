@@ -20,6 +20,7 @@ import type {
   WorkerTransport,
 } from "./types.ts";
 import { formatUnanswered } from "./prompts.ts";
+import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
 import { clone, errorMessage, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem } from "./work-ledger.ts";
@@ -190,7 +191,11 @@ export class SdkWorker implements WorkerTransport {
   private runFailure?: string;
   private cwd = process.cwd();
 
-  constructor(private readonly modelRuntime: ModelRuntime, private readonly runtimeModel?: Model<any>) {}
+  constructor(
+    private readonly modelRuntime: ModelRuntime,
+    private readonly runtimeModel?: Model<any>,
+    private readonly settingsSnapshot?: WorkerSettingsSnapshot,
+  ) {}
 
   subscribe(listener: (event: WorkerEvent) => void): () => void {
     this.listeners.add(listener);
@@ -230,16 +235,12 @@ export class SdkWorker implements WorkerTransport {
     this.cwd = config.cwd;
     this.setState("spawning");
 
-    const settings = PiCodingAgent.SettingsManager.create(config.cwd, config.agentDir, { projectTrusted: config.projectTrusted });
-    const settingsErrors = settings.drainErrors();
-    settings.applyOverrides({
-      steeringMode: "all",
-      followUpMode: "all",
-      defaultThinkingLevel: this.record.effort,
-    });
-    for (const { scope } of settingsErrors) {
-      this.activity("error", `Pi ${scope} settings could not be loaded; Pi fallback settings apply for that scope.`);
-    }
+    const settings = this.settingsSnapshot?.createManager(this.record.effort)
+      ?? PiCodingAgent.SettingsManager.inMemory({
+        steeringMode: "all",
+        followUpMode: "all",
+        defaultThinkingLevel: this.record.effort,
+      }, { projectTrusted: config.projectTrusted });
     const loader = new PiCodingAgent.DefaultResourceLoader({
       cwd: config.cwd,
       agentDir: config.agentDir,
@@ -295,6 +296,11 @@ export class SdkWorker implements WorkerTransport {
     this.unsubscribeSession = session.subscribe((event) => this.onSessionEvent(event));
     session.setSteeringMode("all");
     session.setFollowUpMode("all");
+    settings.applyOverrides({
+      steeringMode: "all",
+      followUpMode: "all",
+      defaultThinkingLevel: this.record.effort,
+    });
     this.setState("idle");
     const unknownTools = requestedTools.filter((tool) => !this.record!.tools.includes(tool));
     if (unknownTools.length > 0) this.activity("error", `Unknown tools omitted: ${unknownTools.join(", ")}`);
@@ -554,6 +560,11 @@ export class SdkWorker implements WorkerTransport {
     const session = this.requiredSession();
     if (!session.isIdle) throw new Error("Effort can only be changed while the worker is idle.");
     session.setThinkingLevel(level);
+    session.settingsManager.applyOverrides({
+      steeringMode: "all",
+      followUpMode: "all",
+      defaultThinkingLevel: session.thinkingLevel,
+    });
     if (this.record) this.record.effort = session.thinkingLevel;
   }
 

@@ -11,6 +11,7 @@ import { WorkerRuntimeFactory } from "./model-runtime.ts";
 import { assertSupportedPiRuntime } from "./pi-compat.ts";
 import { formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
+import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import type { BrokerSnapshot, EmailEnvelope, MainAdapter, SubagentConfig } from "./types.ts";
 import {
   ConversationSource,
@@ -271,7 +272,12 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     }
 
     const agentDir = getAgentDir();
-    const configResult = loadConfig(agentDir, ctx.cwd, ctx.isProjectTrusted());
+    const projectTrusted = ctx.isProjectTrusted();
+    const workerSettings = WorkerSettingsSnapshot.capture(ctx.cwd, agentDir, projectTrusted);
+    for (const { scope } of workerSettings.loadIssues) {
+      ctx.ui.notify(`Pi ${scope} settings could not be loaded; the worker snapshot uses Pi fallback settings for that scope.`, "warning");
+    }
+    const configResult = loadConfig(agentDir, ctx.cwd, projectTrusted);
     effectiveConfig = configResult.config;
     for (const warning of configResult.warnings) ctx.ui.notify(warning, "warning");
     mainAddress = makeMainAddress(ctx.model.id);
@@ -322,9 +328,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       mainAdapter: adapter,
       workerFactory: async (model) => {
         const snapshot = await runtimeFactory.create(model.provider, model.id);
-        return new SdkWorker(snapshot.runtime, snapshot.model);
+        return new SdkWorker(snapshot.runtime, snapshot.model, workerSettings);
       },
-      projectTrusted: ctx.isProjectTrusted(),
+      projectTrusted,
     });
     broker = next;
     try {
