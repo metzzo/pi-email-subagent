@@ -108,8 +108,10 @@ export interface ActivityItem {
 }
 
 export type WorkKind = "edit" | "write" | "shell" | "custom";
-export type WorkStatus = "running" | "succeeded" | "failed" | "interrupted";
+export type WorkStatus = "running" | "succeeded" | "failed" | "interrupted" | "unknown";
 export type WorkAttribution = "explicit" | "unverified";
+export type WorkObservedResult = "success" | "error";
+export type WorkUnknownReason = "missing-start" | "mismatched-tool" | "unsafe-path" | "orphan-result";
 
 export interface WorkItem {
   toolCallId: string;
@@ -120,6 +122,10 @@ export interface WorkItem {
   status: WorkStatus;
   startedAt: string;
   endedAt?: string;
+  /** Pi's terminal result flag; this does not confirm which effects occurred. */
+  observedResult?: WorkObservedResult;
+  /** Fixed structural reason for a terminal unknown-effect item. */
+  reasonCode?: WorkUnknownReason;
   durationMs?: number;
   path?: string;
   displayPath?: string;
@@ -147,6 +153,8 @@ export interface AgentWorkState {
   active: WorkItem[];
   recent: WorkItem[];
   inspection: WorkCounters;
+  /** The bounded recovery slice omitted structural effect evidence. */
+  effectEvidenceUnavailable?: boolean;
   recoveryError?: string;
 }
 

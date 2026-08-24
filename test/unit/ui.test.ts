@@ -368,6 +368,33 @@ describe("dashboard rendering", () => {
     rows = 12; resizing.invalidate(); const tall = resizing.render(80); assert.ok(tall.length > short.length);
   });
 
+  it("renders structurally unknown mutation evidence as unverified rather than failed or confirmed", () => {
+    const agent = record();
+    agent.work = emptyWorkState();
+    agent.work.currentBatchId = 4;
+    const at = new Date().toISOString();
+    agent.work.recent.push({
+      toolCallId: "orphan-edit",
+      batchId: 4,
+      toolName: "edit",
+      kind: "edit",
+      attribution: "unverified",
+      status: "unknown",
+      startedAt: at,
+      endedAt: at,
+      observedResult: "success",
+      reasonCode: "orphan-result",
+    });
+    const snapshot = { mainAddress: "main", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY };
+    const component = new DashboardComponent(() => snapshot, () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 20);
+    component.handleInput("\r");
+    const rendered = component.render(120).join("\n");
+    assert.match(rendered, /Unverified effects/);
+    assert.match(rendered, /effect unknown\/unverified.*observed success.*orphan-result/i);
+    assert.doesNotMatch(rendered, /Confirmed and attempted mutations/);
+    component.dispose();
+  });
+
   it("sanitizes unsafe live path metadata in dashboard, widget, and diff", () => {
     const agent = record(); agent.work = emptyWorkState();
     const unsafe = startWorkItem("unsafe", "edit", { path: "safe", edits: [] }, 1, "/work")!;

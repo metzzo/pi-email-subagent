@@ -525,17 +525,19 @@ export class DashboardComponent {
 
   private formatWorkLine(item: WorkItem, selected: boolean, conflicts: Map<string, string[]>): string {
     const marker = selected ? ">" : " ";
-    const icon = item.status === "running" ? (item.attribution === "explicit" ? "✎" : "?") : item.status === "succeeded" ? (item.attribution === "explicit" ? "✓" : "?") : item.status === "failed" ? "✗" : "!";
+    const icon = item.status === "running" ? (item.attribution === "explicit" ? "✎" : "?") : item.status === "succeeded" ? (item.attribution === "explicit" ? "✓" : "?") : item.status === "failed" ? "✗" : item.status === "unknown" ? "?" : "!";
     const target = sanitizeConversationLabel(item.displayPath ?? item.commandPreview ?? "(target unknown)");
     const toolName = sanitizeConversationLabel(item.toolName).slice(0, 100) || "tool";
     let outcome: string = item.status === "running" ? `running ${Math.max(0, Math.floor((Date.now() - Date.parse(item.startedAt)) / 1_000))}s` : item.status;
     if (item.status === "succeeded" && item.kind === "edit") outcome = item.linesAdded === undefined || item.linesRemoved === undefined ? "patch stats unknown" : `+${item.linesAdded}/-${item.linesRemoved}`;
     else if (item.status === "succeeded" && item.kind === "write") outcome = item.bytesWritten === undefined || item.linesWritten === undefined ? "size unknown" : `${item.bytesWritten} bytes · ${item.linesWritten} lines`;
-    else if (item.status === "succeeded" && item.attribution === "unverified") outcome = "ok · file effects unknown";
+    else if (item.status === "succeeded" && item.attribution === "unverified") outcome = `terminal success observed · effects unverified`;
+    else if (item.status === "failed" && item.attribution === "unverified") outcome = `terminal error observed · effects unverified`;
     else if (item.status === "failed") outcome = `failed${item.error ? ` · ${item.error}` : ""}`;
+    else if (item.status === "unknown") outcome = `effect unknown/unverified · observed ${item.observedResult ?? "unknown"} · ${item.reasonCode ?? "structural evidence unavailable"}`;
     const warning = item.path && conflicts.has(item.path) ? ` · ⚠ concurrent explicit edit (${conflicts.get(item.path)!.length} agents)` : "";
     const line = `${marker} ${item.startedAt.slice(11, 19)} ${icon} ${toolName.padEnd(6)} ${target}  ${outcome}${warning}`;
-    return this.theme.fg(item.status === "failed" ? "error" : warning ? "warning" : selected ? "accent" : "text", line);
+    return this.theme.fg(item.status === "failed" ? "error" : item.status === "unknown" || warning ? "warning" : selected ? "accent" : "text", line);
   }
 
   render(width: number): string[] {
@@ -637,6 +639,7 @@ export class DashboardComponent {
           }
           const inspection = agent.work?.inspection ?? { reads: 0, searches: 0, listings: 0 };
           lines.push(this.theme.fg("dim", `Inspection this run: ${inspection.reads} reads · ${inspection.searches} searches · ${inspection.listings} listings`));
+          if (agent.work?.effectEvidenceUnavailable) lines.push(this.theme.fg("warning", "effect evidence unavailable in the bounded active-session recovery slice; do not infer no work"));
           if (agent.work?.recoveryError) lines.push(this.theme.fg("warning", `recovery diagnostic: ${sanitizeConversationLabel(agent.work.recoveryError)}`));
         } else if (this.tab === "activity") {
           lines.push(this.theme.fg("toolTitle", "Recent activity"));

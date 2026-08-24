@@ -42,7 +42,11 @@ describe("work ledger", () => {
       for (const unsafe of ["file:///tmp/%1B%5D0%3Bpwn%07x", "bad\nname", "bad\tname", "bad\u202ename"]) assert.deepEqual(displayWorkPath(unsafe, root), {});
       const unsafeIntent = startWorkItem("unsafe", "edit", { path: "file:///tmp/%1Bbad", edits: [] }, 1, root)!;
       assert.equal(unsafeIntent.path, undefined);
-      assert.equal(finishWorkItem(unsafeIntent, { details: { patch: "+x" } }, false).status, "failed");
+      const unknown = finishWorkItem(unsafeIntent, { details: { patch: "+x" } }, false);
+      assert.equal(unknown.status, "unknown");
+      assert.equal(unknown.attribution, "unverified");
+      assert.equal(unknown.observedResult, "success");
+      assert.equal(unknown.reasonCode, "unsafe-path");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -169,7 +173,7 @@ describe("work ledger", () => {
     assert.deepEqual(state.recent.map((item) => item.batchId), [7, 7]);
   });
 
-  it("recovers durable edit/write results, deduplicates registry cache, and never recovers bash attribution", () => {
+  it("recovers durable mutation, shell, and custom terminal evidence without promoting unverified effects", () => {
     const timestamp = "2026-01-01T00:00:00.000Z";
     const entries = [
       { type: "message", id: "a", parentId: null, timestamp, message: { role: "assistant", content: [
@@ -177,12 +181,60 @@ describe("work ledger", () => {
         { type: "toolCall", id: "b", name: "bash", arguments: { command: "touch z" } },
       ] } },
       { type: "message", id: "r", parentId: "a", timestamp, message: { role: "toolResult", toolCallId: "e", toolName: "edit", content: [{ type: "text", text: "ok" }], details: { patch: "--- a\n+++ b\n-x\n+y" }, isError: false } },
-      { type: "message", id: "br", parentId: "r", timestamp, message: { role: "toolResult", toolCallId: "b", toolName: "bash", content: [], isError: false } },
+      { type: "message", id: "br", parentId: "r", timestamp, message: { role: "toolResult", toolCallId: "b", toolName: "bash", content: [{ type: "text", text: "PRIVATE SHELL OUTPUT" }], isError: false } },
     ];
     const existing = emptyWorkState();
     appendRecent(existing, finishWorkItem(startWorkItem("e", "edit", { path: "a.ts", edits: [] }, 0, "/work")!, {}, false));
     const recovered = recoverMutationWork(entries, "/work", existing);
     assert.equal(recovered.recent.filter((item) => item.toolCallId === "e").length, 1);
-    assert.equal(recovered.recent.some((item) => item.toolCallId === "b"), false);
+    const bash = recovered.recent.find((item) => item.toolCallId === "b")!;
+    assert.equal(bash.status, "succeeded");
+    assert.equal(bash.attribution, "unverified");
+    assert.equal(bash.observedResult, "success");
+    assert.doesNotMatch(JSON.stringify(bash), /PRIVATE SHELL OUTPUT/);
+  });
+
+  it("recovers structurally unknown mutation outcomes and marks bounded missing effect evidence", () => {
+    const timestamp = "2026-01-01T00:00:00.000Z";
+    const entries = [
+      { type: "custom", id: "marker", parentId: null, timestamp, customType: "pi-email-subagent-work-batch", data: { batchId: 3, startedAt: timestamp } },
+      { type: "message", id: "calls", parentId: "marker", timestamp, message: { role: "assistant", content: [
+        { type: "toolCall", id: "mismatch", name: "edit", arguments: { path: "a.ts", edits: [] } },
+        { type: "toolCall", id: "unsafe", name: "write", arguments: { path: "bad\npath", content: "PRIVATE BODY" } },
+        { type: "toolCall", id: "custom", name: "external_effect", arguments: { target: "PRIVATE TARGET" } },
+      ] } },
+      { type: "message", id: "orphan", parentId: "calls", timestamp, message: { role: "toolResult", toolCallId: "orphan-edit", toolName: "edit", content: [{ type: "text", text: "PRIVATE RESULT" }], isError: false } },
+      { type: "message", id: "mismatch-result", parentId: "orphan", timestamp, message: { role: "toolResult", toolCallId: "mismatch", toolName: "write", content: [], isError: false } },
+      { type: "message", id: "unsafe-result", parentId: "mismatch-result", timestamp, message: { role: "toolResult", toolCallId: "unsafe", toolName: "write", content: [], isError: false } },
+      { type: "message", id: "custom-result", parentId: "unsafe-result", timestamp, message: { role: "toolResult", toolCallId: "custom", toolName: "external_effect", content: [{ type: "text", text: "PRIVATE CUSTOM ERROR" }], isError: true } },
+      { type: "message", id: "orphan-custom", parentId: "custom-result", timestamp, message: { role: "toolResult", toolCallId: "missing-custom-call", toolName: "other_effect", content: [], isError: false } },
+    ];
+    const recovered = recoverMutationWork(entries, "/work");
+    assert.deepEqual(recovered.recent.filter((item) => item.status === "unknown").map((item) => ({
+      id: item.toolCallId,
+      observedResult: item.observedResult,
+      reasonCode: item.reasonCode,
+      attribution: item.attribution,
+      path: item.path,
+    })), [
+      { id: "orphan-edit", observedResult: "success", reasonCode: "orphan-result", attribution: "unverified", path: undefined },
+      { id: "mismatch", observedResult: "success", reasonCode: "mismatched-tool", attribution: "unverified", path: undefined },
+      { id: "unsafe", observedResult: "success", reasonCode: "unsafe-path", attribution: "unverified", path: undefined },
+      { id: "missing-custom-call", observedResult: "success", reasonCode: "orphan-result", attribution: "unverified", path: undefined },
+    ]);
+    const custom = recovered.recent.find((item) => item.toolCallId === "custom")!;
+    assert.equal(custom.status, "failed");
+    assert.equal(custom.attribution, "unverified");
+    assert.equal(custom.observedResult, "error");
+    assert.equal(recovered.effectEvidenceUnavailable, true);
+    assert.equal(currentBatchHasEffectfulWork(recovered), true);
+    assert.doesNotMatch(JSON.stringify(recovered), /PRIVATE|BODY|TARGET|RESULT|ERROR/);
+
+    const truncated = recoverMutationWork([
+      { type: "message", id: "old", parentId: null, timestamp, message: { role: "toolResult", toolCallId: "old-shell", toolName: "bash", content: [], isError: false } },
+      ...Array.from({ length: 10_001 }, (_, index) => ({ type: "message", id: `filler-${index}`, parentId: null, timestamp, message: { role: "user", content: "filler" } })),
+    ], "/work");
+    assert.equal(truncated.effectEvidenceUnavailable, true);
+    assert.equal(currentBatchHasEffectfulWork(truncated), true);
   });
 });

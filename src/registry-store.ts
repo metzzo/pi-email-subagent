@@ -11,8 +11,10 @@ const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high
 const STATES = new Set<AgentStatus>(["queued", "spawning", "running", "idle", "parked", "failed", "stopped", "paused", "archived"]);
 const ACTIVITY_KINDS = new Set<ActivityItem["kind"]>(["status", "tool", "text", "error"]);
 const WORK_KINDS = new Set<WorkItem["kind"]>(["edit", "write", "shell", "custom"]);
-const WORK_STATUSES = new Set<WorkItem["status"]>(["running", "succeeded", "failed", "interrupted"]);
+const WORK_STATUSES = new Set<WorkItem["status"]>(["running", "succeeded", "failed", "interrupted", "unknown"]);
 const WORK_ATTRIBUTIONS = new Set<WorkItem["attribution"]>(["explicit", "unverified"]);
+const WORK_OBSERVED_RESULTS = new Set<NonNullable<WorkItem["observedResult"]>>(["success", "error"]);
+const WORK_UNKNOWN_REASONS = new Set<NonNullable<WorkItem["reasonCode"]>>(["missing-start", "mismatched-tool", "unsafe-path", "orphan-result"]);
 const CLEANUP_STATES = new Set<CleanupDiagnostic["state"]>(["pending", "unknown"]);
 const CLEANUP_PHASES = new Set<CleanupDiagnostic["abort"]>(["pending", "succeeded", "failed", "timed-out"]);
 const MAX_CLEANUP_DETAIL_CHARS = 2_000;
@@ -107,7 +109,7 @@ function parseWorkItem(value: unknown, label: string): WorkItem {
   const status = string(raw.status, `${label}.status`) as WorkItem["status"];
   const attribution = string(raw.attribution, `${label}.attribution`) as WorkItem["attribution"];
   if (!WORK_KINDS.has(kind) || !WORK_STATUSES.has(status) || !WORK_ATTRIBUTIONS.has(attribution)) throw new Error(`${label} has an invalid work enum.`);
-  if ((kind === "edit" || kind === "write") !== (attribution === "explicit")) throw new Error(`${label} has incoherent attribution.`);
+  if (attribution === "explicit" && kind !== "edit" && kind !== "write") throw new Error(`${label} has incoherent attribution.`);
   if ((kind === "edit" || kind === "write") && raw.toolName !== kind) throw new Error(`${label} has incoherent mutation tool name.`);
   if (kind === "shell" && raw.toolName !== "bash") throw new Error(`${label} has incoherent shell tool name.`);
   const batchId = optionalCount(raw.batchId, `${label}.batchId`);
@@ -124,6 +126,14 @@ function parseWorkItem(value: unknown, label: string): WorkItem {
     const parsed = optionalCount(raw[key], `${label}.${key}`); if (parsed !== undefined) item[key] = parsed;
   }
   const endedAt = raw.endedAt === undefined ? undefined : timestamp(raw.endedAt, `${label}.endedAt`); if (endedAt) item.endedAt = endedAt;
+  if (raw.observedResult !== undefined) {
+    if (!WORK_OBSERVED_RESULTS.has(raw.observedResult as NonNullable<WorkItem["observedResult"]>)) throw new Error(`${label}.observedResult is invalid.`);
+    item.observedResult = raw.observedResult as NonNullable<WorkItem["observedResult"]>;
+  }
+  if (raw.reasonCode !== undefined) {
+    if (!WORK_UNKNOWN_REASONS.has(raw.reasonCode as NonNullable<WorkItem["reasonCode"]>)) throw new Error(`${label}.reasonCode is invalid.`);
+    item.reasonCode = raw.reasonCode as NonNullable<WorkItem["reasonCode"]>;
+  }
   for (const key of ["path", "displayPath"] as const) {
     const parsed = optionalString(raw[key], `${label}.${key}`); if (parsed !== undefined) item[key] = sanitizeWorkPath(parsed);
   }
@@ -133,6 +143,13 @@ function parseWorkItem(value: unknown, label: string): WorkItem {
   const patch = capPatch(raw.patchPreview); if (patch.patchPreview) item.patchPreview = patch.patchPreview;
   if (raw.patchTruncated === true || patch.patchTruncated) item.patchTruncated = true;
   if (raw.patchSource === "event" || raw.patchSource === "session") item.patchSource = raw.patchSource;
+  if (status === "unknown") {
+    if (attribution !== "unverified" || !item.observedResult || !item.reasonCode || item.path
+      || item.patchPreview || item.bytesWritten !== undefined || item.linesWritten !== undefined
+      || item.linesAdded !== undefined || item.linesRemoved !== undefined) {
+      throw new Error(`${label} unknown effect evidence must be unverified, structural, and path-free.`);
+    }
+  } else if (item.reasonCode !== undefined) throw new Error(`${label}.reasonCode is valid only for unknown work.`);
   return item;
 }
 
@@ -163,6 +180,10 @@ function parseWork(value: unknown, label: string): AgentWorkState {
       listings: optionalCount(counters.listings, `${label}.inspection.listings`) ?? 0,
     },
   };
+  if (raw.effectEvidenceUnavailable !== undefined && typeof raw.effectEvidenceUnavailable !== "boolean") {
+    throw new Error(`${label}.effectEvidenceUnavailable must be a boolean.`);
+  }
+  if (raw.effectEvidenceUnavailable === true) work.effectEvidenceUnavailable = true;
   for (const key of ["currentBatchId"] as const) { const parsed = optionalCount(raw[key], `${label}.${key}`); if (parsed !== undefined) work[key] = parsed; }
   for (const key of ["batchStartedAt", "batchEndedAt"] as const) { if (raw[key] !== undefined) work[key] = timestamp(raw[key], `${label}.${key}`); }
   const recoveryError = capText(raw.recoveryError, MAX_ERROR_CHARS); if (recoveryError) work.recoveryError = recoveryError;
