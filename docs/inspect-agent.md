@@ -52,8 +52,8 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `capacity` | Current derived identity leases used/limit and separate run slots used/limit; not persisted |
 | `holdsActivationLease` | Whether this exact address currently consumes identity capacity |
 | `modelId`, `provider`, `effort`, `role`, `tools`, `instructions` | Effective profile (record if live, resolved config otherwise) |
-| `writable` | Effective tools include a mutation tool |
-| `canSpawn` | Whether the subagent may delegate response-required requests to other subagents, known or unknown |
+| `writable` | Effective tools include a known mutation tool or any unknown/custom tool (fail-closed) |
+| `canSpawn` | Always `false` on Pi 0.81.1; nested response-required delegation lacks a durable child-reply presentation receipt |
 | `state` | `new` for prospective addresses, otherwise the lifecycle state |
 | `currentActivity` | Latest activity summary, when present |
 | `queued` / `unanswered` / `outgoingUnanswered` / `pendingReplies` | Queued inbound, incoming open requests, requests sent by this identity that remain open, and replies reserved but not yet delivered |

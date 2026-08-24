@@ -23,7 +23,7 @@ Use cancellation only when the user explicitly abandons the request or an inacti
 
 ## Durability and observability
 
-The broker appends an `email.cancelled` journal event before reporting success. The envelope then has `deliveryState: "cancelled"`, `cancelledAt`, `cancelledBy`, and `cancellationReason`; `answeredAt` and `answeredBy` remain absent. Recovery and journal compaction preserve these fields while the terminal envelope remains within configured retention.
+The broker appends an `email.cancelled` journal event before reporting success. The envelope then has `deliveryState: "cancelled"`, `cancelledAt`, `cancelledBy`, and `cancellationReason`; `answeredAt` and `answeredBy` remain absent. For a legacy parked parent's last child request, the broker also journals one bounded terminal-cancellation wake to that exact parent while leaving its upstream request open. A crash between these events is repaired from the canonical cancellation entry, and retries do not create a second wake. Recovery and compaction preserve the relation.
 
 A cancelled request:
 

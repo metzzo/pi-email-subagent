@@ -8,6 +8,11 @@ const OWNER_FILE = ".broker-owner.json";
 export const NAMESPACE_LOCK_STALE_MS = 10_000;
 const UPDATE_MS = 2_000;
 
+export interface NamespaceLockHooks {
+  afterFilesystemLockAcquired?: () => void | Promise<void>;
+  afterFilesystemLockReleased?: () => void | Promise<void>;
+}
+
 interface NamespaceOwner {
   pid: number;
   token: string;
@@ -117,11 +122,13 @@ export class NamespaceLock {
     private readonly ownerPath: string,
     private readonly owner: NamespaceOwner,
     private readonly releaseLock: () => Promise<void>,
+    private readonly hooks: NamespaceLockHooks,
   ) {}
 
   static async acquire(
     namespaceDir: string,
     onCompromised: (error: Error) => void,
+    hooks: NamespaceLockHooks = {},
   ): Promise<NamespaceLock> {
     await mkdir(namespaceDir, { recursive: true, mode: 0o700 });
     await restrictMode(namespaceDir, 0o700);
@@ -175,6 +182,12 @@ export class NamespaceLock {
       );
     }
 
+    try {
+      await hooks.afterFilesystemLockAcquired?.();
+    } catch (error) {
+      await releaseLock().catch(() => undefined);
+      throw error;
+    }
     let identity: KernelProcessIdentity | undefined;
     try {
       identity = await kernelProcessIdentity(process.pid);
@@ -195,7 +208,7 @@ export class NamespaceLock {
     };
     try {
       await replaceOwner(ownerPath, owner);
-      return new NamespaceLock(namespaceDir, abandonedOwner, ownerPath, owner, releaseLock);
+      return new NamespaceLock(namespaceDir, abandonedOwner, ownerPath, owner, releaseLock, hooks);
     } catch (error) {
       await releaseLock().catch(() => undefined);
       throw new Error(`Could not persist subagent namespace ownership: ${errorMessage(error)}`, { cause: error });
@@ -208,6 +221,7 @@ export class NamespaceLock {
     // gap, contenders still fail closed on this exact live owner. This order
     // prevents an old callback from deleting metadata for a newer lease.
     await this.releaseLock();
+    await this.hooks.afterFilesystemLockReleased?.();
     const current = await readOwner(this.ownerPath);
     if (current?.token === this.owner.token) await unlink(this.ownerPath).catch(() => undefined);
     this.released = true;

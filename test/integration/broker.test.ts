@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { AgentBroker, lightweightWorkItem } from "../../src/broker.ts";
+import { AgentBroker, conservativeModelEnvelopeBudget, lightweightWorkItem } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { makeReplySubject } from "../../src/reply.ts";
 import type { SendEmailResult, SubagentConfig } from "../../src/types.ts";
@@ -116,6 +116,36 @@ describe("AgentBroker end-to-end routing", () => {
         priority: "low",
       });
       assert.equal(factories, 1);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("computes a conservative per-model envelope budget", () => {
+    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 128_000, maxTokens: 32_000 }), 24_000);
+    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 1_000, maxTokens: 1_000 }), 0);
+  });
+
+  it("rejects an envelope that cannot fit the selected model budget before journaling", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-small-context-"));
+    const model = { ...fakeModel("tiny"), contextWindow: 1_000, maxTokens: 900 };
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config: structuredClone(DEFAULT_CONFIG),
+      models: [model],
+      mainAdapter: new FakeMainAdapter("main@tiny.com"),
+      workerFactory: () => new FakeWorker(),
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.small-context@tiny.com",
+        subject: "small",
+        message: "This complete envelope cannot fit the conservative context budget.",
+        priority: "low",
+      }), /context-safe envelope limit/i);
+      assert.equal(broker.mailStore.list().length, 0);
     } finally { await broker.shutdown(); }
   });
 

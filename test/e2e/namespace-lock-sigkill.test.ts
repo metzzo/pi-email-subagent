@@ -71,9 +71,9 @@ it("never steals a stale-mtime namespace lease from a live SIGSTOPed owner", {
   }
 });
 
-it("recovers the real namespace lease after its owner is killed with SIGKILL", {
-  timeout: 25_000,
-  skip: process.platform !== "linux" ? "abandoned takeover fails closed without Linux kernel identity fencing" : false,
+it("fails closed on the real orphaned namespace lease after SIGKILL", {
+  timeout: 15_000,
+  skip: process.platform !== "linux" ? "Linux fixture requires /proc owner identity" : false,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sigkill-lock-"));
   const namespace = join(root, "state");
@@ -89,7 +89,6 @@ it("recovers the real namespace lease after its owner is killed with SIGKILL", {
     child.once("close", (code, signal) => resolve({ code, signal }));
   });
 
-  let recovered: NamespaceLock | undefined;
   try {
     const holderPid = await waitForReady(child, () => stderr);
     assert.equal(holderPid, child.pid);
@@ -101,27 +100,17 @@ it("recovers the real namespace lease after its owner is killed with SIGKILL", {
     const exit = await closed;
     assert.equal(exit.code, null);
     assert.equal(exit.signal, "SIGKILL");
-    await assert.rejects(NamespaceLock.acquire(namespace, () => undefined), /already owned/);
-
-    const killedAt = Date.now();
-    const deadline = killedAt + NAMESPACE_LOCK_STALE_MS + 5_000;
-    while (!recovered && Date.now() < deadline) {
-      try {
-        recovered = await NamespaceLock.acquire(namespace, () => undefined);
-      } catch (error) {
-        assert.match(error instanceof Error ? error.message : String(error), /already owned/);
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-    }
-    assert.ok(recovered, `lease did not recover after SIGKILL\n${stderr}`);
-    assert.equal(recovered.abandonedOwner, true, "takeover reports abrupt owner loss to registry recovery");
-    assert.ok(Date.now() - killedAt >= NAMESPACE_LOCK_STALE_MS - 2_500, "fresh leases must not be stolen immediately");
-
+    await assert.rejects(NamespaceLock.acquire(namespace, () => undefined), /orphaned.*fails closed/i);
+    await new Promise((resolve) => setTimeout(resolve, NAMESPACE_LOCK_STALE_MS + 500));
+    await assert.rejects(
+      NamespaceLock.acquire(namespace, () => undefined),
+      /orphaned.*fails closed.*manual recovery/i,
+      "elapsed stale time never authorizes stealing an unbound generation",
+    );
     const ownerAfter = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number };
-    assert.equal(ownerAfter.pid, process.pid);
+    assert.equal(ownerAfter.pid, holderPid);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    await recovered?.release();
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -13,6 +13,9 @@ type RuntimeCreator = (options: CreateModelRuntimeOptions) => Promise<ModelRunti
 type AuthStatus = ReturnType<ModelRegistry["getProviderAuthStatus"]>;
 
 type RequestModelSnapshot = Omit<Model<Api>, "headers">;
+type NativeProvider = NonNullable<ReturnType<ModelRegistry["getRegisteredNativeProvider"]>>;
+type ConfiguredProvider = NonNullable<ReturnType<ModelRegistry["getRegisteredProviderConfig"]>>;
+type RegisteredProvider = { kind: "native"; provider: NativeProvider } | { kind: "configured"; config: ConfiguredProvider };
 
 function statusClass(status: AuthStatus): string {
   if (!status.configured) return "unconfigured";
@@ -74,17 +77,19 @@ export function assertCredentialSourceEquivalent(
   }
 }
 
-function requestModelSnapshot(model: Model<Api>, providerId: string): RequestModelSnapshot {
-  // Pi 0.81.1 exposes resolved model headers but no public provenance that can
-  // distinguish static non-secret metadata from command/hook/secret-derived
-  // values. Do not compare or retain those values: narrow the route instead.
-  if (model.headers && Object.keys(model.headers).length > 0) {
-    throw new ProviderReadinessError(
-      providerId,
-      "model-header-provenance-unavailable",
-      `Model ${providerId}/${model.id} uses request headers whose non-secret provenance cannot be proven by Pi 0.81.1. Remove those headers or use the main session; no email was accepted.`,
-    );
-  }
+function hasModelHeaders(model: Model<Api>): boolean {
+  return Boolean(model.headers && Object.keys(model.headers).length > 0);
+}
+
+function headerProvenanceError(providerId: string, modelId: string): ProviderReadinessError {
+  return new ProviderReadinessError(
+    providerId,
+    "model-header-provenance-unavailable",
+    `Model ${providerId}/${modelId} uses request headers whose non-secret provenance cannot be proven by Pi 0.81.1. Remove those headers or use the main session; no email was accepted.`,
+  );
+}
+
+function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
   const {
     id,
     name,
@@ -126,14 +131,15 @@ function modelKey(providerId: string, modelId: string): string {
 }
 
 /**
- * Prepares one exact isolated runtime/model request object. Extension-registered
- * providers are deliberately unsupported: Pi 0.81.1 registration starts an
- * unacknowledged auth/availability refresh and custom hooks cannot be replayed
- * into a self-contained worker without changing request policy.
+ * Prepares one exact isolated runtime/model request object. Self-contained
+ * native/static configured providers are registered as the same public provider
+ * object/config and their pending refresh is joined through getAvailable().
+ * Dynamic OAuth/catalog/header policy remains fail-closed.
  */
 export class WorkerRuntimeFactory {
-  private readonly registeredProviderIds: ReadonlySet<string>;
+  private readonly registeredProviders = new Map<string, RegisteredProvider>();
   private readonly parentAuth = new Map<string, AuthStatus>();
+  private readonly headerModels = new Set<string>();
   private readonly requestModels = new Map<string, RequestModelSnapshot>();
 
   constructor(
@@ -141,12 +147,21 @@ export class WorkerRuntimeFactory {
     private readonly options: CreateModelRuntimeOptions,
     private readonly createRuntime: RuntimeCreator = PiCodingAgent.ModelRuntime.create,
   ) {
-    this.registeredProviderIds = new Set(source.getRegisteredProviderIds());
+    for (const id of source.getRegisteredProviderIds()) {
+      const native = source.getRegisteredNativeProvider(id);
+      if (native) this.registeredProviders.set(id, { kind: "native", provider: native });
+      else {
+        const config = source.getRegisteredProviderConfig(id);
+        if (config) this.registeredProviders.set(id, { kind: "configured", config });
+      }
+    }
     for (const model of source.getAll()) {
       if (!this.parentAuth.has(model.provider)) {
         this.parentAuth.set(model.provider, { ...source.getProviderAuthStatus(model.provider) });
       }
-      this.requestModels.set(modelKey(model.provider, model.id), requestModelSnapshot(model, model.provider));
+      const key = modelKey(model.provider, model.id);
+      if (hasModelHeaders(model)) this.headerModels.add(key);
+      this.requestModels.set(key, requestModelSnapshot(model));
     }
   }
 
@@ -155,17 +170,31 @@ export class WorkerRuntimeFactory {
   }
 
   async create(providerId: string, modelId: string): Promise<WorkerRuntimeSnapshot> {
-    if (this.registeredProviderIds.has(providerId)) {
-      throw new ProviderReadinessError(
-        providerId,
-        "registered-provider-policy-unavailable",
-        `Provider ${providerId} is extension-registered. Pi 0.81.1 exposes neither a registration/auth-refresh readiness receipt nor a self-contained hook policy for isolated workers; no email was accepted.`,
-      );
+    const key = modelKey(providerId, modelId);
+    if (this.headerModels.has(key)) throw headerProvenanceError(providerId, modelId);
+    const registered = this.registeredProviders.get(providerId);
+    if (registered?.kind === "configured") {
+      const config = registered.config;
+      if (config.oauth || config.refreshModels
+        || (config.headers && Object.keys(config.headers).length > 0)
+        || config.models?.some((candidate) => candidate.headers && Object.keys(candidate.headers).length > 0)) {
+        throw new ProviderReadinessError(
+          providerId,
+          "registered-provider-policy-unavailable",
+          `Provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.81.1 worker; no email was accepted.`,
+        );
+      }
     }
 
     let runtime: ModelRuntime;
     try {
       runtime = await this.createRuntime(this.options);
+      if (registered?.kind === "native") runtime.registerNativeProvider(registered.provider);
+      else if (registered?.kind === "configured") runtime.registerProvider(providerId, registered.config);
+      // registerProvider/registerNativeProvider start an internal refresh without
+      // returning it. Public getAvailable() coalesces that exact pending refresh,
+      // so readiness is not declared from the provisional snapshot.
+      if (registered) await runtime.getAvailable(providerId);
     } catch {
       throw new ProviderReadinessError(
         providerId,
@@ -183,7 +212,7 @@ export class WorkerRuntimeFactory {
       );
     }
 
-    const parentRequest = this.requestModels.get(modelKey(providerId, modelId));
+    const parentRequest = this.requestModels.get(key);
     if (!parentRequest) {
       throw new ProviderReadinessError(
         providerId,
@@ -191,7 +220,8 @@ export class WorkerRuntimeFactory {
         `Model ${providerId}/${modelId} was not present in the extension-start model snapshot. Reload the extension.`,
       );
     }
-    const workerRequest = requestModelSnapshot(model, providerId);
+    if (hasModelHeaders(model)) throw headerProvenanceError(providerId, modelId);
+    const workerRequest = requestModelSnapshot(model);
     if (!isDeepStrictEqual(parentRequest, workerRequest)) {
       throw new ProviderReadinessError(
         providerId,
