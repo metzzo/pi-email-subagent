@@ -274,15 +274,18 @@ describe("real Pi provider-aware durable routing", { concurrency: false }, () =>
       assert.equal(unavailable.sessionFile, alphaSession);
       assert.match(unavailable.failure, /bound to mock-alpha\/shared.*not rebound/is);
       await waitMainIdle(current);
-      const journalBeforeReject = createdEmails(await readJournal(agentDir, missing.sessionId));
-      const rejected = await promptSend(current, "E2E ROUTE SEND ALPHA");
-      assert.equal(rejected.isError, true);
-      assert.match(resultText(rejected), /bound to mock-alpha\/shared.*not rebound/is);
-      assert.deepEqual(
-        createdEmails(await readJournal(agentDir, missing.sessionId)).map((email) => email.id),
-        journalBeforeReject.map((email) => email.id),
-        "unavailable existing send fails before email acceptance",
-      );
+      const journalBeforeQueue = createdEmails(await readJournal(agentDir, missing.sessionId));
+      const accepted = await promptSend(current, "E2E ROUTE SEND ALPHA");
+      assert.equal(accepted.isError, false, resultText(accepted));
+      const acceptedResult = toolResult(accepted);
+      assert.equal(acceptedResult.recipientDisposition, "failed");
+      assert.equal(acceptedResult.recipientProvider, ALPHA);
+      assert.equal(acceptedResult.envelope.deliveryState, "queued");
+      assert.equal(acceptedResult.spawned, false);
+      const createdAfterQueue = createdEmails(await readJournal(agentDir, missing.sessionId));
+      assert.equal(createdAfterQueue.length, journalBeforeQueue.length + 1);
+      assert.equal(createdAfterQueue.at(-1)?.id, acceptedResult.envelope.id);
+      await waitMainIdle(current);
       const restart = await promptManage(current, "E2E ROUTE RESTART ALPHA", true);
       assert.match(resultText(restart), /bound to mock-alpha\/shared.*not rebound/is);
       assert.equal(await current.close(), 0, current.stderr);

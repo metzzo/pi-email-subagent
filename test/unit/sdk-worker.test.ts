@@ -250,7 +250,7 @@ describe("SDK worker failures", () => {
     assert.equal(markers.length, 2);
   });
 
-  it("emits only visible final assistant text with the settled event", () => {
+  it("keeps visible final assistant text in activity without attaching it to settlement", () => {
     const worker = new SdkWorker({} as never);
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "idle" } as any;
     const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
@@ -270,8 +270,9 @@ describe("SDK worker failures", () => {
     });
     internal.onSessionEvent({ type: "agent_settled" });
     const settled = [...events].reverse().find((event: any) => event.type === "settled");
-    assert.equal(settled?.completionText, "Implemented the fix.\nTests pass.");
-    assert.doesNotMatch(JSON.stringify(settled), /hidden reasoning/);
+    assert.deepEqual(settled, { type: "settled" });
+    assert.equal(record.activity.some((item: any) => item.kind === "text" && item.summary === "Implemented the fix. Tests pass."), true);
+    assert.doesNotMatch(JSON.stringify(events), /hidden reasoning/);
   });
 
   it("emits only content-free lifecycle boundaries for tool starts and ends", () => {

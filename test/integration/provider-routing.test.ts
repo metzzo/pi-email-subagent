@@ -173,13 +173,14 @@ describe("provider-aware durable routing", () => {
       assert.match(removed.failure ?? "", /bound to provider-alpha\/shared.*not rebound/is);
       assert.equal(missing.broker.inspectAgent(betaSend.envelope.to).provider, "provider-beta");
       const before = missing.broker.mailStore.list().length;
-      await assert.rejects(
-        missing.broker.send(missing.broker.mainAddress, {
-          to: alphaSend.envelope.to, subject: "Do not substitute", message: "Must reject before acceptance.", priority: "low",
-        }),
-        /bound to provider-alpha\/shared.*not rebound/is,
-      );
-      assert.equal(missing.broker.mailStore.list().length, before);
+      const queued = await missing.broker.send(missing.broker.mainAddress, {
+        to: alphaSend.envelope.to, subject: "Do not substitute", message: "Accept under the failed identity only.", priority: "low",
+      });
+      assert.equal(queued.recipientDisposition, "failed");
+      assert.equal(queued.recipientProvider, "provider-alpha");
+      assert.equal(queued.envelope.deliveryState, "queued");
+      assert.equal(queued.spawned, false);
+      assert.equal(missing.broker.mailStore.list().length, before + 1);
       await assert.rejects(missing.broker.restart(alphaSend.envelope.to), /bound to provider-alpha\/shared.*not rebound/is);
     } finally {
       await missing.broker.shutdown();
@@ -190,6 +191,7 @@ describe("provider-aware durable routing", () => {
       assert.ok(returned.providers.includes("provider-alpha"));
       assert.equal(returned.broker.inspectAgent(alphaSend.envelope.to).provider, "provider-alpha");
       assert.notEqual(returned.broker.inspectAgent(alphaSend.envelope.to).state, "failed");
+      assert.equal(returned.broker.mailStore.list().some((email) => email.subject === "Do not substitute"), true);
     } finally {
       await returned.broker.shutdown();
     }
