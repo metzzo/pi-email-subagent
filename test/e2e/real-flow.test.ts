@@ -610,6 +610,75 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("rejects nested delegation by default without creating a child obligation", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE NESTED");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "default-disabled parent send", 90_000, mark));
+      const wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "default-disabled parent failure", 120_000, mark));
+      assert.deepEqual(wait.items.map((item) => [item.requestId, item.state]), [[sent.correlationId, "failed"]]);
+      await client.waitForSettlement(mark);
+
+      const registry = await eventuallyRegistry(
+        agentDir,
+        sessionId,
+        (candidate) => candidate.agents?.some((agent: any) => agent.address === WORKER_ADDRESS && agent.state === "failed"),
+        "with the default-disabled parent failed on its open upstream obligation",
+      );
+      assert.equal(registry.agents.find((agent: any) => agent.address === WORKER_ADDRESS).canSpawn, false);
+      assert.equal(registry.agents.some((agent: any) => agent.address === REVIEWER_ADDRESS), false);
+      const journal = await readJournal(agentDir, sessionId);
+      const requests = journal.filter((event) => event.type === "email.created" && event.email?.kind === "request");
+      assert.deepEqual(requests.map((event) => event.email.id), [sent.correlationId]);
+      assert.equal(journal.some((event) => event.type === "email.answered" && event.id === sent.correlationId), false);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("parks an opted-in real nested parent until the exact child reply closes its dependency", { timeout: 300_000 }, async () => {
+    const { client, agentDir, sessionId } = await start({ config: { roles: { scout: { canSpawn: true } } } });
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE NESTED");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "opted-in parent send", 90_000, mark));
+      const parked = await eventuallyRegistry(
+        agentDir,
+        sessionId,
+        (candidate) => candidate.agents?.some((agent: any) => agent.address === WORKER_ADDRESS && agent.state === "parked")
+          && candidate.agents?.some((agent: any) => agent.address === REVIEWER_ADDRESS),
+        "with the opted-in parent parked behind a live child dependency",
+        30_000,
+      );
+      assert.equal(parked.agents.find((agent: any) => agent.address === WORKER_ADDRESS).canSpawn, true);
+
+      const wait = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "opted-in nested reply", 180_000, mark));
+      assert.deepEqual(wait.items.map((item) => [item.requestId, item.state]), [[sent.correlationId, "answered"]]);
+      await client.waitForSettlement(mark);
+
+      const journal = await readJournal(agentDir, sessionId);
+      const requests = journal
+        .filter((event) => event.type === "email.created" && event.email?.kind === "request")
+        .map((event) => event.email);
+      assert.equal(requests.length, 2);
+      const child = requests.find((email) => email.from === WORKER_ADDRESS && email.to === REVIEWER_ADDRESS);
+      assert.ok(child?.id, "parsed journal contains the exact child request");
+      for (const requestId of [sent.correlationId, child.id]) {
+        assert.equal(journal.filter((event) => event.type === "email.answered" && event.id === requestId).length, 1);
+      }
+      const childAnswer = journal.find((event) => event.type === "email.answered" && event.id === child.id);
+      assert.ok(journal.some((event) => event.type === "email.created"
+        && event.email?.id === childAnswer.replyId
+        && event.email?.from === REVIEWER_ADDRESS
+        && event.email?.to === WORKER_ADDRESS));
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("leaves a real worker request unanswered when it omits send_email", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {

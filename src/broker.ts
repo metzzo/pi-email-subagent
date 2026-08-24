@@ -240,6 +240,8 @@ export class AgentBroker {
   private readonly cleanupQuarantines = new Map<string, WorkerCleanupLease>();
   private nextWorkerGeneration = 0;
   private readonly addressTails = new Map<string, Promise<void>>();
+  /** Child-reply prompt acceptance may let Pi issue tools before its answer commit; upstream admission joins that exact transition. */
+  private readonly dependencyDeliveryTransitions = new Map<string, Promise<void>>();
   private mailAdmissionTail: Promise<void> = Promise.resolve();
   private readonly inFlightOperations = new Set<Promise<unknown>>();
   private readonly operationLabels = new WeakMap<Promise<unknown>, string>();
@@ -1398,6 +1400,8 @@ export class AgentBroker {
           }
           if (reply) {
             const original = this.validateReplyOwnership(sender, to, reply);
+            const dependencyDelivery = this.dependencyDeliveryTransitions.get(sender);
+            if (dependencyDelivery) await dependencyDelivery;
             if (currentSender && this.outgoingDependencies(sender).length > 0) {
               throw new Error(`Agent ${sender} cannot answer ${original.id} while an outgoing child dependency is still open.`);
             }
@@ -2318,6 +2322,16 @@ export class AgentBroker {
     // prompt acceptance so a rejection still releases the reservation.
     const requestIds = queued.filter((email) => email.kind === "request").map((email) => email.id);
     const replyIds = queued.filter((email) => email.kind !== "request").map((email) => email.id);
+    let finishDependencyDelivery: (() => void) | undefined;
+    let dependencyDelivery: Promise<void> | undefined;
+    if (replyIds.length > 0) {
+      const previous = this.dependencyDeliveryTransitions.get(address) ?? Promise.resolve();
+      let resolveDelivery!: () => void;
+      const current = new Promise<void>((resolve) => { resolveDelivery = resolve; });
+      dependencyDelivery = previous.then(() => current);
+      this.dependencyDeliveryTransitions.set(address, dependencyDelivery);
+      finishDependencyDelivery = resolveDelivery;
+    }
     try {
       // The exact generation/run-slot claim is durable before any Pi prompt can
       // be admitted. The prompt acceptance deadline does not move this boundary.
@@ -2366,6 +2380,10 @@ export class AgentBroker {
       this.options.mainAdapter.notifyFailure(`${address} could not start: ${record.failure}`);
       this.pump();
     } finally {
+      finishDependencyDelivery?.();
+      if (dependencyDelivery && this.dependencyDeliveryTransitions.get(address) === dependencyDelivery) {
+        this.dependencyDeliveryTransitions.delete(address);
+      }
       this.scheduling.delete(address);
       this.publish();
       if (!this.disposed && this.workers.get(address) !== worker && this.mailStore.queued(address).length > 0) {

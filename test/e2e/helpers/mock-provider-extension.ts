@@ -327,11 +327,13 @@ function planMain(messages: readonly Message[]): Plan {
     const priority = lastText.includes("HIGH") ? "high" : "low";
     const crash = lastText.includes("CRASH") ? " CRASH" : "";
     const ignore = lastText.includes("IGNORE") ? " IGNORE" : "";
-    const message = lastText.includes("WORK")
-      ? `WORK: ${lastText}`
-      : slow
-        ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
-        : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
+    const message = lastText.includes("NESTED")
+      ? "NESTED PARENT: delegate one response-required child request, wait for its exact result, then answer upstream."
+      : lastText.includes("WORK")
+        ? `WORK: ${lastText}`
+        : slow
+          ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
+          : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
     const send = (to: string): ToolCallPlan => ({
       name: "send_email",
       arguments: {
@@ -356,6 +358,39 @@ function planWorker(messages: readonly Message[]): Plan {
 
   if (last?.role === "toolResult") {
     if (last.toolName === "fetch_emails") {
+      if (lastText.includes("NESTED PARENT")) {
+        if (!allText(messages).includes("NESTED CHILD RESULT")) {
+          return { toolCalls: [{
+            name: "send_email",
+            arguments: {
+              to: MOCK_REVIEWER_ADDRESS,
+              subject: "Nested child dependency",
+              message: "NESTED CHILD SLOW 1200: return the exact child result.",
+              priority: "low",
+            },
+          }] };
+        }
+        return { toolCalls: unansweredPairs(lastText).map((pair) => ({
+          name: "send_email",
+          arguments: {
+            to: pair.from,
+            subject: pair.replySubject,
+            message: "NESTED PARENT RESULT after exact child settlement.",
+            priority: "low",
+          },
+        })) };
+      }
+      if (lastText.includes("NESTED CHILD")) {
+        return { toolCalls: unansweredPairs(lastText).map((pair) => ({
+          name: "send_email",
+          arguments: {
+            to: pair.from,
+            subject: pair.replySubject,
+            message: "NESTED CHILD RESULT",
+            priority: "low",
+          },
+        })) };
+      }
       if (lastText.includes("CLEANUP BACKGROUND") && lastToolResultIndex(messages, "bash") < 0) {
         const paths = /CLEANUP BACKGROUND PATH ([^\s<]+) HEARTBEAT ([^\s<]+)/.exec(lastText);
         if (!paths) return { text: "WORKER MISSING BACKGROUND PATHS" };
