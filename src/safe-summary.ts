@@ -17,7 +17,7 @@ function redactCommonCredentials(value: string): string {
   // URL userinfo. Keep the scheme/host path useful without retaining either
   // user or password, which can both carry credential material.
   result = result.replace(
-    /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/giu,
+    /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*@/giu,
     "$1[redacted]@",
   );
   // Common authorization and credential-bearing headers/assignments.

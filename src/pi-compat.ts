@@ -31,6 +31,16 @@ export function collectedReplyPresentationCapability(): CollectedReplyPresentati
   };
 }
 
+/** General presentation boundary shared by main delivery and worker prompt/steer/follow-up. */
+export function sessionPresentationReceiptCapability(): UnavailablePiCoreCapability {
+  return {
+    supported: false,
+    detailCode: "PI_0_81_1_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE",
+    reason: `Pi ${SUPPORTED_PI_VERSION} sendMessage, prompt preflight, steer, and followUp do not acknowledge a durable native-session append.`,
+    requiredCoreContract: "A stable envelope/session-entry receipt with a post-append commit acknowledgement recoverable by envelope ID after every crash kill point.",
+  };
+}
+
 /**
  * No released Pi API can prove process-tree absence for one exact worker
  * generation. This gate stays false even if an untested host happens to expose
@@ -109,7 +119,6 @@ const CODING_AGENT_FEATURES: Feature[] = [
   { path: "SessionManager.prototype.appendCustomEntry", present: callablePath("SessionManager", "prototype", "appendCustomEntry") },
   { path: "ModelRuntime.create", present: callablePath("ModelRuntime", "create") },
   { path: "ModelRuntime.prototype.getModel", present: callablePath("ModelRuntime", "prototype", "getModel") },
-  { path: "ModelRuntime.prototype.getAuth", present: callablePath("ModelRuntime", "prototype", "getAuth") },
   { path: "ModelRuntime.prototype.getProviderAuthStatus", present: callablePath("ModelRuntime", "prototype", "getProviderAuthStatus") },
   { path: "ModelRuntime.prototype.registerNativeProvider", present: callablePath("ModelRuntime", "prototype", "registerNativeProvider") },
   { path: "ModelRuntime.prototype.registerProvider", present: callablePath("ModelRuntime", "prototype", "registerProvider") },
@@ -130,11 +139,14 @@ const CODING_AGENT_FEATURES: Feature[] = [
   { path: "AgentSession.prototype.dispose", present: callablePath("AgentSession", "prototype", "dispose") },
   { path: "AgentSession.prototype.getActiveToolNames", present: callablePath("AgentSession", "prototype", "getActiveToolNames") },
   { path: "AgentSession.prototype.prompt", present: callablePath("AgentSession", "prototype", "prompt") },
+  { path: "AgentSession.prototype.steer", present: callablePath("AgentSession", "prototype", "steer") },
+  { path: "AgentSession.prototype.followUp", present: callablePath("AgentSession", "prototype", "followUp") },
   { path: "AgentSession.prototype.abort", present: callablePath("AgentSession", "prototype", "abort") },
   { path: "AgentSession.prototype.setThinkingLevel", present: callablePath("AgentSession", "prototype", "setThinkingLevel") },
   { path: "AgentSession.prototype.setSteeringMode", present: callablePath("AgentSession", "prototype", "setSteeringMode") },
   { path: "AgentSession.prototype.setFollowUpMode", present: callablePath("AgentSession", "prototype", "setFollowUpMode") },
   { path: "DefaultResourceLoader", present: callablePath("DefaultResourceLoader") },
+  { path: "DefaultResourceLoader.prototype.reload", present: callablePath("DefaultResourceLoader", "prototype", "reload") },
   { path: "CONFIG_DIR_NAME", present: valuePath("string", "CONFIG_DIR_NAME") },
   { path: "DEFAULT_MAX_BYTES", present: valuePath("number", "DEFAULT_MAX_BYTES") },
   { path: "DEFAULT_MAX_LINES", present: valuePath("number", "DEFAULT_MAX_LINES") },

@@ -186,6 +186,7 @@ describe("work ledger", () => {
     const existing = emptyWorkState();
     appendRecent(existing, finishWorkItem(startWorkItem("e", "edit", { path: "a.ts", edits: [] }, 0, "/work")!, {}, false));
     const recovered = recoverMutationWork(entries, "/work", existing);
+    assert.equal(recovered.effectEvidenceUnavailable, true, "markerless recovered effects must never be presented as complete evidence");
     assert.equal(recovered.recent.filter((item) => item.toolCallId === "e").length, 1);
     const bash = recovered.recent.find((item) => item.toolCallId === "b")!;
     assert.equal(bash.status, "succeeded");

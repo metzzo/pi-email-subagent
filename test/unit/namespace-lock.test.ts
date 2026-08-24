@@ -26,8 +26,8 @@ it("excludes a second owner, reports the PID, and releases idempotently", async 
   await replacement.release();
 });
 
-it("recovers a proper-lockfile lease after its stale threshold", {
-  skip: process.platform !== "linux" ? "abandoned takeover fails closed without Linux kernel identity fencing" : false,
+it("fails closed on an orphaned lock instead of stealing across an owner-publication gap", {
+  skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-stale-lock-"));
   const namespace = join(root, "state");
@@ -45,16 +45,10 @@ it("recovers a proper-lockfile lease after its stale threshold", {
   const stale = new Date(Date.now() - 30_000);
   await utimes(`${namespace}.lock`, stale, stale);
 
-  const recovered = await NamespaceLock.acquire(namespace, () => undefined);
-  assert.equal(recovered.abandonedOwner, true);
-  const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { pid: number; token: string; bootId?: string; processStartTime?: string };
-  assert.equal(owner.pid, process.pid);
-  assert.equal((await stat(namespace)).mode & 0o777, 0o700);
-  assert.equal((await stat(ownerPath)).mode & 0o777, 0o600);
-  assert.notEqual(owner.token, "stale-token");
-  if (process.platform === "linux") {
-    assert.ok(owner.bootId);
-    assert.ok(owner.processStartTime);
-  }
-  await recovered.release();
+  await assert.rejects(
+    NamespaceLock.acquire(namespace, () => undefined),
+    /orphaned.*fail.*closed|manual.*recovery/i,
+  );
+  const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { token: string };
+  assert.equal(owner.token, "stale-token");
 });

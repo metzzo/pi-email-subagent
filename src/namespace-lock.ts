@@ -131,13 +131,26 @@ export class NamespaceLock {
       readOwner(ownerPath),
       pathExists(`${namespaceDir}.lock`),
     ]);
-    if (priorOwner && await ownerStillLive(priorOwner)) {
+    if (priorOwner) {
+      const live = await ownerStillLive(priorOwner);
+      if (live) {
+        throw new Error(
+          `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
+          + "The kernel still identifies that exact owner process; close or resume it before retrying.",
+        );
+      }
       throw new Error(
-        `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
-        + "The kernel still identifies that exact owner process; close or resume it before retrying.",
+        `Subagent namespace ownership is orphaned and recovery fails closed: ${namespaceDir}. `
+        + "A stale sidecar cannot be proven to belong to the current lock generation; perform explicit manual recovery only after verifying local-host and PID-namespace quiescence.",
       );
     }
-    const abandonedOwner = Boolean(priorOwner || priorLockExists);
+    if (priorLockExists) {
+      throw new Error(
+        `Subagent namespace lock is orphaned and recovery fails closed: ${namespaceDir}. `
+        + "A lock without its generation sidecar may still belong to a live publisher; perform explicit manual recovery only after verifying local-host and PID-namespace quiescence.",
+      );
+    }
+    const abandonedOwner = false;
     let releaseLock: (() => Promise<void>) | undefined;
     try {
       releaseLock = await lock(namespaceDir, {
@@ -191,9 +204,12 @@ export class NamespaceLock {
 
   async release(): Promise<void> {
     if (this.released) return;
-    this.released = true;
+    // Release the kernel/filesystem lock first. During the following sidecar
+    // gap, contenders still fail closed on this exact live owner. This order
+    // prevents an old callback from deleting metadata for a newer lease.
+    await this.releaseLock();
     const current = await readOwner(this.ownerPath);
     if (current?.token === this.owner.token) await unlink(this.ownerPath).catch(() => undefined);
-    await this.releaseLock();
+    this.released = true;
   }
 }
