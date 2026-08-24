@@ -1,10 +1,12 @@
 # Cluster 4 — Crash Recovery and OS Containment
 
-Status: extension-owned containment implemented; generic process receipt and mutation-alias identity remain blocked on Pi core/OS
+Status: remediation complete; exact process-tree quiescence receipt and mutation-alias identity remain upstream gates
 Implementation commits: historical cluster commits through `16f54eb`, remediation `018f25b` and `1465343`
 Priority: P1 extension defect plus P1 external guarantee
 Depends on: Cluster 3 activated-tool and unknown-effect contracts
 Blocks: writable abandoned-owner recovery and generic cleanup claims
+
+Historical implementation record: issue evidence and work packages below describe the pre-remediation baseline. Automatic abandoned-owner takeover is now superseded by sticky fail-closed orphan/manual recovery; only the process-tree and mutation-alias capabilities remain open.
 
 ## Cluster objective
 

@@ -1,10 +1,12 @@
 # Cluster 5 — Pi Compatibility, Operator Contract, and Release Proof
 
-Status: implemented; final full-range evidence regeneration in progress
+Status: remediation complete; exact-candidate evidence is generated after the final pushed commit
 Implementation commits: historical cluster commits through `16f54eb`, remediation `018f25b` and `1465343`, final evidence commit recorded in release metadata
 Priority: P2/P3 plus final release gate
 Depends on: settled contracts from Clusters 1–4
 Blocks: compatibility claim and release-ready declaration
+
+Historical implementation record: issue evidence and work packages below describe the pre-remediation baseline. Current release truth is complete; the durable native-session presentation receipt remains the only compatibility gate owned by this cluster.
 
 ## Cluster objective
 
@@ -159,7 +161,7 @@ All prompts, tools, UI, and docs should express:
 2. A terminal failure leaves every original obligation authoritative.
 3. Review Work and Conversation; absence of recorded work is not proof of no effect.
 4. Recovery of possible-effect work is explicit and uses the same identity/session/provider binding.
-5. Do not redelegate the same possible-effect scope while the original obligation remains open unless the user explicitly chooses that risk and resolves the original obligation.
+5. Never redelegate the same possible-effect scope while the original obligation remains open.
 6. Failed recipients queue mail and require explicit restart.
 7. Cleanup quarantine for process-capable risk has no automatic release on Pi 0.81.1.
 8. Before final response, answer every response-required email returned by `fetch_emails()`, not only those judged relevant.

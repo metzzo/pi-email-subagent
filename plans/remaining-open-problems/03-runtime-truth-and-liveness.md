@@ -1,10 +1,12 @@
 # Cluster 3 — Run Liveness, Capability Truth, and Effect Evidence
 
-Status: implemented; unknown effect evidence remains fail-closed
+Status: remediation complete; unknown effect evidence remains fail-closed
 Implementation commits: historical cluster commits through `16f54eb`, remediation `1465343`
 Priority: P1/P2
 Depends on: Cluster 2 worker-local settings for reliable real Pi tests
 Blocks: short idle policies, trustworthy capability inspection, safe restart guidance
+
+Historical implementation record: issue evidence and work packages below describe the pre-remediation baseline. No extension-owned liveness/capability/effect-evidence item in this cluster remains open.
 
 ## Cluster objective
 
