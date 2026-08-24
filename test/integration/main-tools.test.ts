@@ -43,6 +43,7 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   assert.equal(wait.executionMode, "sequential");
   assert.match(wait.description, /bounded (observation|collection) window/i);
   assert.match(wait.description, /late replies.*delivered automatically/i);
+  assert.match(wait.description, /at-most-one live presentation.*not crash-proof exactly once.*no staged tool-result append receipt/i);
   const waitGuidelines = wait.promptGuidelines ?? [];
   assert.match(waitGuidelines.join("\n"), /do not.*rejoin.*keep.*alive/i);
   assert.match(waitGuidelines.join("\n"), /deliberate synchronous.*(collection|status).*window/i);
@@ -325,6 +326,8 @@ it("guides timed-out pending waits without changing exact structured results", a
   const rendered = await renderWait(pending);
   const text = (rendered.content[0] as { text: string }).text;
   assert.match(text, /Replies: timed out with pending work/);
+  assert.match(text, /at most one live presentation.*Pi 0\.81\.1.*no staged tool-result append receipt/is);
+  assert.match(text, /mail journal answered.*before.*tool result.*durably present/is);
   assert.match(text, /pending requests remain correlated/i);
   assert.match(text, /later replies.*delivered automatically.*main/i);
   assert.match(text, /no immediate.*wait_for_replies.*keep.*alive/i);

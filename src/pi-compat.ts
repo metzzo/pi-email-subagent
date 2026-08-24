@@ -5,6 +5,25 @@ import * as TypeBox from "typebox";
 
 export const SUPPORTED_PI_VERSION = "0.81.1";
 
+export interface CollectedReplyPresentationCapability {
+  supported: false;
+  reason: string;
+  requiredCoreContract: string;
+}
+
+/**
+ * Pi 0.81.1 has no released staged tool-result append receipt. Keep collection
+ * policy fail-closed instead of inferring presentation from execute() return,
+ * tool lifecycle events, stdout, sendMessage(), or appendEntry().
+ */
+export function collectedReplyPresentationCapability(): CollectedReplyPresentationCapability {
+  return {
+    supported: false,
+    reason: `Pi ${SUPPORTED_PI_VERSION} custom tool execution exposes no post-append acknowledgement for its exact tool-result session entry.`,
+    requiredCoreContract: "A stable request/reply/toolCall/result-entry staged receipt whose post-append commit callback settles before Pi continues the agent.",
+  };
+}
+
 interface Feature {
   path: string;
   present: (module: Record<string, unknown>) => boolean;
