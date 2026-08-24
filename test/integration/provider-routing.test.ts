@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
 import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
+import { ProviderReadinessError } from "../../src/model-runtime.ts";
 import { MailStore } from "../../src/mail-store.ts";
 import { makeReplySubject } from "../../src/reply.ts";
 import type { SendEmailResult } from "../../src/types.ts";
@@ -23,6 +24,10 @@ async function start(
   models: Model<any>[],
   preferredProvider: string | undefined,
   main = new FakeMainAdapter("main@shared.com"),
+  boundary: {
+    preflight?: (model: Model<any>) => Promise<void>;
+    factory?: (model: Model<any>) => FakeWorker | Promise<FakeWorker>;
+  } = {},
 ): Promise<Harness> {
   const workers: FakeWorker[] = [];
   const providers: string[] = [];
@@ -34,9 +39,10 @@ async function start(
     models,
     preferredProvider,
     mainAdapter: main,
-    workerFactory: (model) => {
+    workerPreflight: boundary.preflight,
+    workerFactory: async (model) => {
       providers.push(model.provider);
-      const worker = new FakeWorker();
+      const worker = boundary.factory ? await boundary.factory(model) : new FakeWorker();
       workers.push(worker);
       return worker;
     },
@@ -62,6 +68,96 @@ async function answerAndIdle(harness: Harness, sent: SendEmailResult, workerInde
 }
 
 describe("provider-aware durable routing", () => {
+  it("fails a new credential-source incompatibility before email acceptance", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-provider-preflight-"));
+    let preflights = 0;
+    const harness = await start(root, [alpha()], "provider-alpha", undefined, {
+      preflight: async (selected) => {
+        preflights += 1;
+        throw new ProviderReadinessError(
+          selected.provider,
+          "credential-source-unsupported",
+          "Credential source for provider provider-alpha is unsupported for isolated workers (parent: runtime; worker: stored). Reload after correcting provider authentication.",
+        );
+      },
+    });
+    try {
+      await assert.rejects(
+        harness.broker.send(harness.broker.mainAddress, {
+          to: "worker.preflight@shared.com", subject: "Preflight", message: "Do not accept this.", priority: "low",
+        }),
+        /credential source.*runtime.*stored/i,
+      );
+      assert.equal(preflights, 1);
+      assert.equal(harness.broker.mailStore.list().length, 0);
+      assert.equal(harness.broker.getSnapshot().agents.length, 0);
+      assert.equal(harness.workers.length, 0);
+    } finally {
+      await harness.broker.shutdown();
+    }
+  });
+
+  it("keeps archived mail queued on readiness failure and never probes ordinary mail to the failed identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-provider-readiness-existing-"));
+    let blocked = false;
+    let preflights = 0;
+    let factories = 0;
+    const readinessFailure = () => new ProviderReadinessError(
+      "provider-alpha",
+      "credential-source-mismatch",
+      "Credential source for provider provider-alpha is incompatible with the extension-start snapshot (parent: environment; worker: stored). Reload after correcting provider authentication.",
+    );
+    const harness = await start(root, [alpha()], "provider-alpha", undefined, {
+      preflight: async () => {
+        preflights += 1;
+        if (blocked) throw readinessFailure();
+      },
+      factory: async () => {
+        factories += 1;
+        if (blocked) throw readinessFailure();
+        return new FakeWorker();
+      },
+    });
+    try {
+      const initial = await harness.broker.send(harness.broker.mainAddress, {
+        to: "worker.readiness-existing@shared.com", subject: "Initial", message: "Create supported identity.", priority: "low",
+      });
+      await answerAndIdle(harness, initial, 0);
+      await harness.broker.archive(initial.envelope.to);
+      assert.equal(preflights, 1);
+      assert.equal(factories, 1);
+
+      blocked = true;
+      await assert.rejects(
+        harness.broker.send(harness.broker.mainAddress, {
+          to: initial.envelope.to, subject: "Restore", message: "Keep queued if readiness changed.", priority: "low",
+        }),
+        /persisted but delivery failed.*credential source.*environment.*stored/i,
+      );
+      const failed = harness.broker.inspectAgent(initial.envelope.to);
+      assert.equal(failed.state, "failed");
+      assert.match(failed.failure ?? "", /credential source.*environment.*stored/i);
+      const restore = harness.broker.mailStore.list().find((email) => email.subject === "Restore");
+      assert.equal(restore?.deliveryState, "queued");
+      assert.equal(preflights, 1, "existing identity restoration does not run new-identity preflight");
+      assert.equal(factories, 2);
+
+      const ordinary = await harness.broker.send(harness.broker.mainAddress, {
+        to: initial.envelope.to, subject: "While failed", message: "Accept without readiness work.", priority: "low",
+      });
+      assert.equal(ordinary.recipientDisposition, "failed");
+      assert.equal(ordinary.envelope.deliveryState, "queued");
+      assert.equal(preflights, 1);
+      assert.equal(factories, 2, "ordinary mail to failed identity performs no runtime readiness work");
+
+      await assert.rejects(harness.broker.restart(initial.envelope.to), /credential source.*environment.*stored/i);
+      assert.equal(factories, 3, "explicit restart performs readiness through worker creation");
+      assert.equal(harness.broker.mailStore.list().filter((email) => email.subject === "Restore")[0]?.deliveryState, "queued");
+    } finally {
+      await harness.broker.shutdown();
+    }
+  });
+
   it("fails a new duplicate address before acceptance when current provider cannot select exactly one candidate", async () => {
     for (const preferred of [undefined, "provider-gamma"]) {
       const root = await mkdtemp(join(tmpdir(), "pi-email-provider-ambiguous-"));
