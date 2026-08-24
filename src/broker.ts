@@ -325,9 +325,10 @@ export class AgentBroker {
           record.instructions = profile.instructions;
           if (["running", "spawning", "queued"].includes(record.state)) record.state = "paused";
           if (record.failure?.startsWith("Model unavailable during restore:") && !record.cleanup) {
-            if (record.state === "failed") record.state = "paused";
-            delete record.failure;
-            record.currentActivity = `Exact binding ${record.provider}/${record.modelId} is available again; restoration resumed without rebinding.`;
+            record.state = "failed";
+            record.failure = `Exact binding ${record.provider}/${record.modelId} is available again; explicit same-identity restart is required before queued mail can be delivered.`;
+            record.currentActivity = record.failure;
+            startupFailures.push(`${record.address}: ${record.failure}`);
           }
           if (record.state !== "running") this.interruptRecordWork(record);
           this.routableRecords.add(record.address);

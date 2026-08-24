@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Changed
 
 - Removed mechanical completion replies: only an exact successful `send_email` reply closes a mail obligation, while final assistant text remains session-local and exhausted enforcement leaves requests unanswered.
-- Known failed recipients now accept and preserve queued mail without catalog re-resolution, attached-worker routing, or implicit replacement; only explicit same-identity restart can resume delivery.
+- Known failed recipients now accept and preserve queued mail without catalog re-resolution, attached-worker routing, implicit replacement, or automatic recovery when a removed exact binding returns; only explicit same-identity restart can resume delivery.
 - `canSpawn` now means subagent delegation permission for both known and unknown recipients, defaults false for built-in/unknown profiles and legacy records, and leaves exact replies plus mail to main available.
 - Explicitly opted-in child requests are atomic outgoing dependencies: parents park without a run slot or enforcement spin, premature upstream replies are rejected before reservation, exact child results are prioritized, and terminal child failures create one durable sanitized correlated blocker.
 - Collected replies now state their narrowed at-most-one live presentation guarantee. A real Pi crash-boundary characterization records that 0.81.1 can commit the mail answer before the wait tool-result entry and exposes no staged post-append receipt, so exactly-once presentation remains fail-closed.

@@ -188,10 +188,13 @@ describe("provider-aware durable routing", () => {
 
     const returned = await start(root, [alpha(), beta()], "provider-beta");
     try {
-      assert.ok(returned.providers.includes("provider-alpha"));
+      assert.equal(returned.providers.includes("provider-alpha"), false, "catalog recovery does not implicitly restart a failed identity");
       assert.equal(returned.broker.inspectAgent(alphaSend.envelope.to).provider, "provider-alpha");
-      assert.notEqual(returned.broker.inspectAgent(alphaSend.envelope.to).state, "failed");
+      assert.equal(returned.broker.inspectAgent(alphaSend.envelope.to).state, "failed");
       assert.equal(returned.broker.mailStore.list().some((email) => email.subject === "Do not substitute"), true);
+      await returned.broker.restart(alphaSend.envelope.to);
+      assert.ok(returned.providers.includes("provider-alpha"));
+      await eventually(() => assert.notEqual(returned.broker.inspectAgent(alphaSend.envelope.to).state, "failed"));
     } finally {
       await returned.broker.shutdown();
     }
