@@ -288,9 +288,12 @@ describe("provider-aware durable routing", () => {
     try {
       const migrated = synthetic.broker.inspectAgent(sent.envelope.to);
       assert.equal(migrated.provider, "provider-alpha");
-      assert.notEqual(migrated.state, "failed");
+      assert.equal(migrated.state, "failed");
+      assert.match(migrated.failure ?? "", /explicit same-identity restart is required/i);
       assert.ok(synthetic.broker.getSnapshot().agents.find((item) => item.address === sent.envelope.to)?.activity
         .some((item) => /Legacy provider binding uniquely migrated to provider-alpha\/shared/.test(item.summary)));
+      await synthetic.broker.restart(sent.envelope.to);
+      await eventually(() => assert.notEqual(synthetic.broker.inspectAgent(sent.envelope.to).state, "failed"));
     } finally {
       await synthetic.broker.shutdown();
     }
