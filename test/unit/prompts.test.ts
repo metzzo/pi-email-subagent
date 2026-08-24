@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import {
+  CAPABILITY_SUMMARY_MAX_ADDRESS_ENTRIES,
+  CAPABILITY_SUMMARY_MAX_BYTES,
+  CAPABILITY_SUMMARY_MAX_LINES,
+  effectiveRoleToolSummary,
   enforcementPrompt,
   formatAlert,
   formatEmail,
@@ -151,6 +155,34 @@ describe("mail prompts", () => {
     assert.match(prompt, /reviewer: read, send_email, fetch_emails \(read-only, delegation disabled\)/);
     assert.match(prompt, /worker\.special@gpt-5\.6-sol\.com: read, write, send_email, fetch_emails \(writable, delegation disabled\)/);
     assert.doesNotMatch(prompt, /built-in `worker` role has writable/);
+  });
+
+  it("bounds configured capability intent by complete parsed entries", () => {
+    const config: SubagentConfig = structuredClone(DEFAULT_CONFIG);
+    for (let index = 0; index < 80; index += 1) {
+      config.roles[`custom-${index}`] = { tools: ["read", `tool-${index}`], canSpawn: false };
+    }
+    for (let index = 0; index < CAPABILITY_SUMMARY_MAX_ADDRESS_ENTRIES + 20; index += 1) {
+      config.addresses[`worker.task-${index}@gpt-5.6-sol.com`] = { tools: ["read", `address-tool-${index}`] };
+    }
+    config.roles.huge = { tools: Array.from({ length: 200 }, (_, index) => `complete-tool-${index}-${"x".repeat(80)}`) };
+
+    const summary = effectiveRoleToolSummary(config);
+    assert.ok(Buffer.byteLength(summary, "utf8") <= CAPABILITY_SUMMARY_MAX_BYTES);
+    assert.ok(summary.split("\n").length <= CAPABILITY_SUMMARY_MAX_LINES);
+    assert.match(summary, /Configured capability intent \(not live activation\)/i);
+    assert.match(summary, /inspect_agent.*exact live\/prospective/i);
+    const scout = summary.indexOf("scout:");
+    const reviewer = summary.indexOf("reviewer:");
+    const worker = summary.indexOf("worker:");
+    const custom = summary.indexOf("custom-0:");
+    assert.ok(scout >= 0 && reviewer > scout && worker > reviewer && custom > worker, "built-in roles render first in stable order");
+    assert.equal((summary.match(/worker\.task-\d+@gpt-5\.6-sol\.com:/g) ?? []).length <= CAPABILITY_SUMMARY_MAX_ADDRESS_ENTRIES, true);
+    assert.doesNotMatch(summary, /huge:|complete-tool-/i, "an oversized semantic entry is omitted whole");
+    const renderedEntries = summary.split("\n").filter((line) => line.startsWith("- ")).length;
+    const parsedEntries = Object.keys(config.roles).length + Object.keys(config.addresses).length;
+    assert.match(summary, new RegExp(`${parsedEntries - renderedEntries} parsed canonical entr(?:y|ies) omitted`));
+    assert.doesNotMatch(summary, /hash|sha[0-9-]*:/i);
   });
 
   it("requires subagents to execute authorized changes while respecting read-only requests", () => {

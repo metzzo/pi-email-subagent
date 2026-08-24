@@ -1,5 +1,5 @@
 import type { AgentRecord, EmailEnvelope, SubagentConfig } from "./types.ts";
-import { DEFAULT_MODEL_POLICY, resolveAgentProfile } from "./config.ts";
+import { DEFAULT_CONFIG, DEFAULT_MODEL_POLICY, isSafeConfigSemanticText, resolveAgentProfile } from "./config.ts";
 import { makeReplySubject } from "./reply.ts";
 
 function xml(value: string): string {
@@ -103,22 +103,57 @@ A terminal failure leaves every original obligation authoritative. Review Work a
 }
 
 const MUTATION_TOOLS = new Set(["bash", "edit", "write"]);
+export const CAPABILITY_SUMMARY_MAX_BYTES = 8 * 1024;
+export const CAPABILITY_SUMMARY_MAX_LINES = 64;
+export const CAPABILITY_SUMMARY_MAX_ADDRESS_ENTRIES = 24;
+const CAPABILITY_SUMMARY_OMISSION_RESERVE_BYTES = 160;
+
+interface CapabilitySummaryEntry {
+  label: string;
+  line: string;
+  addressEligible: boolean;
+}
 
 export function effectiveRoleToolSummary(config: SubagentConfig): string {
-  const describe = (label: string, profile: { tools: readonly string[]; canSpawn: boolean }) => {
+  const describe = (label: string, profile: { tools: readonly string[]; canSpawn: boolean }): CapabilitySummaryEntry => {
     const capability = profile.tools.some((tool) => MUTATION_TOOLS.has(tool)) ? "writable" : "read-only";
     const delegation = profile.canSpawn ? "can delegate" : "delegation disabled";
-    return `- ${label}: ${profile.tools.join(", ") || "(none)"} (${capability}, ${delegation})`;
+    return {
+      label,
+      line: `- ${label}: ${profile.tools.join(", ") || "(none)"} (${capability}, ${delegation})`,
+      addressEligible: true,
+    };
   };
-  const roles = Object.keys(config.roles).sort().map((name) => {
-    const profile = resolveAgentProfile(config, `__summary__.role@invalid`, name);
-    return describe(name, profile);
-  });
-  const addresses = Object.keys(config.addresses).sort().map((address) => {
+  const builtInNames = Object.keys(DEFAULT_CONFIG.roles).filter((name) => Object.hasOwn(config.roles, name));
+  const customNames = Object.keys(config.roles).filter((name) => !builtInNames.includes(name)).sort();
+  const roles = [...builtInNames, ...customNames].map((name) =>
+    describe(name, resolveAgentProfile(config, `__summary__.role@invalid`, name)));
+  const addresses = Object.keys(config.addresses).sort().map((address, index) => {
     const name = address.split(".", 1)[0]!.toLowerCase();
-    return describe(address, resolveAgentProfile(config, address, name));
+    return {
+      ...describe(address, resolveAgentProfile(config, address, name)),
+      addressEligible: index < CAPABILITY_SUMMARY_MAX_ADDRESS_ENTRIES,
+    };
   });
-  return ["Effective configured role tools:", ...roles, ...(addresses.length ? ["Effective exact-address overrides:", ...addresses] : [])].join("\n");
+  const entries = [...roles, ...addresses];
+  const lines = [
+    "Configured capability intent (not live activation):",
+    "Use inspect_agent for an exact live/prospective capability decision.",
+  ];
+  let rendered = 0;
+  for (const entry of entries) {
+    if (!entry.addressEligible
+      || !isSafeConfigSemanticText(entry.label, false)
+      || !isSafeConfigSemanticText(entry.line, false)) continue;
+    const candidate = [...lines, entry.line].join("\n");
+    if (lines.length + 1 > CAPABILITY_SUMMARY_MAX_LINES - 1
+      || Buffer.byteLength(candidate, "utf8") > CAPABILITY_SUMMARY_MAX_BYTES - CAPABILITY_SUMMARY_OMISSION_RESERVE_BYTES) continue;
+    lines.push(entry.line);
+    rendered += 1;
+  }
+  const omitted = entries.length - rendered;
+  if (omitted > 0) lines.push(`${omitted} parsed canonical ${omitted === 1 ? "entry" : "entries"} omitted from this display budget.`);
+  return lines.join("\n");
 }
 
 export function mainCoordinatorPrompt(

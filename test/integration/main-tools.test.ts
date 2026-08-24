@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
 import type { AgentBroker } from "../../src/broker.ts";
+import { MAX_CONFIG_INSTRUCTIONS_BYTES, MAX_CONFIG_PROFILE_TOOLS } from "../../src/config.ts";
 import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import type { EmailEnvelope, WaitForRepliesResult } from "../../src/types.ts";
 
@@ -88,6 +89,42 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   assert.match(manageGuidance, /stop.*does not free.*maxAgents/i);
   assert.match(manageGuidance, /cancel only.*explicitly abandoned.*exact requests/i);
   assert.match(manageGuidance, /restarting a failed agent.*inspect.*Work.*Conversation.*restart.*same identity/i);
+});
+
+it("returns exact bounded prospective capability details without truncating tool names", async () => {
+  const tools = Array.from({ length: MAX_CONFIG_PROFILE_TOOLS }, (_, index) => {
+    const prefix = `tool-${index}-`;
+    return `${prefix}${"x".repeat(100 - prefix.length)}`;
+  });
+  const instructions = "i".repeat(MAX_CONFIG_INSTRUCTIONS_BYTES);
+  const inspection = {
+    address: "worker.bound@gpt-5.6-sol.com", exists: false, wouldSpawn: true, capacityAvailable: true,
+    capacity: { identitiesUsed: 0, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 }, holdsActivationLease: false,
+    modelId: "gpt-5.6-sol", provider: "openai-codex", effort: "medium", role: "worker", tools, instructions,
+    writable: true, canSpawn: false, state: "new", queued: 0, unanswered: 0, outgoingUnanswered: 0, pendingReplies: 0,
+    archiveEligible: false,
+    archiveBlockers: {
+      active: false, cleanupQuarantine: false,
+      queued: { count: 0, requestIds: [], omitted: 0 }, incomingUnanswered: { count: 0, requestIds: [], omitted: 0 },
+      outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 }, pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+    },
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    providerReady: "unknown",
+    lifecycle: {
+      spawnTimeoutMs: 30_000, promptAcceptanceTimeoutMs: 30_000, runTimeoutMs: 14_400_000,
+      idleTimeoutMs: 900_000, abortTimeoutMs: 10_000, disposeTimeoutMs: 10_000, brokerShutdownTimeoutMs: 60_000,
+    },
+  };
+  const broker = { inspectAgent: () => inspection } as unknown as AgentBroker;
+  const [inspect] = createMainCoordinationTools(() => broker);
+  const result = await inspect.execute("inspect-bounded", { address: inspection.address }, undefined, undefined, {} as never);
+  const text = (result.content[0] as { text: string }).text;
+  assert.ok(Buffer.byteLength(text, "utf8") <= DEFAULT_MAX_BYTES);
+  assert.match(text, new RegExp(tools[0]!));
+  assert.match(text, new RegExp(tools.at(-1)!));
+  const details = result.details as { inspection: typeof inspection };
+  assert.deepEqual(details.inspection.tools, tools);
+  assert.equal(details.inspection.instructions, instructions);
 });
 
 it("previews an initial effort override without spawning", async () => {
