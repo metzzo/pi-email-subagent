@@ -14,7 +14,9 @@ The dashboard header and one-line Agents widget show current derived **identity 
 - **Unverified:** `bash` and custom tools show their bounded command/target hint and outcome, but their file effects are always unknown.
 - **Inspection:** reads, searches, and listings collapse into current-run counters.
 
-This is structural attribution only. Workers share a workspace, so the extension deliberately does not use git status, filesystem watchers, snapshots, or worktrees to guess ownership. A warning appears when two agents have active explicit mutation intent for the same normalized exact path. Existing targets and their nearest existing parents are canonicalized through realpath where possible. The warning and Pi's direct mutation serialization are best-effort: upstream missing-target symlink paths and hard-link aliases can bypass same-target recognition. This is not a write-scope, workspace fence, or semantic conflict detector.
+This is structural attribution only. Workers share a workspace, so the extension deliberately does not use git status, filesystem watchers, snapshots, or worktrees to guess ownership. A warning appears when two agents have active explicit mutation intent for the same normalized exact path. Existing targets and their nearest existing parents are canonicalized through realpath where possible.
+
+Pi 0.81.1's public direct-mutation queue serializes one computed path key within one Pi runtime. Dependency characterization confirms same-path serialization, but also confirms two narrower gaps: a missing target reached through a symlinked ancestor falls back to a distinct resolved pathname, and two existing hard-link pathnames receive distinct keys. This is best-effort direct-file serialization, not a workspace transaction, universal alias lock, write scope, workspace fence, or semantic conflict detector. The extension has no supported interception boundary around every built-in/custom session, so its alias capability gate remains disabled: it adds no extension-global path lock, path hashing, or cross-parent project lease.
 
 ## Navigation
 

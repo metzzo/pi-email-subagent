@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { awaitPromptAcceptance, effectiveWorkerModel, SdkWorker, terminalAgentError } from "../../src/sdk-worker.ts";
+import { processQuiescenceReceiptCapability } from "../../src/pi-compat.ts";
 import { SAFE_SUMMARY_MAX_BYTES } from "../../src/safe-summary.ts";
 import { emptyWorkState } from "../../src/work-ledger.ts";
 
@@ -297,7 +298,8 @@ describe("SDK worker failures", () => {
     const report = await worker.cleanup({ abortTimeoutMs: 10 });
     assert.deepEqual(report.tools, [], "completed tools are not mislabeled as active");
     assert.equal(report.quiescence, "unknown");
-    assert.match(report.source, /process|Bash|receipt/i);
+    assert.equal(report.source, processQuiescenceReceiptCapability().detailCode,
+      "process-risk cleanup is tied to the explicit unsupported Pi capability gate");
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE/);
   });
 

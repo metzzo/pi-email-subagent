@@ -19,6 +19,7 @@ import type {
   WorkerStartConfig,
   WorkerTransport,
 } from "./types.ts";
+import { processQuiescenceReceiptCapability } from "./pi-compat.ts";
 import { formatUnanswered } from "./prompts.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
@@ -27,6 +28,7 @@ import { clone, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem, unknownWorkItem } from "./work-ledger.ts";
 
 const { Type } = TypeBox;
+const PROCESS_QUIESCENCE_RECEIPT = processQuiescenceReceiptCapability();
 
 export interface SendToolDetails {
   result?: SendEmailResult;
@@ -587,7 +589,7 @@ export class SdkWorker implements WorkerTransport {
         source: quiescence === "verified"
           ? "pi-agent-session-idle-with-no-process-capable-tool-risk"
           : processCapableRisk
-            ? "pi-0.81.1-bash-process-quiescence-receipt-unavailable"
+            ? PROCESS_QUIESCENCE_RECEIPT.detailCode
             : "pi-0.81.1-no-tool-process-quiescence-receipt",
         abort,
         dispose,

@@ -16,6 +16,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - New worker identities fail closed before mail acceptance unless parent/worker non-secret credential-source status has supported equivalence (`stored`, matching environment context, or non-command models JSON key); runtime overrides, commands, fallback, mismatches, and indeterminate status require correction and reload without secret resolution or comparison.
 - Exact worker API/long-cache compatibility metadata must match the extension-start model snapshot. Deterministic Pi characterization covers `prompt_cache_retention` inclusion/omission and one terminal rejection without model-string exceptions, option stripping, replay, provider switch, or extension retry.
 - Provider/session/lifecycle errors now cross one idempotent UTF-8 byte/line/control/bidi/markup-bounded summary boundary with targeted common credential-form redaction; native worker Conversation retains protected raw detail, Activity uses the `Pi agent retry` label, and the broker no longer appends a duplicate terminal cause.
+- Abandoned-owner recovery now covers the full durable capability-epoch/legacy migration table, preserves an existing unknown cleanup diagnosis, reconstructs exact inherited holds before ordinary admission, and does not rewrite read-only failed or verified-clean stopped lifecycle facts when quarantine overcommits capacity.
+- Process-quiescence and mutation-alias compatibility gates remain explicitly disabled on Pi 0.81.1 pending released authoritative APIs. Public dependency characterization records same-path mutation serialization plus the missing-target symlink-ancestor and existing hard-link key gaps without adding an extension-global path lock.
 
 ## [0.1.0] - 2026-08-23
 

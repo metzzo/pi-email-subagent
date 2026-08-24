@@ -11,6 +11,13 @@ export interface CollectedReplyPresentationCapability {
   requiredCoreContract: string;
 }
 
+export interface UnavailablePiCoreCapability {
+  supported: false;
+  detailCode: string;
+  reason: string;
+  requiredCoreContract: string;
+}
+
 /**
  * Pi 0.81.1 has no released staged tool-result append receipt. Keep collection
  * policy fail-closed instead of inferring presentation from execute() return,
@@ -21,6 +28,34 @@ export function collectedReplyPresentationCapability(): CollectedReplyPresentati
     supported: false,
     reason: `Pi ${SUPPORTED_PI_VERSION} custom tool execution exposes no post-append acknowledgement for its exact tool-result session entry.`,
     requiredCoreContract: "A stable request/reply/toolCall/result-entry staged receipt whose post-append commit callback settles before Pi continues the agent.",
+  };
+}
+
+/**
+ * No released Pi API can prove process-tree absence for one exact worker
+ * generation. This gate stays false even if an untested host happens to expose
+ * a similarly named method; integration requires a deliberate version upgrade.
+ */
+export function processQuiescenceReceiptCapability(): UnavailablePiCoreCapability {
+  return {
+    supported: false,
+    detailCode: "PI_0_81_1_PROCESS_QUIESCENCE_RECEIPT_UNAVAILABLE",
+    reason: `Pi ${SUPPORTED_PI_VERSION} exposes no authoritative session/generation-scoped process-tree cleanup receipt.`,
+    requiredCoreContract: "An idempotent exact session/generation receipt covering provider quiescence, settled callbacks, active tool receipts, completed process group/tree receipts, platform/source detail, and verified-or-unknown confidence.",
+  };
+}
+
+/**
+ * Pi's public mutation queue is useful only for its documented per-key scope.
+ * The extension has no supported interception point from which to strengthen
+ * that identity across every built-in/custom mutation session.
+ */
+export function directMutationAliasSerializationCapability(): UnavailablePiCoreCapability {
+  return {
+    supported: false,
+    detailCode: "PI_0_81_1_MUTATION_ALIAS_IDENTITY_UNAVAILABLE",
+    reason: `Pi ${SUPPORTED_PI_VERSION} cannot assign one authoritative queue key to every missing target alias or existing hard-link alias.`,
+    requiredCoreContract: "A supported alias identity covering missing-target symlink ancestors, existing hard-link aliases, replacement/rename windows, and concurrent create windows.",
   };
 }
 
