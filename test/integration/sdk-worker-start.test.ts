@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -8,6 +8,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
+import { WorkerSettingsSnapshot } from "../../src/settings-snapshot.ts";
 import type { AgentRecord } from "../../src/types.ts";
 
 function successfulStream(
@@ -89,7 +90,8 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
   assert.ok(model, "expected at least one built-in model");
   const record = workerRecord(model);
   record.tools.splice(4, 0, "not_a_real_tool");
-  const worker = new SdkWorker(runtime);
+  const settingsSnapshot = WorkerSettingsSnapshot.capture(root, root, false);
+  const worker = new SdkWorker(runtime, undefined, settingsSnapshot);
   await worker.start({
     record,
     model,
@@ -127,7 +129,13 @@ it("reports settings load scope without leaking invalid file content", async () 
   const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
   const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
   assert.ok(model);
-  const worker = new SdkWorker(runtime);
+  const globalPath = join(agentDir, "settings.json");
+  const projectPath = join(cwd, ".pi", "settings.json");
+  const beforeGlobal = await readFile(globalPath);
+  const beforeProject = await readFile(projectPath);
+  const settingsSnapshot = WorkerSettingsSnapshot.capture(cwd, agentDir, true);
+  assert.deepEqual(settingsSnapshot.loadIssues, [{ scope: "global" }, { scope: "project" }]);
+  const worker = new SdkWorker(runtime, undefined, settingsSnapshot);
   try {
     await worker.start({
       record: workerRecord(model, `scout.invalid-settings@${model.id}.com`),
@@ -140,10 +148,13 @@ it("reports settings load scope without leaking invalid file content", async () 
       sendEmail: async () => { throw new Error("not called"); },
       fetchEmails: () => ({ emails: [], total: 0 }),
     });
+    worker.setEffort("high");
+    const internal = worker as unknown as { session: { settingsManager: { flush(): Promise<void> } } };
+    await internal.session.settingsManager.flush();
     const activity = worker.getSnapshot().record.activity.map((item) => item.summary);
-    assert.ok(activity.some((summary) => /Pi global settings could not be loaded; Pi fallback settings apply for that scope/.test(summary)));
-    assert.ok(activity.some((summary) => /Pi project settings could not be loaded; Pi fallback settings apply for that scope/.test(summary)));
     assert.doesNotMatch(JSON.stringify(activity), /PRIVATE|INVALID SETTINGS/);
+    assert.deepEqual(await readFile(globalPath), beforeGlobal);
+    assert.deepEqual(await readFile(projectPath), beforeProject);
   } finally {
     await worker.dispose().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
@@ -167,7 +178,7 @@ it("bounds cleanup during real Pi retry backoff and suppresses every stale sessi
   });
   const model = runtime.getModel("worker-retry-cleanup", "retry-cleanup-model");
   assert.ok(model);
-  const worker = new SdkWorker(runtime, model);
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false));
   try {
     await worker.start({
       record: workerRecord(model, "scout.retry-cleanup@retry-cleanup-model.com"),
@@ -198,6 +209,144 @@ it("bounds cleanup during real Pi retry backoff and suppresses every stale sessi
     assert.deepEqual(worker.getSnapshot().record, beforeCleanup, "aborted retry settlement cannot update the disposed worker");
   } finally {
     await worker.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("never writes shared settings while two workers start and change effort independently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-no-settings-writes-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "project");
+  const globalPath = join(agentDir, "settings.json");
+  const projectPath = join(cwd, ".pi", "settings.json");
+  await mkdir(agentDir, { recursive: true });
+  await mkdir(join(cwd, ".pi"), { recursive: true });
+  await writeFile(globalPath, JSON.stringify({
+    defaultThinkingLevel: "medium",
+    steeringMode: "one-at-a-time",
+    followUpMode: "one-at-a-time",
+    retry: { enabled: true, maxRetries: 1, baseDelayMs: 7, provider: { timeoutMs: 1_001, maxRetries: 2, maxRetryDelayMs: 2_001 } },
+    transport: "sse",
+    httpIdleTimeoutMs: 3_001,
+    websocketConnectTimeoutMs: 4_001,
+    compaction: { enabled: false, reserveTokens: 12_001, keepRecentTokens: 13_001 },
+    branchSummary: { reserveTokens: 14_001, skipPrompt: true },
+    shellCommandPrefix: "set -eu",
+    packages: ["global-package"],
+    skills: ["global-skills"],
+    prompts: ["global-prompts"],
+    thinkingBudgets: { low: 1_111, high: 2_222 },
+  }));
+  await writeFile(projectPath, JSON.stringify({
+    retry: { maxRetries: 4, provider: { timeoutMs: 5_001 } },
+    transport: "websocket",
+    compaction: { reserveTokens: 15_001 },
+    shellCommandPrefix: "project-prefix",
+    prompts: ["project-prompts"],
+  }));
+  const globalBefore = await readFile(globalPath);
+  const projectBefore = await readFile(projectPath);
+  const snapshot = WorkerSettingsSnapshot.capture(cwd, agentDir, true);
+  assert.deepEqual(snapshot.loadIssues, []);
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
+  assert.ok(model);
+  const low = new SdkWorker(runtime, model, snapshot);
+  const high = new SdkWorker(runtime, model, snapshot);
+  const start = async (worker: SdkWorker, effort: AgentRecord["effort"], suffix: string) => {
+    const record = workerRecord(model, `scout.settings-${suffix}@${model.id}.com`);
+    record.effort = effort;
+    await worker.start({
+      record,
+      model,
+      cwd,
+      agentDir,
+      sessionDir: join(root, `sessions-${suffix}`),
+      projectTrusted: true,
+      systemPrompt: "Settings writes are worker-local.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+  };
+  try {
+    await Promise.all([start(low, "low", "low"), start(high, "high", "high")]);
+    const lowSession = (low as unknown as { session: { settingsManager: import("@earendil-works/pi-coding-agent").SettingsManager } }).session;
+    const highSession = (high as unknown as { session: { settingsManager: import("@earendil-works/pi-coding-agent").SettingsManager } }).session;
+    assert.notEqual(lowSession.settingsManager, highSession.settingsManager);
+    assert.equal(lowSession.settingsManager.getSteeringMode(), "all");
+    assert.equal(lowSession.settingsManager.getFollowUpMode(), "all");
+    assert.equal(lowSession.settingsManager.getDefaultThinkingLevel(), "low");
+    assert.equal(highSession.settingsManager.getDefaultThinkingLevel(), "high");
+    assert.deepEqual(lowSession.settingsManager.getRetrySettings(), { enabled: true, maxRetries: 4, baseDelayMs: 7 });
+    assert.deepEqual(lowSession.settingsManager.getProviderRetrySettings(), { timeoutMs: 5_001, maxRetries: undefined, maxRetryDelayMs: 60_000 });
+    assert.equal(lowSession.settingsManager.getTransport(), "websocket");
+    assert.equal(lowSession.settingsManager.getHttpIdleTimeoutMs(), 3_001);
+    assert.equal(lowSession.settingsManager.getWebSocketConnectTimeoutMs(), 4_001);
+    assert.deepEqual(lowSession.settingsManager.getCompactionSettings(), { enabled: false, reserveTokens: 15_001, keepRecentTokens: 13_001 });
+    assert.deepEqual(lowSession.settingsManager.getBranchSummarySettings(), { reserveTokens: 14_001, skipPrompt: true });
+    assert.equal(lowSession.settingsManager.getShellCommandPrefix(), "project-prefix");
+    assert.deepEqual(lowSession.settingsManager.getPackages(), ["global-package"]);
+    assert.deepEqual(lowSession.settingsManager.getSkillPaths(), ["global-skills"]);
+    assert.deepEqual(lowSession.settingsManager.getPromptTemplatePaths(), ["project-prompts"]);
+    assert.deepEqual(lowSession.settingsManager.getThinkingBudgets(), { low: 1_111, high: 2_222 });
+
+    low.setEffort("xhigh");
+    high.setEffort("off");
+    await Promise.all([lowSession.settingsManager.flush(), highSession.settingsManager.flush()]);
+    assert.equal(low.getSnapshot().record.effort, "xhigh");
+    assert.equal(high.getSnapshot().record.effort, "off");
+    assert.deepEqual(await readFile(globalPath), globalBefore);
+    assert.deepEqual(await readFile(projectPath), projectBefore);
+  } finally {
+    await Promise.all([low.dispose().catch(() => undefined), high.dispose().catch(() => undefined)]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("recreates worker-local effective settings when a persistent session resumes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-settings-resume-"));
+  const settingsPath = join(root, "settings.json");
+  await writeFile(settingsPath, JSON.stringify({
+    defaultThinkingLevel: "medium",
+    steeringMode: "one-at-a-time",
+    retry: { enabled: true, maxRetries: 2, baseDelayMs: 9 },
+  }));
+  const before = await readFile(settingsPath);
+  const snapshot = WorkerSettingsSnapshot.capture(root, root, false);
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
+  assert.ok(model);
+  const first = new SdkWorker(runtime, model, snapshot);
+  let resumed: SdkWorker | undefined;
+  try {
+    const startConfig = {
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "Resume with the same isolated settings.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    };
+    const record = workerRecord(model, `scout.settings-resume@${model.id}.com`);
+    record.effort = "high";
+    await first.start({ record, ...startConfig });
+    const persistedRecord = first.getSnapshot().record;
+    assert.ok(persistedRecord.sessionFile);
+    await first.dispose();
+
+    resumed = new SdkWorker(runtime, model, snapshot);
+    await resumed.start({ record: persistedRecord, ...startConfig });
+    const manager = (resumed as unknown as { session: { settingsManager: import("@earendil-works/pi-coding-agent").SettingsManager } }).session.settingsManager;
+    assert.equal(manager.getSteeringMode(), "all");
+    assert.equal(manager.getDefaultThinkingLevel(), "high");
+    assert.deepEqual(manager.getRetrySettings(), { enabled: true, maxRetries: 2, baseDelayMs: 9 });
+    await manager.flush();
+    assert.deepEqual(await readFile(settingsPath), before);
+  } finally {
+    await first.dispose().catch(() => undefined);
+    await resumed?.dispose().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -244,7 +393,7 @@ it("loads effective global and only trusted project retry/transport settings int
       });
       const model = runtime.getModel(provider, "settings-model");
       assert.ok(model);
-      const worker = new SdkWorker(runtime, model);
+      const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(cwd, agentDir, trusted));
       await worker.start({
         record: workerRecord(model, `scout.settings-${trusted}@settings-model.com`),
         model,
