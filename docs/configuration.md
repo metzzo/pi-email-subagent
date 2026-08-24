@@ -101,19 +101,36 @@ The email domain remains a model ID. Provider choice is not configured in `subag
 - an existing identity always resolves its persisted exact provider/model; and
 - a missing exact tuple remains unavailable and is never replaced by a same-ID candidate from another provider.
 
-The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Legacy accepted mail without that field migrates only when the model ID has one global candidate; duplicates remain unavailable because the original provider cannot be inferred. Provider definitions and the worker catalog are still immutable extension-start snapshots, so removal/reintroduction and metadata changes take effect only after reload. See [Provider-aware durable model routing](provider-aware-model-routing.md).
+The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Legacy accepted mail without that field migrates only when the model ID has one global candidate; duplicates remain unavailable because the original provider cannot be inferred. Provider definitions, exact API/long-cache compatibility metadata, and non-secret auth-source status are immutable extension-start snapshots, so removal/reintroduction, metadata changes, and credential-source changes take effect only after reload. See [Provider-aware durable model routing](provider-aware-model-routing.md).
 
 ## Pi retry and transport settings
 
-Provider retry/transport policy is not duplicated in `subagents.json`. Each isolated worker loads Pi's ordinary effective `settings.json` values with the same `cwd`, agent directory, and project-trust decision as the parent runtime:
+Provider retry/transport policy is not duplicated in `subagents.json`. At extension start, one file-backed Pi manager loads settings with the actual `cwd`, agent directory, and project-trust decision. The extension reports each global/project load-error scope once, clones only public `getGlobalSettings()` / `getProjectSettings()` documents, and gives each worker a fresh no-write `SettingsManager.fromStorage(...)`:
 
-- global retry/transport settings always apply;
-- `.pi/settings.json` overrides apply only for a trusted project;
+- Pi owns migration and global/project nested merge;
+- global settings always apply and trusted `.pi/settings.json` values override them;
 - untrusted project settings are ignored;
-- worker steering/follow-up modes and persisted effort are the only in-memory overrides made by this extension; and
+- worker steering/follow-up modes and persisted effort are applied only to that worker's in-memory manager;
+- later session setters, concurrent effort changes, and resumed sessions write only worker memory; and
 - Pi defaults are not raised. `retry.provider.maxRetries` remains `0` unless the user explicitly configures it.
 
-The relevant Pi keys are `retry.enabled`, `retry.maxRetries`, `retry.baseDelayMs`, `retry.provider.timeoutMs`, `retry.provider.maxRetries`, `retry.provider.maxRetryDelayMs`, `transport`, `httpIdleTimeoutMs`, and `websocketConnectTimeoutMs`. A global/project settings load error is reported by scope in bounded worker Activity without copying file content. See [Provider retry visibility and recovery](provider-retry-recovery.md).
+The snapshot preserves effective retry/provider-retry values, transport, HTTP/WebSocket timeouts, compaction, branch summary, shell path/prefix, package/resource paths, and thinking budgets. Invalid settings use Pi's scope fallback and are never rewritten by a worker. Settings changes require extension reload.
+
+## Credential-source readiness
+
+The worker boundary checks Pi 0.81.1's non-secret auth-status surface; it does not resolve or compare credential material. Supported matching source classes are:
+
+- `stored`, using the same explicit `auth.json` path and provider snapshot (including stored OAuth/refresh credentials);
+- `environment`, with the same non-secret source context in the same process; and
+- non-command `models_json_key`, using the same explicit `models.json` path and provider snapshot.
+
+Runtime overrides, `models_json_command`, provider `fallback`, source/context mismatches, and missing/indeterminate/unconfigured status fail closed. This is supported credential-source equivalence, not proof that arbitrary provider hooks represent the same account. A new identity is preflighted before `email.created`; a known failed identity accepts ordinary queued mail without readiness work, while explicit restart rechecks readiness. Never compare or transfer keys, tokens, headers, URLs, environment values, or secret-derived fingerprints.
+
+## Long prompt-cache retention
+
+`PI_CACHE_RETENTION=long` is provider environment, not a Pi settings-manager field. Pi 0.81.1 emits `prompt_cache_retention: "24h"` for the relevant OpenAI request only when the exact effective model metadata permits long retention, and omits it when `compat.supportsLongCacheRetention` is false. Parent/worker API family and that effective capability must match the extension-start snapshot. If a proxy rejects long retention, correct its model override/upstream metadata and reload. There is no `gpt-5.6-sol` special case, option-stripping retry, automatic replay, provider switch, or fallback.
+
+See [Provider retry visibility and recovery](provider-retry-recovery.md).
 
 ## Default roles
 

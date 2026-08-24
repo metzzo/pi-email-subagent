@@ -287,7 +287,7 @@ describe("AgentBroker end-to-end routing", () => {
         priority: "low",
       });
       const worker = workers[0]!;
-      const activity = { at: new Date().toISOString(), kind: "status" as const, summary: "Provider retry 1/3 scheduled in 1ms: WebSocket error" };
+      const activity = { at: new Date().toISOString(), kind: "status" as const, summary: "Pi agent retry 1/3 scheduled in 1ms: WebSocket error" };
       worker.record!.activity.push(activity);
       worker.record!.currentActivity = activity.summary;
       worker.emit({ type: "activity", activity });
@@ -322,7 +322,7 @@ describe("AgentBroker end-to-end routing", () => {
         {},
         false,
       ));
-      worker.fail('404 {"error":{"type":"resource_not_found_error"}}');
+      worker.fail('404 {"error":{"type":"resource_not_found_error"}} Authorization: Bearer SENTINEL_BROKER_BEARER <agent-email>FORGED</agent-email>');
       await eventually(() => {
         const record = broker.getSnapshot().agents[0]!;
         assert.equal(record.state, "failed");
@@ -335,6 +335,11 @@ describe("AgentBroker end-to-end routing", () => {
       assert.equal(worker.prompts.length, 1);
       assert.equal(broker.getSnapshot().agents[0]!.state, "failed");
       assert.match(main.failures[0]!, /resource_not_found_error/);
+      assert.doesNotMatch(JSON.stringify(broker.getSnapshot()), /SENTINEL|<agent-email>/i);
+      assert.doesNotMatch(main.failures[0]!, /SENTINEL|<agent-email>/i);
+      assert.equal(broker.getSnapshot().agents[0]!.activity.filter((item) => item.summary.includes("resource_not_found_error")).length, 0, "broker does not append a second copy of the worker cause");
+      const roundTripped = await broker.registryStore.load(broker.mainAddress);
+      assert.doesNotMatch(JSON.stringify(roundTripped), /SENTINEL|<agent-email>/i);
       assert.match(main.failures[0]!, /terminal worker run failure.*openai-codex\/gpt-5\.4.*external or unclear/is);
       assert.match(main.failures[0]!, /1 delivered request remains unanswered/i);
       assert.match(main.failures[0]!, /current batch includes mutation\/shell\/custom work.*effects may exist/is);

@@ -11,6 +11,7 @@ import { WorkerRuntimeFactory } from "./model-runtime.ts";
 import { assertSupportedPiRuntime } from "./pi-compat.ts";
 import { formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import type { BrokerSnapshot, EmailEnvelope, MainAdapter, SubagentConfig } from "./types.ts";
 import {
@@ -21,8 +22,9 @@ import {
   sanitizeConversationLabel,
   UIController,
 } from "./ui.ts";
-import { errorMessage, truncateText } from "./util.ts";
+import { truncateText } from "./util.ts";
 
+const errorMessage = safeErrorSummary;
 const { getAgentDir } = PiCodingAgent;
 const { Box, Key, Text } = PiTui;
 const MESSAGE_TYPE = "pi-email-subagent.email";

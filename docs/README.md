@@ -43,7 +43,7 @@ A cooperative proper-lockfile lease reduces accidental concurrent state writers 
 
 ### Provider retry and terminal recovery
 
-Pi core remains the only automatic retry owner. Workers surface Pi retry lifecycle through existing bounded Activity; retrying attempts neither fail the worker nor change the mail obligation. A final failure keeps the accepted request open. Inspect current-batch Work and native Conversation before an explicit same-identity restart because recorded effects may exist and an empty ledger is not proof of pre-tool safety. See [Provider retry visibility and recovery](provider-retry-recovery.md) for effective trusted settings, event ordering, attribution limits, and scrubbed escalation artifacts.
+Pi core remains the only automatic retry owner. Workers surface **Pi agent retry** lifecycle through bounded Activity; provider/SDK attempts remain distinct, and retrying attempts neither fail the worker nor change the mail obligation. A final failure crosses one bounded sanitized shared boundary while protected raw detail stays in native Conversation, and the accepted request remains open. Inspect current-batch Work and Conversation before explicit same-identity restart because recorded effects may exist and an empty ledger is not proof of pre-tool safety. See [Provider retry visibility and recovery](provider-retry-recovery.md) for settings isolation, option ownership, event ordering, attribution limits, and scrubbed escalation artifacts.
 
 ## Configuration
 

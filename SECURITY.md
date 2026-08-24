@@ -24,7 +24,7 @@ Extensions execute with the Pi user's permissions. In the current release:
 - Workers run in the same Node.js process as the main Pi session.
 - Workers share the configured project working directory.
 - A writable worker can use its effective `bash`, `edit`, and `write` tools anywhere those host tools permit.
-- Host credentials, environment variables, network access, symlink policy, and process isolation are not sandboxed by this extension.
+- Host credentials, environment variables, network access, symlink policy, and process isolation are not sandboxed by this extension. Worker readiness checks only supported non-secret credential-source equivalence; they neither transfer secrets nor prove universal account identity.
 - Read-only role defaults reduce accidental mutation but are not an OS security boundary.
 - Pi direct mutation serialization is best-effort. Upstream missing-target symlink paths and hard-link aliases can bypass same-target recognition, and parallel writable workers can still create semantic conflicts.
 - Durability covers ordinary process crashes with at-least-once delivery; it does not promise sudden-power-loss durability or exactly-once external side effects. Collected replies are only at-most-one live presentation because Pi 0.81.1 has no staged tool-result append receipt; the mail journal can be answered before the collected result is durable.
@@ -34,7 +34,7 @@ Only delegate to models/providers you trust with the project and credentials acc
 
 ## Sensitive data
 
-Mail bodies, subjects, agent activity, usage, and worker session transcripts are persisted beneath `~/.pi/agent/subagents/<parent-session-id>/`. Protect that directory as sensitive data and delete it according to your retention requirements. Never attach raw state files to public bug reports without reviewing and redacting them.
+Mail bodies, subjects, agent activity, usage, and worker session transcripts are persisted beneath `~/.pi/agent/subagents/<parent-session-id>/`. Protect that directory as sensitive data and delete it according to your retention requirements. Provider/session errors copied out of native worker sessions pass through a bounded targeted redaction helper, but this is risk reduction rather than a secrecy guarantee. Native Conversation retains raw provider detail for diagnosis. Never attach raw state files to public bug reports without reviewing and redacting them, and never put credentials in error messages.
 
 ## Security roadmap
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { it } from "node:test";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
 import { WorkerSettingsSnapshot } from "../../src/settings-snapshot.ts";
@@ -38,6 +38,28 @@ function successfulStream(
     stream.end();
     return stream;
   };
+}
+
+function nativeErrorStream(model: Model<Api>) {
+  const stream = createAssistantMessageEventStream();
+  const message = {
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "error",
+    errorMessage: "Authorization: Bearer SENTINEL_PROTECTED_NATIVE_ERROR",
+    timestamp: Date.now(),
+  } as AssistantMessage;
+  stream.push({ type: "start", partial: message });
+  stream.push({ type: "error", reason: "error", error: message });
+  stream.end();
+  return stream;
 }
 
 function retryableErrorStream(model: Model<Api>) {
@@ -118,6 +140,64 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
   assert.equal(worker.getSessionFile(), snapshot.record.sessionFile);
 });
 
+it("keeps native provider detail in the protected session while shared worker surfaces use one safe summary", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-safe-error-"));
+  const previousFixtureAuth = process.env.PI_EMAIL_SAFE_ERROR_FIXTURE_AUTH;
+  process.env.PI_EMAIL_SAFE_ERROR_FIXTURE_AUTH = "configured";
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  runtime.registerProvider("worker-safe-error", {
+    name: "Worker Safe Error",
+    baseUrl: "http://127.0.0.1:9/worker-safe-error",
+    apiKey: "$PI_EMAIL_SAFE_ERROR_FIXTURE_AUTH",
+    api: "worker-safe-error",
+    models: [{
+      id: "safe-error-model", name: "Safe Error Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000,
+    }],
+    streamSimple: nativeErrorStream,
+  });
+  const model = runtime.getModel("worker-safe-error", "safe-error-model");
+  assert.ok(model);
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false));
+  const events: unknown[] = [];
+  worker.subscribe((event) => events.push(event));
+  try {
+    await worker.start({
+      record: workerRecord(model, "scout.safe-error@safe-error-model.com"),
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "Keep native detail protected.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const settled = new Promise<void>((resolve) => {
+      const unsubscribe = worker.subscribe((event) => {
+        if (event.type === "settled") { unsubscribe(); resolve(); }
+      });
+    });
+    await worker.prompt("fail once without retry");
+    await settled;
+    const shared = JSON.stringify({ snapshot: worker.getSnapshot(), events });
+    assert.doesNotMatch(shared, /SENTINEL_PROTECTED_NATIVE_ERROR/);
+    assert.match(shared, /Authorization: \[redacted\]/);
+    const sessionFile = worker.getSessionFile();
+    assert.ok(sessionFile);
+    const native = SessionManager.open(sessionFile).getBranch()
+      .filter((entry) => entry.type === "message" && entry.message.role === "assistant")
+      .map((entry) => (entry as any).message.errorMessage)
+      .filter(Boolean);
+    assert.ok(native.some((message) => /SENTINEL_PROTECTED_NATIVE_ERROR/.test(message)));
+  } finally {
+    await worker.dispose().catch(() => undefined);
+    if (previousFixtureAuth === undefined) delete process.env.PI_EMAIL_SAFE_ERROR_FIXTURE_AUTH;
+    else process.env.PI_EMAIL_SAFE_ERROR_FIXTURE_AUTH = previousFixtureAuth;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("reports settings load scope without leaking invalid file content", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-invalid-settings-"));
   const agentDir = join(root, "agent");
@@ -193,7 +273,7 @@ it("bounds cleanup during real Pi retry backoff and suppresses every stale sessi
     });
     const retryStarted = new Promise<void>((resolve) => {
       const unsubscribe = worker.subscribe((event) => {
-        if (event.type === "activity" && event.activity?.summary.startsWith("Provider retry")) {
+        if (event.type === "activity" && event.activity?.summary.startsWith("Pi agent retry")) {
           unsubscribe(); resolve();
         }
       });

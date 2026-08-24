@@ -68,6 +68,12 @@ describe("work ledger", () => {
     assert.equal(failed.status, "failed");
     assert.equal(failed.error, "edit failed");
     assert.doesNotMatch(JSON.stringify(failed), /oldText not found|bad/);
+    const custom = startWorkItem("custom-error", "external_tool", { target: "service" }, 1, "/work")!;
+    const customFailure = finishWorkItem(custom, {
+      content: [{ type: "text", text: "Authorization: Bearer SENTINEL_WORK_LEDGER" }],
+    }, true);
+    assert.equal(customFailure.error, "Authorization: [redacted]");
+    assert.doesNotMatch(JSON.stringify(customFailure), /SENTINEL/);
   });
 
   it("tracks batches, inspection, parallel completion order, failures and aggregate invariants", () => {

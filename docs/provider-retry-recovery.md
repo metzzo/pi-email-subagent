@@ -7,17 +7,17 @@ Pi core owns provider retry classification, attempt limits, backoff, and continu
 For Pi 0.81.1 retry events, the existing bounded Activity path records:
 
 ```text
-Provider retry 1/3 scheduled in 2000ms: WebSocket error
-Provider retry recovered after attempt 1
+Pi agent retry 1/3 scheduled in 2000ms: WebSocket error
+Pi agent retry recovered after attempt 1
 ```
 
 If Pi exhausts the cycle, Activity records its end before the existing terminal worker failure is committed:
 
 ```text
-Provider retry ended after attempt 3: WebSocket error
+Pi agent retry ended after attempt 3: WebSocket error
 ```
 
-Retry activity uses the existing `ActivityItem` type, 40-item record limit, 500-character summary limit, registry snapshot, current-activity row, and terminal sanitization. It is attempt/cycle status, not a mail outcome. A retrying `agent_end.willRetry=true` does not fail the worker or alert main. Only the final non-retrying assistant error enters the existing `record.failure` path and generates one main alert.
+Retry activity uses the existing `ActivityItem` type and 40-item record limit plus the shared safe-summary boundary. It is cycle status, not a mail outcome. A retrying `agent_end.willRetry=true` does not fail the worker or alert main. Only the final non-retrying assistant error enters `record.failure` and generates one main alert.
 
 Pi 0.81.1's observed order is:
 
@@ -28,17 +28,33 @@ Pi 0.81.1's observed order is:
 
 `agent_settled` is the one full-run boundary. The worker defers its existing terminal failure emission until that boundary so the preceding unsuccessful retry-end activity is not lost to cleanup.
 
+## Attempt, run, delegation, and obligation terms
+
+These are distinct layers:
+
+- **Provider/SDK attempt:** one request attempt inside a provider client. `retry.provider.maxRetries` belongs here and defaults to `0`.
+- **Pi agent retry cycle:** Pi's `auto_retry_*` continuation after a retryable low-level agent run. Activity uses the **Pi agent retry** label.
+- **Accepted worker run:** processing of one accepted worker prompt through final `agent_settled`, including Pi-owned retries and tool turns.
+- **Delegation:** one response-required `send_email` request assigned to another identity.
+- **Mail obligation:** the durable exact mail ID that remains open until a valid correlated reply or explicit administrative cancellation.
+
+Neither a provider attempt nor a Pi agent retry creates another delegation or mail obligation.
+
 ## Effective settings
 
-Isolated workers load Pi's effective settings with `SettingsManager.create(cwd, agentDir, { projectTrusted })`. The same manager is shared by the resource loader and worker session. This gives workers the ordinary Pi policy for:
+At extension start, a file-backed Pi settings manager loads the actual global/trusted-project documents and reports load errors once by scope. Each worker gets a fresh no-write manager through the supported public `SettingsManager.fromStorage(...)` surface. Pi still performs migration and global/project nested merge; the resource loader and worker session share only that worker-owned manager. Retry, provider retry, transport, HTTP/WebSocket timeouts, compaction/branch summary, shell/resource paths, and thinking budgets preserve Pi's effective trusted behavior. Untrusted project settings are absent. Steering/follow-up/effort setters—including concurrent effort changes and resumed sessions—write only worker memory, never global or project files.
 
-- `retry.enabled`, `retry.maxRetries`, and `retry.baseDelayMs`;
-- `retry.provider.timeoutMs`, `maxRetries`, and `maxRetryDelayMs`;
-- `transport`;
-- `httpIdleTimeoutMs`; and
-- `websocketConnectTimeoutMs`.
+The extension does not raise Pi defaults. Provider/SDK retries remain at Pi's default `0` unless explicitly configured. Invalid source JSON uses Pi's fallback for that scope and the original bytes are not rewritten.
 
-Global settings apply. Project settings override them only when Pi marked the project trusted; untrusted project settings remain ignored. The extension overrides only worker steering/follow-up modes and the identity's persisted thinking effort. It does not raise Pi defaults. In particular, provider/SDK retries remain at Pi's default `0` unless the user explicitly configures them. A settings parse/read error adds only its `global` or `project` scope to bounded Activity and uses Pi's fallback behavior; file content and error payload are not copied.
+## Provider option ownership
+
+Long cache retention is selected by provider environment such as `PI_CACHE_RETENTION`, separately from worker settings. Pi 0.81.1 serializes `prompt_cache_retention: "24h"` only when exact effective compatibility metadata allows it, and omits it when `compat.supportsLongCacheRetention` is false. The worker factory rejects parent/worker API-family or long-retention metadata drift. An endpoint that rejects the option needs corrected provider/model metadata and extension reload; the extension never catches the rejection, strips the option, and automatically retries or replays the prompt.
+
+## Safe shared errors and protected native detail
+
+The terminal assistant error is summarized once when it leaves `SdkWorker`. Retry start/end, work-ledger extraction, broker lifecycle/factory/cleanup catches, registry fields, UI, and main alerts use the same idempotent UTF-8 byte/line/control/bidi/markup-boundary with targeted common authorization/header, bearer/key/token, signed-query, and credential-URL redaction. The broker adds only fixed recovery metadata and does not append the same provider cause to Activity again.
+
+Raw assistant provider detail remains in the native worker session Conversation for protected diagnosis; the extension creates no second raw log or artifact. Redaction is bounded risk reduction, not universal secret detection. Do not put credentials in provider error messages, and scrub artifacts before sharing.
 
 ## Effects and explicit recovery
 
