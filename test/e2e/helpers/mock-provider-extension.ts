@@ -53,6 +53,7 @@ export const MOCK_WORKER_ADDRESS = "scout.e2e@mock-e2e.com";
 export const MOCK_REVIEWER_ADDRESS = "reviewer.e2e@mock-e2e.com";
 export const MOCK_WRITER_ADDRESS = "worker.work-e2e@mock-e2e.com";
 export const MOCK_MAIN_ADDRESS = "main@mock-e2e.com";
+process.env.PI_EMAIL_MOCK_PROVIDER_AUTH ??= "configured";
 const RATE_ADDRESSES = ["scout.e2e", "scout.two", "scout.three", "scout.four"].map((name) => `${name}@mock-e2e.com`);
 
 type ToolCallPlan = { name: string; arguments: Record<string, unknown> };
@@ -519,7 +520,7 @@ export default function mockE2EProvider(pi: ExtensionAPI): void {
   pi.registerProvider(MOCK_PROVIDER_ID, {
     name: "Mock E2E Provider",
     baseUrl: "http://127.0.0.1:9/mock-e2e",
-    apiKey: "mock-e2e-key",
+    apiKey: "$PI_EMAIL_MOCK_PROVIDER_AUTH",
     api: "mock-e2e",
     models: [{
       id: MOCK_MODEL_ID,

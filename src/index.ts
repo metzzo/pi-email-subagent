@@ -326,6 +326,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       models: availableModels(ctx),
       preferredProvider: ctx.model?.provider,
       mainAdapter: adapter,
+      workerPreflight: async (model) => runtimeFactory.preflight(model.provider, model.id),
       workerFactory: async (model) => {
         const snapshot = await runtimeFactory.create(model.provider, model.id);
         return new SdkWorker(snapshot.runtime, snapshot.model, workerSettings);

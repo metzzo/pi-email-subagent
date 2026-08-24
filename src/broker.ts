@@ -13,6 +13,7 @@ import {
 import { isThinkingLevel, resolveAgentProfile, resolveLifecycle } from "./config.ts";
 import { createMailId } from "./id.ts";
 import { MailStore } from "./mail-store.ts";
+import { ProviderReadinessError } from "./model-runtime.ts";
 import { NamespaceLock } from "./namespace-lock.ts";
 import { enforcementPrompt, formatEmail, formatEmailBatch, subagentPrompt } from "./prompts.ts";
 import { RegistryStore } from "./registry-store.ts";
@@ -1271,6 +1272,7 @@ export class AgentBroker {
           } : {}),
         };
         this.validateDeliverySize(envelope);
+        if (firstIdentityMail) await this.options.workerPreflight?.(parsed!.model);
         await this.withMailAdmission(async () => {
           const currentSender = this.records.get(sender);
           if (!toMain && !reply && currentSender && !currentSender.canSpawn) {
@@ -1321,7 +1323,9 @@ export class AgentBroker {
     } catch (error) {
       // Lifecycle and cleanup-quarantine failures retain accepted queued/open
       // mail for later verified recovery rather than fabricating terminal loss.
-      if (!(error instanceof LifecycleTimeoutError) && !(error instanceof CleanupQuarantineError)) {
+      if (!(error instanceof LifecycleTimeoutError)
+        && !(error instanceof CleanupQuarantineError)
+        && !(error instanceof ProviderReadinessError)) {
         await this.failEnvelope(envelope, errorMessage(error));
       }
       this.scheduleMailMaintenance();

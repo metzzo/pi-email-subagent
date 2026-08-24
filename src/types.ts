@@ -407,6 +407,8 @@ export interface BrokerOptions {
   models: Model<any>[];
   preferredProvider?: string;
   mainAdapter: MainAdapter;
+  /** Deterministic new-identity readiness gate; runs before email.created. */
+  workerPreflight?: (model: Model<any>) => void | Promise<void>;
   workerFactory: (model: Model<any>) => WorkerTransport | Promise<WorkerTransport>;
   projectTrusted: boolean;
 }

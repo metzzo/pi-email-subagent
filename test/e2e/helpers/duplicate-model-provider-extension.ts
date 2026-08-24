@@ -170,10 +170,11 @@ function stream(model: Model<Api>, context: Context, _options?: SimpleStreamOpti
 }
 
 function register(pi: ExtensionAPI, provider: string): void {
+  process.env.PI_EMAIL_ROUTING_PROVIDER_AUTH ??= "configured";
   pi.registerProvider(provider, {
     name: provider,
     baseUrl: `http://127.0.0.1:9/${provider}`,
-    apiKey: "deterministic-routing-key",
+    apiKey: "$PI_EMAIL_ROUTING_PROVIDER_AUTH",
     api: provider,
     models: [{
       id: ROUTING_MODEL_ID,

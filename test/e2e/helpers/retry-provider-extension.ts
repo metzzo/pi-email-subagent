@@ -9,6 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export const RETRY_PROVIDER_ID = "mock-provider-retry";
 export const RETRY_MODEL_ID = "mock-provider-retry";
 export const RETRY_WORKER_ADDRESS = "worker.provider-retry@mock-provider-retry.com";
+process.env.PI_EMAIL_RETRY_PROVIDER_AUTH ??= "configured";
 
 interface ToolCallPlan { name: string; arguments: Record<string, unknown> }
 type Plan = { toolCalls: ToolCallPlan[] } | { text: string } | { error: string };
@@ -244,7 +245,7 @@ export default function retryProvider(pi: ExtensionAPI): void {
   pi.registerProvider(RETRY_PROVIDER_ID, {
     name: "Mock Provider Retry",
     baseUrl: "http://127.0.0.1:9/mock-provider-retry",
-    apiKey: "deterministic-test-key",
+    apiKey: "$PI_EMAIL_RETRY_PROVIDER_AUTH",
     api: RETRY_PROVIDER_ID,
     models: [{
       id: RETRY_MODEL_ID,
