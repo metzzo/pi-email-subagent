@@ -37,6 +37,108 @@ async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string
 }
 
 describe("AgentBroker end-to-end routing", () => {
+  it("uses the exact pre-email runtime preparation for worker execution", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-runtime-preparation-"));
+    const main = new FakeMainAdapter();
+    const selected = fakeModel("gpt-5.4");
+    const prepared = { runtime: {}, model: { ...selected, baseUrl: "https://prepared.invalid" } };
+    let consumed: unknown;
+    const workers: FakeWorker[] = [];
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config: structuredClone(DEFAULT_CONFIG),
+      models: [selected],
+      mainAdapter: main,
+      workerPreflight: async () => prepared,
+      workerFactory: (_model, preparation) => {
+        consumed = preparation;
+        const worker = new FakeWorker();
+        workers.push(worker);
+        return worker;
+      },
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.runtime-snapshot@gpt-5.4.com",
+        subject: "runtime snapshot",
+        message: "use the prepared runtime",
+        priority: "low",
+      });
+      assert.equal(consumed, prepared);
+      assert.equal(workers.length, 1);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("rechecks send abort at the journal linearization point without records, factory, lease, or quota use", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-send-abort-"));
+    const main = new FakeMainAdapter();
+    let releasePreflight!: () => void;
+    const preflight = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    let entered = false;
+    let factories = 0;
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config: { ...structuredClone(DEFAULT_CONFIG), maxMailsPerMinute: 1, maxMailsPerSenderPerMinute: 1 },
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: main,
+      workerPreflight: async () => { entered = true; await preflight; return {}; },
+      workerFactory: () => { factories += 1; return new FakeWorker(); },
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      const controller = new AbortController();
+      const sending = broker.send(broker.mainAddress, {
+        to: "worker.abort-before-journal@gpt-5.4.com",
+        subject: "abort",
+        message: "must not be accepted",
+        priority: "low",
+      }, controller.signal);
+      await eventually(() => assert.equal(entered, true));
+      controller.abort();
+      releasePreflight();
+      await assert.rejects(sending, /aborted before acceptance/i);
+      assert.equal(broker.mailStore.list().length, 0);
+      assert.equal(broker.getSnapshot().agents.length, 0);
+      assert.equal(broker.getSnapshot().capacity.identitiesUsed, 0);
+      assert.equal(factories, 0);
+
+      await broker.send(broker.mainAddress, {
+        to: "worker.abort-before-journal@gpt-5.4.com",
+        subject: "accepted after abort",
+        message: "quota was not consumed",
+        priority: "low",
+      });
+      assert.equal(factories, 1);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("ignores unsafe nested-delegation opt-in configuration", async () => {
+    const { broker, workers } = await setup({ roles: delegatingRoles() });
+    try {
+      const upstream = await broker.send(broker.mainAddress, {
+        to: "worker.nested-disabled@gpt-5.4.com",
+        subject: "parent",
+        message: "do not delegate",
+        priority: "low",
+      });
+      assert.equal(broker.inspectAgent(upstream.envelope.to).canSpawn, false);
+      await assert.rejects(workers[0]!.send({
+        to: "worker.child@gpt-5.4.com",
+        subject: "unsafe child",
+        message: "must be rejected",
+        priority: "low",
+      }), /not permitted to delegate.*disabled/i);
+      assert.equal(broker.mailStore.list().length, 1);
+    } finally { await broker.shutdown(); }
+  });
+
   it("projects lightweight work without traversing patch preview bytes", () => {
     const item = startWorkItem("edit", "edit", { path: "a", edits: [] }, 1, "/work")!;
     Object.defineProperty(item, "patchPreview", { enumerable: true, get() { throw new Error("preview traversed"); } });
@@ -207,7 +309,7 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
-  it("leaves requests from different senders open when a worker emits only final text", async () => {
+  it.skip("legacy nested sender attribution (nested delegation is fail-closed disabled on Pi 0.81.1)", async () => {
     const { broker, workers, main, root } = await setup({ roles: delegatingRoles() });
     try {
       const mainRequest = await broker.send(broker.mainAddress, {
@@ -507,7 +609,7 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
-  it("keeps identity leases distinct from run slots through explicit stop-cancel-archive recovery", async () => {
+  it.skip("legacy nested capacity recovery (nested delegation is fail-closed disabled on Pi 0.81.1)", async () => {
     const { broker, workers, root } = await setup({ maxAgents: 1, maxConcurrent: 1, roles: delegatingRoles() });
     try {
       assert.deepEqual((broker.getSnapshot() as any).capacity, {
@@ -611,7 +713,7 @@ describe("AgentBroker end-to-end routing", () => {
     }
   });
 
-  it("reports bounded directional archive blockers without private mail content", async () => {
+  it.skip("legacy nested archive blockers (nested delegation is fail-closed disabled on Pi 0.81.1)", async () => {
     const { broker, workers } = await setup({ maxAgents: 2, maxConcurrent: 2, roles: delegatingRoles() });
     try {
       const incoming = await broker.send(broker.mainAddress, {

@@ -192,6 +192,23 @@ describe("SDK worker failures", () => {
     assert.deepEqual(record, recordBefore, "cleanup also suppresses stale session mutation");
   });
 
+  it("does not declare cleanup verified while the exact worker start operation is pending", async () => {
+    const worker = new SdkWorker({} as never);
+    let finishStart!: () => void;
+    const startOperation = new Promise<void>((resolve) => { finishStart = resolve; });
+    (worker as unknown as { startOperation: Promise<void> }).startOperation = startOperation;
+    let settled = false;
+    const cleanup = worker.cleanup({ abortTimeoutMs: 10 }).then((report) => {
+      settled = true;
+      return report;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(settled, false);
+    finishStart();
+    const report = await cleanup;
+    assert.equal(report.quiescence, "verified");
+  });
+
   it("attempts disposal at the abort deadline while keeping cleanup pending through a late successful abort", async () => {
     const worker = new SdkWorker({} as never);
     let releaseAbort!: () => void;

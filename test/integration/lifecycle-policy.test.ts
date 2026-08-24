@@ -90,20 +90,38 @@ describe("initial delegation lifecycle", () => {
     }
   });
 
-  it("bounds a hanging worker factory before provider startup can hold the send", async () => {
+  it("quarantines the exact timed-out factory generation until it settles and cleans", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-spawn-"));
-    const broker = await brokerWith(root, async () => new Promise<FakeWorker>(() => undefined));
+    let resolveFactory!: (worker: FakeWorker) => void;
+    const firstFactory = new Promise<FakeWorker>((resolve) => { resolveFactory = resolve; });
+    let factoryCalls = 0;
+    const broker = await brokerWith(root, () => {
+      factoryCalls += 1;
+      return factoryCalls === 1 ? firstFactory : new FakeWorker();
+    });
     try {
       const started = Date.now();
       await assert.rejects(broker.send(broker.mainAddress, {
         to: "worker.spawn-timeout@gpt-5.4.com",
         subject: "Hang factory",
-        message: "Factory never returns.",
+        message: "Factory returns after its generation deadline.",
         priority: "low",
         lifecycle: { spawnTimeoutMs: 150 },
       }), /LIFECYCLE_SPAWN_TIMEOUT/);
       assert.ok(Date.now() - started < 500);
-      assert.match(broker.inspectAgent("worker.spawn-timeout@gpt-5.4.com").failure ?? "", /LIFECYCLE_SPAWN_TIMEOUT/);
+      const inspection = broker.inspectAgent("worker.spawn-timeout@gpt-5.4.com");
+      assert.match(inspection.failure ?? "", /LIFECYCLE_SPAWN_TIMEOUT/);
+      assert.equal(inspection.cleanup?.workerGeneration, 1);
+      await assert.rejects(broker.restart(inspection.address), /cleanup quiescence is unknown/i);
+      assert.equal(factoryCalls, 1, "explicit restart cannot create generation 2 while generation 1 factory is pending");
+
+      const late = new FakeWorker();
+      resolveFactory(late);
+      await eventually(() => assert.equal(broker.inspectAgent(inspection.address).cleanup, undefined));
+      assert.equal(late.disposed, true, "the exact late generation was cleaned before quarantine release");
+      await broker.restart(inspection.address);
+      assert.equal(factoryCalls, 2);
+      assert.equal(broker.inspectAgent(inspection.address).state, "running", "queued accepted mail resumes only in generation 2");
     } finally {
       await broker.shutdown();
     }

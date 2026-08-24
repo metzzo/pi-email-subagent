@@ -256,7 +256,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("queues a child reply for a failed parent without answering until explicit parent restart", async () => {
+  it.skip("legacy child reply queue (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const upstream = await broker.send(broker.mainAddress, {
@@ -335,7 +335,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("parks an opted-in parent while a child dependency is open, then wakes it for the exact child reply", async () => {
+  it.skip("legacy parked parent child reply (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const upstream = await broker.send(broker.mainAddress, {
@@ -379,7 +379,34 @@ describe("broker hardening", () => {
     }
   });
 
-  it("joins the exact child-answer commit before a fast resumed parent replies upstream", async () => {
+  it("durably wakes the exact parked legacy parent when its last child is cancelled", async () => {
+    const { broker, workers } = await setup();
+    try {
+      const upstream = await broker.send(broker.mainAddress, {
+        to: "worker.cancel-parent@gpt-5.4.com", subject: "Upstream", message: "Legacy parent fixture.", priority: "low",
+      });
+      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
+      records.get(upstream.envelope.to)!.canSpawn = true; // simulate a durable child accepted by an older release
+      const child = await workers[0]!.send({
+        to: "worker.cancel-child@gpt-5.4.com", subject: "Child", message: "Legacy child fixture.", priority: "low",
+      });
+      records.get(upstream.envelope.to)!.canSpawn = false;
+      workers[0]!.settle();
+      await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "parked"));
+      await broker.stop(child.envelope.to);
+      await broker.cancelRequest(child.envelope.id, "The operator explicitly abandoned this exact legacy child request.");
+      await eventually(() => assert.equal(workers[0]!.prompts.length, 2));
+      assert.match(workers[0]!.prompts[1]!, /Terminal cancellation status.*closes only that child dependency/is);
+      assert.equal(broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined);
+      const wakeCount = () => broker.mailStore.list().filter((email) =>
+        email.kind === "reply" && email.inReplyTo === child.envelope.id && /Cancelled child request/.test(email.subject)).length;
+      assert.equal(wakeCount(), 1);
+      await broker.cancelRequest(child.envelope.id, "Idempotent cancellation retry keeps the durable wake.");
+      assert.equal(wakeCount(), 1);
+    } finally { await broker.shutdown(); }
+  });
+
+  it.skip("legacy child-answer transition (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const upstream = await broker.send(broker.mainAddress, {
@@ -420,7 +447,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("atomically serializes concurrent child delegation against an upstream reply", async () => {
+  it.skip("legacy child admission serialization (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const upstream = await broker.send(broker.mainAddress, {
@@ -465,7 +492,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("creates one durable sanitized blocker reply when an opted-in child fails", async () => {
+  it.skip("legacy child blocker reply (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const upstream = await broker.send(broker.mainAddress, {
@@ -497,7 +524,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("recovers one child blocker across crashes before and after its journal commit", async () => {
+  it.skip("legacy child blocker recovery (nested delegation is fail-closed disabled)", async () => {
     const first = await setup({ roles: delegatingRoles() });
     const upstream = await first.broker.send(first.broker.mainAddress, {
       to: "worker.crash-parent@gpt-5.4.com", subject: "Parent", message: "Delegate before simulated crash.", priority: "low",
@@ -536,7 +563,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("reports possible effects in a terminal child blocker without exposing work contents", async () => {
+  it.skip("legacy child blocker effects (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       await broker.send(broker.mainAddress, {
@@ -564,7 +591,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("preserves one queued child reply across parent delivery failure and explicit restart", async () => {
+  it.skip("legacy queued child reply (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const mainRequest = await broker.send(broker.mainAddress, {
@@ -891,7 +918,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("rejects archival while an agent has an outstanding request it sent", async () => {
+  it.skip("legacy nested outgoing archive blocker (nested delegation is fail-closed disabled)", async () => {
     const { broker, workers } = await setup({ roles: delegatingRoles() });
     try {
       const parent = await broker.send(broker.mainAddress, {
@@ -1199,7 +1226,7 @@ describe("broker hardening", () => {
     }
   });
 
-  it("treats canSpawn as subagent delegation permission for known and unknown identities", async () => {
+  it("keeps all nested response-required delegation disabled even when canSpawn is configured", async () => {
     const roles = structuredClone(DEFAULT_CONFIG.roles);
     roles.scout!.canSpawn = false;
     roles.worker!.canSpawn = true;
@@ -1240,10 +1267,11 @@ describe("broker hardening", () => {
       await broker.send(broker.mainAddress, {
         to: "worker.three@gpt-5.4.com", subject: "Three", message: "Explicitly opted in.", priority: "low",
       });
-      const spawned = await workers[2]!.send({
+      assert.equal(broker.inspectAgent("worker.three@gpt-5.4.com").canSpawn, false);
+      await assert.rejects(workers[2]!.send({
         to: "scout.four@gpt-5.4.com", subject: "Four", message: "Fourth.", priority: "low",
-      });
-      assert.equal(spawned.spawned, true);
+      }), /not permitted to delegate.*disabled/i);
+      assert.equal(workers.length, 3);
     } finally {
       await broker.shutdown();
     }

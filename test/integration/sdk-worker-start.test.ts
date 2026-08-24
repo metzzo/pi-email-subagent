@@ -369,9 +369,9 @@ it("never writes shared settings while two workers start and change effort indep
     assert.deepEqual(lowSession.settingsManager.getCompactionSettings(), { enabled: false, reserveTokens: 15_001, keepRecentTokens: 13_001 });
     assert.deepEqual(lowSession.settingsManager.getBranchSummarySettings(), { reserveTokens: 14_001, skipPrompt: true });
     assert.equal(lowSession.settingsManager.getShellCommandPrefix(), "project-prefix");
-    assert.deepEqual(lowSession.settingsManager.getPackages(), ["global-package"]);
-    assert.deepEqual(lowSession.settingsManager.getSkillPaths(), ["global-skills"]);
-    assert.deepEqual(lowSession.settingsManager.getPromptTemplatePaths(), ["project-prompts"]);
+    assert.deepEqual(lowSession.settingsManager.getPackages(), [], "worker reload cannot install configured packages");
+    assert.deepEqual(lowSession.settingsManager.getSkillPaths(), [], "worker resource loading is side-effect-free");
+    assert.deepEqual(lowSession.settingsManager.getPromptTemplatePaths(), [], "worker resource loading is side-effect-free");
     assert.deepEqual(lowSession.settingsManager.getThinkingBudgets(), { low: 1_111, high: 2_222 });
 
     low.setEffort("xhigh");

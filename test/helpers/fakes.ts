@@ -153,9 +153,9 @@ export class FakeWorker implements WorkerTransport {
 
   fail(message: string): void { this.emit({ type: "failure", error: message }); }
 
-  async send(input: SendEmailInput): Promise<SendEmailResult> {
+  async send(input: SendEmailInput, signal?: AbortSignal): Promise<SendEmailResult> {
     if (!this.config) throw new Error("not started");
-    return this.config.sendEmail(input);
+    return this.config.sendEmail(input, signal);
   }
 
   fetch(): EmailEnvelope[] {

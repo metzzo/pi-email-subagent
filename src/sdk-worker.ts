@@ -22,6 +22,7 @@ import type {
 import { processQuiescenceReceiptCapability } from "./pi-compat.ts";
 import { formatUnanswered } from "./prompts.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
+import { runtimeSafeDelay } from "./runtime-timers.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
 import { clone, nowIso, truncateText } from "./util.ts";
@@ -73,7 +74,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     async execute(_id, params, signal) {
       if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
       try {
-        const result = await config.sendEmail(params as SendEmailInput);
+        const result = await config.sendEmail(params as SendEmailInput, signal);
         const lines = [
           "Email accepted.",
           `ID: ${result.envelope.id}`,
@@ -191,6 +192,7 @@ export class SdkWorker implements WorkerTransport {
   private readonly activeToolCalls = new Map<string, string>();
   private processCapableRisk = false;
   private startGeneration = 0;
+  private startOperation?: Promise<void>;
   private runFailure?: string;
   private cwd = process.cwd();
 
@@ -229,7 +231,14 @@ export class SdkWorker implements WorkerTransport {
     this.emit({ type: "state", state });
   }
 
-  async start(config: WorkerStartConfig): Promise<void> {
+  start(config: WorkerStartConfig): Promise<void> {
+    if (this.startOperation) return this.startOperation;
+    const operation = this.startInternal(config);
+    this.startOperation = operation;
+    return operation;
+  }
+
+  private async startInternal(config: WorkerStartConfig): Promise<void> {
     if (this.session) return;
     if (this.disposed) throw new Error("Disposed workers cannot be restarted.");
     const generation = ++this.startGeneration;
@@ -250,11 +259,20 @@ export class SdkWorker implements WorkerTransport {
       agentDir: config.agentDir,
       settingsManager: settings,
       noExtensions: true,
+      noSkills: true,
+      noPromptTemplates: true,
       noThemes: true,
       appendSystemPrompt: [config.systemPrompt],
     });
     await loader.reload();
     if (this.disposed || generation !== this.startGeneration) throw new Error("Worker start was cancelled.");
+    // One authoritative startup override after reload; later effort changes use
+    // AgentSession.setThinkingLevel as their single setter.
+    settings.applyOverrides({
+      steeringMode: "all",
+      followUpMode: "all",
+      defaultThinkingLevel: this.record.effort,
+    });
 
     const resumableSessionFile = this.record.sessionFile && existsSync(this.record.sessionFile)
       ? this.record.sessionFile
@@ -268,6 +286,7 @@ export class SdkWorker implements WorkerTransport {
       this.record.work = recoverMutationWork(sessionManager.getBranch(), config.cwd, this.record.work);
     } catch (error) {
       this.record.work.recoveryError = safeErrorSummary(error);
+      this.record.work.effectEvidenceUnavailable = true;
       interruptActive(this.record.work);
     }
 
@@ -298,13 +317,6 @@ export class SdkWorker implements WorkerTransport {
       throw new Error("Worker mailbox tools were not activated.");
     }
     this.unsubscribeSession = session.subscribe((event) => this.onSessionEvent(event));
-    session.setSteeringMode("all");
-    session.setFollowUpMode("all");
-    settings.applyOverrides({
-      steeringMode: "all",
-      followUpMode: "all",
-      defaultThinkingLevel: this.record.effort,
-    });
     this.setState("idle");
     const unknownTools = requestedTools.filter((tool) => !this.record!.tools.includes(tool));
     if (unknownTools.length > 0) this.activity("error", `Unknown tools omitted: ${unknownTools.join(", ")}`);
@@ -519,6 +531,7 @@ export class SdkWorker implements WorkerTransport {
     const unsubscribe = this.unsubscribeSession;
     const activeTools = [...this.activeToolCalls].map(([toolCallId, toolName]) => ({ toolCallId, toolName }));
     const processCapableRisk = this.processCapableRisk;
+    const startOperation = this.startOperation;
     this.session = undefined;
     this.sessionManager = undefined;
     this.unsubscribeSession = undefined;
@@ -526,6 +539,9 @@ export class SdkWorker implements WorkerTransport {
     unsubscribe?.();
 
     const operation = (async (): Promise<WorkerCleanupReport> => {
+      // A spawn timeout progresses cleanup but cannot certify cleanliness while
+      // the exact resource/session start operation is still pending.
+      await startOperation?.catch(() => undefined);
       let abort: WorkerCleanupReport["abort"] = "succeeded";
       let dispose: WorkerCleanupReport["dispose"] = "succeeded";
       const wasStreaming = Boolean(session?.isStreaming);
@@ -554,7 +570,7 @@ export class SdkWorker implements WorkerTransport {
           (error: unknown) => ({ state: "failed" as const, detail: safeErrorSummary(error) }),
         );
         let timer: ReturnType<typeof setTimeout> | undefined;
-        const deadlineMs = Math.max(1, Math.min(MAX_TIMER_DELAY_MS, options.abortTimeoutMs));
+        const deadlineMs = runtimeSafeDelay(options.abortTimeoutMs);
         await Promise.race([
           abortOutcome.then(() => "abort" as const),
           new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), deadlineMs); }),
@@ -611,11 +627,6 @@ export class SdkWorker implements WorkerTransport {
     const session = this.requiredSession();
     if (!session.isIdle) throw new Error("Effort can only be changed while the worker is idle.");
     session.setThinkingLevel(level);
-    session.settingsManager.applyOverrides({
-      steeringMode: "all",
-      followUpMode: "all",
-      defaultThinkingLevel: session.thinkingLevel,
-    });
     if (this.record) this.record.effort = session.thinkingLevel;
   }
 

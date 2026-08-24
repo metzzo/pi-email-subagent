@@ -58,14 +58,19 @@ export class WorkerSettingsSnapshot {
     return this.issues.map((issue) => ({ ...issue }));
   }
 
-  createManager(effort: ThinkingLevel): PiCodingAgent.SettingsManager {
-    const storage = new SnapshotSettingsStorage(this.globalSettings, this.projectSettings);
-    const settings = PiCodingAgent.SettingsManager.fromStorage(storage, { projectTrusted: this.projectTrusted });
-    settings.applyOverrides({
-      steeringMode: "all",
-      followUpMode: "all",
-      defaultThinkingLevel: effort,
-    });
-    return settings;
+  createManager(_effort: ThinkingLevel): PiCodingAgent.SettingsManager {
+    const stripResourceSources = <T>(source: T): T => {
+      const copy = structuredClone(source) as Record<string, unknown>;
+      for (const key of ["packages", "extensions", "skills", "prompts", "themes"]) copy[key] = [];
+      return copy as T;
+    };
+    // DefaultResourceLoader.reload always invokes PackageManager.resolve in Pi
+    // 0.81.1. Remove every package/resource source from the immutable worker
+    // storage before its first reload; no trusted-project write API is needed.
+    const storage = new SnapshotSettingsStorage(
+      stripResourceSources(this.globalSettings),
+      stripResourceSources(this.projectSettings),
+    );
+    return PiCodingAgent.SettingsManager.fromStorage(storage, { projectTrusted: this.projectTrusted });
   }
 }
