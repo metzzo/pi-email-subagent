@@ -240,6 +240,7 @@ describe("dashboard rendering", () => {
     assert.match(profile, /1 delivered request remains unanswered/i);
     assert.match(profile, /current batch includes mutation\/shell\/custom work.*effects may exist/i);
     assert.match(profile, /inspect Work and Conversation.*explicit same-identity restart/i);
+    assert.match(profile, /do not redelegate.*possible-effect scope.*original obligation remains open/i);
     assert.doesNotMatch(profile, /PRIVATE SUBJECT|PRIVATE BODY|PRIVATE EFFECT COMMAND/);
     component.dispose();
   });

@@ -68,7 +68,9 @@ Before recovery, inspect:
 
 If the current batch contains any mutation, shell, or custom work item—running, succeeded, failed, or interrupted—the UI warns that effects may exist. Shell/custom effects remain unverified. If no such item is recorded, the UI says only that no effect is recorded; this is **not proof of pre-tool failure**. Mailbox tools, restored history, or other external behavior can fall outside the current work summary.
 
-When configuration or provider availability is corrected and recovery is safe, explicitly restart the **same identity** with `manage_agent restart` or `/agents restart`. That reuses its persistent session, mailbox, lifecycle, effort, and original mail obligation. Do not resend the accepted envelope. If the user instead abandons the request, stop the recipient and cancel that exact request with a substantive audited reason.
+When configuration or provider availability is corrected and recovery is safe, explicitly restart the **same identity** with `manage_agent restart` or `/agents restart`. That reuses its persistent session, provider binding, mailbox, lifecycle, effort, and original mail obligation. Failed recipients keep newly accepted mail queued until that explicit restart. Do not resend the accepted envelope. Do not redelegate the same possible-effect scope while its original obligation remains open unless the user explicitly chooses the duplicate-effect risk and resolves the original obligation. If the user instead abandons the request, stop the recipient and cancel that exact request with a substantive audited reason.
+
+A live Pi-managed retry may settle, but process-capable cleanup quarantine is different: Pi 0.81.1 has no automatic receipt or release for an unknown quarantine. Waiting or an elapsed deadline cannot manufacture quiescence; follow the external process review in [Agent lifecycle deadlines](lifecycle.md).
 
 ## Attribution and escalation
 

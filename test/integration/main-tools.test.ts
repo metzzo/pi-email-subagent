@@ -289,6 +289,7 @@ it("renders terminal recovery from existing failure, mailbox, and current-batch 
   assert.match(text, /1 delivered request remains unanswered/i);
   assert.match(text, /current batch includes mutation\/shell\/custom work.*effects may exist/is);
   assert.match(text, /inspect Work and Conversation.*explicit same-identity restart/is);
+  assert.match(text, /do not redelegate.*possible-effect scope.*original obligation remains open/is);
   assert.doesNotMatch(text, /PRIVATE COMMAND|PRIVATE MAIL SUBJECT|PRIVATE MAIL BODY/);
 
   work.recent = [];

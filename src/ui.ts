@@ -705,6 +705,7 @@ export class DashboardComponent {
                 lines.push(this.theme.fg("warning", "No mutation/shell/custom effect is recorded in the current work ledger; this is not proof of pre-tool failure."));
                 lines.push(this.theme.fg("warning", "Inspect Conversation before explicit same-identity restart."));
               }
+              lines.push(this.theme.fg("warning", "Do not redelegate this possible-effect scope while the original obligation remains open."));
             }
           }
         }
