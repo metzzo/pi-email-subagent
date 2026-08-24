@@ -36,6 +36,14 @@ Reply subjects are checked strictly, in order: the referenced email must exist, 
 
 Only a valid exact `send_email` reply closes a response obligation. Visible final assistant text stays in the worker session and is never copied to one or more request IDs, because the broker cannot prove which request that text substantively answers. A worker that settles with delivered unanswered mail receives bounded mailbox-enforcement prompts. Exhausting those prompts marks the worker failed while leaving every request unanswered and recoverable; no generic terminal notice is created.
 
+### Opt-in nested delegation
+
+For a subagent sender, `canSpawn` is delegation permission for every new response-required request to another subagent, whether that recipient already exists or not. The default is false. With an explicit true opt-in, each accepted child request becomes an outgoing dependency in the same mail journal event that accepts it. Mail admission is serialized across recipients, so a concurrent upstream reply cannot race past a newly committed child dependency; a rejected upstream reply leaves no reservation.
+
+While any child request or its reserved reply remains open, the parent parks: its run slot is released, upstream obligations remain unanswered, and mailbox enforcement does not consume attempts or spin. New upstream mail remains queued. An exact child reply is prioritized, wakes the persistent parent, and closes only the child request after accepted delivery; it never answers the parent's upstream request. A failed parent keeps an accepted child reply queued under the same stable ID until explicit restart.
+
+When a child with a non-main delegating parent fails terminally, the broker reserves one idempotent system blocker reply for the exact child request. It contains only the child request ID, bounded identity/provider/model facts, whether current work evidence indicates possible effects, and explicit same-identity recovery guidance—never raw provider errors or work/mail bodies. Recovery scans create at most one blocker because the ordinary reply reservation remains authoritative. Main-origin requests do not receive this automatic blocker and remain open for explicit inspection/restart.
+
 ### Limits (defaults; see [configuration.md](configuration.md))
 
 - Subject: 512 bytes (+64 allowance for the reply prefix); no line breaks or control characters.

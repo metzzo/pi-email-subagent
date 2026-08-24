@@ -11,6 +11,12 @@ import type { SendEmailResult, SubagentConfig } from "../../src/types.ts";
 import { createWorkerFactory, eventually, FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
 import { activePathConflicts, appendRecent, emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
 
+function delegatingRoles(): SubagentConfig["roles"] {
+  const roles = structuredClone(DEFAULT_CONFIG.roles);
+  roles.worker!.canSpawn = true;
+  return roles;
+}
+
 async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string) {
   const root = namespace ?? await mkdtemp(join(tmpdir(), "pi-email-broker-"));
   const workers: FakeWorker[] = [];
@@ -446,7 +452,7 @@ describe("AgentBroker end-to-end routing", () => {
   });
 
   it("keeps identity leases distinct from run slots through explicit stop-cancel-archive recovery", async () => {
-    const { broker, workers, root } = await setup({ maxAgents: 1, maxConcurrent: 1 });
+    const { broker, workers, root } = await setup({ maxAgents: 1, maxConcurrent: 1, roles: delegatingRoles() });
     try {
       assert.deepEqual((broker.getSnapshot() as any).capacity, {
         identitiesUsed: 0, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1,
@@ -550,7 +556,7 @@ describe("AgentBroker end-to-end routing", () => {
   });
 
   it("reports bounded directional archive blockers without private mail content", async () => {
-    const { broker, workers } = await setup({ maxAgents: 2, maxConcurrent: 2 });
+    const { broker, workers } = await setup({ maxAgents: 2, maxConcurrent: 2, roles: delegatingRoles() });
     try {
       const incoming = await broker.send(broker.mainAddress, {
         to: "worker.blocker-owner@gpt-5.4.com", subject: "PRIVATE INCOMING SUBJECT", message: "PRIVATE INCOMING BODY", priority: "low",

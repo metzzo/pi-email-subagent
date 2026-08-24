@@ -188,6 +188,7 @@ export class AgentBroker {
   private readonly cleanupQuarantines = new Map<string, WorkerCleanupLease>();
   private nextWorkerGeneration = 0;
   private readonly addressTails = new Map<string, Promise<void>>();
+  private mailAdmissionTail: Promise<void> = Promise.resolve();
   private readonly inFlightOperations = new Set<Promise<unknown>>();
   private readonly operationLabels = new WeakMap<Promise<unknown>, string>();
   private readonly activationLeases = new Set<string>();
@@ -443,10 +444,15 @@ export class AgentBroker {
       this.lifecycle = "active";
       await this.restoreQueuedMainMail(generation);
       this.checkpoint(generation);
+      for (const record of this.records.values()) {
+        if (record.state === "failed") await this.ensureTerminalChildBlockers(record);
+      }
 
       for (const record of this.records.values()) {
         if (!this.workers.has(record.address)) continue;
-        if (this.mailStore.unanswered(record.address).length > 0) swallow(this.resumeEnforcement(record.address));
+        if (this.queuedDependencyReplies(record.address).length > 0) swallow(this.schedule(record.address));
+        else if (this.outgoingDependencies(record.address).length > 0) await this.parkWorker(record.address, record);
+        else if (this.mailStore.unanswered(record.address).length > 0) swallow(this.resumeEnforcement(record.address));
         else if (this.mailStore.queued(record.address).length > 0) swallow(this.schedule(record.address));
         else {
           record.state = "idle";
@@ -841,6 +847,37 @@ export class AgentBroker {
     };
   }
 
+  private outgoingDependencies(address: string): EmailEnvelope[] {
+    return this.mailStore.list().filter((email) =>
+      email.kind === "request"
+      && email.requiresResponse
+      && email.from === address
+      && !this.isMainIdentity(email.to)
+      && (email.deliveryState === "queued" || email.deliveryState === "delivered")
+      && !email.answeredAt);
+  }
+
+  private queuedDependencyReplies(address: string): EmailEnvelope[] {
+    const blockers = new Set(this.outgoingDependencies(address).map((email) => email.id));
+    return sortMail(this.mailStore.queued(address).filter((email) =>
+      email.kind === "reply" && Boolean(email.inReplyTo && blockers.has(email.inReplyTo))));
+  }
+
+  private async parkWorker(address: string, record: AgentRecord): Promise<void> {
+    const dependencies = this.outgoingDependencies(address);
+    this.clearWatchdog(address);
+    this.active.delete(address);
+    for (let index = this.pendingStarts.length - 1; index >= 0; index -= 1) {
+      if (this.pendingStarts[index] === address) this.pendingStarts.splice(index, 1);
+    }
+    record.state = "parked";
+    record.currentActivity = `Parked on ${dependencies.length} outgoing child dependenc${dependencies.length === 1 ? "y" : "ies"}`;
+    record.updatedAt = nowIso();
+    await this.persistRegistry();
+    this.publish();
+    this.pump();
+  }
+
   private archiveEligible(record: AgentRecord | undefined, blockers: AgentArchiveBlockers): boolean {
     if (!record) return false;
     if (record.state === "archived") return true;
@@ -891,6 +928,15 @@ export class AgentBroker {
     } finally {
       if (this.addressTails.get(address) === tail) this.addressTails.delete(address);
     }
+  }
+
+  private async withMailAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.mailAdmissionTail.catch(() => undefined).then(async () => {
+      this.assertActive();
+      return operation();
+    });
+    this.mailAdmissionTail = run.then(() => undefined, () => undefined);
+    return run;
   }
 
   private emitChange(): void {
@@ -983,6 +1029,26 @@ export class AgentBroker {
     }
   }
 
+  private validateReplyOwnership(
+    sender: string,
+    to: string,
+    reply: NonNullable<ReturnType<typeof parseReplySubject>>,
+  ): EmailEnvelope {
+    const original = this.mailStore.get(reply.emailId);
+    if (!original) throw new Error(`Reply references unknown email ${reply.emailId}.`);
+    if (!original.requiresResponse) throw new Error(`${reply.emailId} is a reply and does not require an answer.`);
+    if (original.answeredAt) throw new Error(`${reply.emailId} was already answered by ${original.answeredBy}.`);
+    if (original.replyReservedBy) throw new Error(`${reply.emailId} already has reply ${original.replyReservedBy} pending delivery.`);
+    if (original.deliveryState !== "delivered") throw new Error(`${reply.emailId} has not been delivered yet.`);
+    if (!this.sameIdentity(original.to, sender) || !this.sameIdentity(original.from, to)) {
+      throw new Error(`Reply ${reply.emailId} does not belong to this sender/recipient pair.`);
+    }
+    if (reply.originalSubject !== original.subject) {
+      throw new Error(`Reply subject does not exactly match ${reply.emailId}. Use: Re: [${reply.emailId}] ${original.subject}`);
+    }
+    return original;
+  }
+
   private validateDeliverySize(envelope: EmailEnvelope): void {
     const formatted = formatEmail(envelope);
     const byteLimit = this.toolResultByteLimit;
@@ -1014,6 +1080,59 @@ export class AgentBroker {
       return;
     }
     if (this.workers.has(original.to)) swallow(this.resumeEnforcement(original.to));
+  }
+
+  private terminalChildBlockerMessage(record: AgentRecord, requestId: string): string {
+    const effects = currentBatchHasEffectfulWork(record.work)
+      ? "Current work evidence indicates mutation, shell, or custom effects may exist."
+      : "Current work evidence does not indicate mutation, shell, or custom effects; this is not proof of pre-tool failure.";
+    return `Dependency blocker for child request ${requestId}: ${record.address} failed (${record.provider}/${record.modelId}). ${effects} This is terminal failure status, not a successful result. Ask main to inspect Work and Conversation, perform effect review, and explicitly restart the same identity if recovery is safe; do not resend, redelegate, or switch providers automatically.`;
+  }
+
+  private async ensureTerminalChildBlockers(record: AgentRecord): Promise<void> {
+    const requests = this.mailStore.list().filter((email) =>
+      email.kind === "request"
+      && email.requiresResponse
+      && email.to === record.address
+      && !this.isMainIdentity(email.from)
+      && email.deliveryState === "delivered"
+      && !email.answeredAt
+      && !email.replyReservedBy);
+    for (const snapshot of requests) {
+      let blocker: EmailEnvelope | undefined;
+      await this.withMailAdmission(async () => {
+        const request = this.mailStore.get(snapshot.id);
+        if (!request || request.deliveryState !== "delivered" || request.answeredAt || request.replyReservedBy) return;
+        blocker = {
+          id: createMailId(),
+          from: record.address,
+          to: request.from,
+          subject: makeReplySubject(request.id, request.subject),
+          message: this.terminalChildBlockerMessage(record, request.id),
+          priority: "low",
+          kind: "reply",
+          inReplyTo: request.id,
+          requiresResponse: false,
+          createdAt: nowIso(),
+          deliveryState: "queued",
+        };
+        this.validateDeliverySize(blocker);
+        await this.mailStore.reserveReply(blocker, request.id);
+      });
+      if (!blocker) continue;
+      try {
+        await this.ensureWorker(blocker.to, undefined, blocker);
+      } catch (error) {
+        // The accepted blocker and its reservation remain queued for explicit
+        // same-identity recovery; never generate a replacement mail ID.
+        void error;
+        this.options.mainAdapter.notifyFailure(
+          `Dependency blocker ${blocker.id} for ${snapshot.id} remains queued; the parent requires explicit same-identity recovery before delivery can continue.`,
+        );
+      }
+    }
+    this.scheduleMailMaintenance();
+    this.emitChange();
   }
 
   send(senderInput: string, input: SendEmailInput): Promise<SendEmailResult> {
@@ -1091,22 +1210,7 @@ export class AgentBroker {
       throw new Error("Malformed reply subject. Copy the exact `Re: [mail-id] original subject` from fetch_emails().");
     }
 
-    let answeredEmailId: string | undefined;
-    if (reply) {
-      const original = this.mailStore.get(reply.emailId);
-      if (!original) throw new Error(`Reply references unknown email ${reply.emailId}.`);
-      if (!original.requiresResponse) throw new Error(`${reply.emailId} is a reply and does not require an answer.`);
-      if (original.answeredAt) throw new Error(`${reply.emailId} was already answered by ${original.answeredBy}.`);
-      if (original.replyReservedBy) throw new Error(`${reply.emailId} already has reply ${original.replyReservedBy} pending delivery.`);
-      if (original.deliveryState !== "delivered") throw new Error(`${reply.emailId} has not been delivered yet.`);
-      if (!this.sameIdentity(original.to, sender) || !this.sameIdentity(original.from, to)) {
-        throw new Error(`Reply ${reply.emailId} does not belong to this sender/recipient pair.`);
-      }
-      if (reply.originalSubject !== original.subject) {
-        throw new Error(`Reply subject does not exactly match ${reply.emailId}. Use: Re: [${reply.emailId}] ${original.subject}`);
-      }
-      answeredEmailId = original.id;
-    }
+    let answeredEmailId = reply ? this.validateReplyOwnership(sender, to, reply).id : undefined;
 
     let acquiredLease = false;
     let envelope!: EmailEnvelope;
@@ -1166,14 +1270,27 @@ export class AgentBroker {
           } : {}),
         };
         this.validateDeliverySize(envelope);
-        const steersImmediately = !toMain
-          && input.priority === "high"
-          && Boolean(currentWorker?.getSnapshot().isStreaming)
-          && !(currentRecord && this.mutationSchedulingQuarantined(currentRecord));
-        if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
-        this.takeRateQuota(sender);
-        if (answeredEmailId) await this.mailStore.reserveReply(envelope, answeredEmailId);
-        else await this.mailStore.accept(envelope);
+        await this.withMailAdmission(async () => {
+          const currentSender = this.records.get(sender);
+          if (!toMain && !reply && currentSender && !currentSender.canSpawn) {
+            throw new Error(`Agent ${sender} is not permitted to delegate to subagents; response-required requests to known and unknown subagents are disabled.`);
+          }
+          if (reply) {
+            const original = this.validateReplyOwnership(sender, to, reply);
+            if (currentSender && this.outgoingDependencies(sender).length > 0) {
+              throw new Error(`Agent ${sender} cannot answer ${original.id} while an outgoing child dependency is still open.`);
+            }
+            answeredEmailId = original.id;
+          }
+          const steersImmediately = !toMain
+            && input.priority === "high"
+            && Boolean(currentWorker?.getSnapshot().isStreaming)
+            && !(currentRecord && this.mutationSchedulingQuarantined(currentRecord));
+          if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
+          this.takeRateQuota(sender);
+          if (answeredEmailId) await this.mailStore.reserveReply(envelope, answeredEmailId);
+          else await this.mailStore.accept(envelope);
+        });
       });
     } catch (error) {
       if (acquiredLease) this.activationLeases.delete(to);
@@ -1612,6 +1729,7 @@ export class AgentBroker {
     record.updatedAt = nowIso();
     const lease = this.beginWorkerCleanup(address, worker, code, "failed");
     await this.persistRegistry();
+    await this.ensureTerminalChildBlockers(record);
     this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
     try {
       await this.waitForCleanup(lease, record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs);
@@ -1682,6 +1800,7 @@ export class AgentBroker {
         lease,
         record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs,
       ).catch(() => undefined));
+      swallow(this.ensureTerminalChildBlockers(record));
       if (shouldNotify) this.options.mainAdapter.notifyFailure(`${address}: ${event.error}\n${this.terminalFailureRecovery(record)}`);
       this.publish();
       return;
@@ -1764,6 +1883,13 @@ export class AgentBroker {
     const admissionEpoch = record ? this.mutationAdmission(record) : undefined;
     const snapshot = worker.getSnapshot();
     if (snapshot.record.state === "stopped") return;
+    const dependencyResult = envelope.kind === "reply"
+      && Boolean(envelope.inReplyTo)
+      && this.outgoingDependencies(envelope.to).some((request) => request.id === envelope.inReplyTo);
+    if (record && !dependencyResult && this.outgoingDependencies(envelope.to).length > 0) {
+      if (!snapshot.isStreaming) await this.parkWorker(envelope.to, record);
+      return;
+    }
     if (snapshot.isStreaming) {
       if (envelope.priority === "high") {
         // Requests are marked delivered before steering so the worker's own
@@ -1875,7 +2001,13 @@ export class AgentBroker {
       return;
     }
     const admissionEpoch = this.mutationAdmission(record);
-    const pending = this.mailStore.queued(address);
+    const dependencies = this.outgoingDependencies(address);
+    const dependencyReplies = this.queuedDependencyReplies(address);
+    if (dependencies.length > 0 && dependencyReplies.length === 0) {
+      await this.parkWorker(address, record);
+      return;
+    }
+    const pending = dependencies.length > 0 ? dependencyReplies : this.mailStore.queued(address);
     const queued = this.selectBatch(pending);
     if (queued.length === 0) {
       const oversized = pending[0];
@@ -1935,7 +2067,11 @@ export class AgentBroker {
         }
         return;
       }
-      for (const email of queued) await this.failEnvelope(email, errorMessage(error));
+      for (const email of queued) {
+        if (email.kind === "reply") continue;
+        if (!this.isMainIdentity(email.from) && email.kind === "request") continue;
+        await this.failEnvelope(email, errorMessage(error));
+      }
       this.clearWatchdog(address);
       this.clearToolLifecycle(address, worker);
       this.active.delete(address);
@@ -1943,6 +2079,7 @@ export class AgentBroker {
       record.failure = errorMessage(error);
       record.updatedAt = nowIso();
       await this.persistRegistry();
+      await this.ensureTerminalChildBlockers(record);
       this.options.mainAdapter.notifyFailure(`${address} could not start: ${record.failure}`);
       this.pump();
     } finally {
@@ -1960,6 +2097,10 @@ export class AgentBroker {
     const record = this.records.get(address);
     const outstanding = this.fetchUnanswered(address);
     if (!worker || !record || outstanding.length === 0 || ["stopped", "failed"].includes(record.state)) return;
+    if (this.outgoingDependencies(address).length > 0) {
+      await this.parkWorker(address, record);
+      return;
+    }
     if (this.mutationSchedulingQuarantined(record)) {
       this.enqueueStart(address);
       await this.persistRegistry();
@@ -2014,6 +2155,21 @@ export class AgentBroker {
       this.syncWorker(address, worker);
       if (!this.settlementCurrent(settlement)) return;
       this.interruptRecordWork(record);
+      if (this.queuedDependencyReplies(address).length > 0) {
+        this.active.delete(address);
+        record.state = "queued";
+        record.currentActivity = "Receiving a completed child dependency";
+        record.updatedAt = nowIso();
+        await this.persistRegistry();
+        if (!this.settlementCurrent(settlement)) return;
+        swallow(this.schedule(address));
+        this.pump();
+        return;
+      }
+      if (this.outgoingDependencies(address).length > 0) {
+        await this.parkWorker(address, record);
+        return;
+      }
       const outstanding = this.fetchUnanswered(address);
       if (outstanding.length > 0) {
         record = this.records.get(address);
@@ -2049,6 +2205,8 @@ export class AgentBroker {
         record.failure = `Stopped with ${outstanding.length} unanswered email(s) after ${record.enforcementAttempts} reminder(s).`;
         this.active.delete(address);
         await this.persistRegistry();
+        if (!this.settlementCurrent(settlement)) return;
+        await this.ensureTerminalChildBlockers(record);
         if (!this.settlementCurrent(settlement)) return;
         this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
         this.pump();
@@ -2106,7 +2264,9 @@ export class AgentBroker {
       if (!worker) {
         worker = await this.createWorker(this.resolveExistingRecord(record), record, this.lifecycleGeneration);
       }
-      if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
+      if (this.queuedDependencyReplies(address).length > 0) await this.schedule(address);
+      else if (this.outgoingDependencies(address).length > 0) await this.parkWorker(address, record);
+      else if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
       else if (this.mailStore.queued(address).length > 0) await this.schedule(address);
       else this.syncWorker(address, worker);
     });
@@ -2174,7 +2334,9 @@ export class AgentBroker {
       delete record.failure;
       record.enforcementAttempts = 0;
       await this.createWorker(parsed, record, this.lifecycleGeneration);
-      if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
+      if (this.queuedDependencyReplies(address).length > 0) await this.schedule(address);
+      else if (this.outgoingDependencies(address).length > 0) await this.parkWorker(address, record);
+      else if (this.fetchUnanswered(address).length > 0) await this.resumeEnforcement(address);
       else if (this.mailStore.queued(address).length > 0) await this.schedule(address);
       this.publish();
     });

@@ -31,7 +31,7 @@ Workers always receive exactly `send_email` and `fetch_emails` on top of their c
 
 ### Reply protocol
 
-Every request carries a response obligation. Replies must reuse the exact subject `Re: [mail-id] original subject`, which the broker validates strictly (existence, recipient/sender pair, exact subject text, single answer). Obligations are tracked with a durable reserve → deliver → commit / release protocol, so concurrent replies cannot double-answer and a failed reply delivery reopens the request. If a successful worker finishes with visible final text but forgets `send_email`, the broker mechanically sends that text through the same reply protocol; truly silent or failed runs retain the reminder/failure path. If the user intentionally abandons work assigned to an inactive recipient, [`cancel_request`](cancel-request.md) durably closes that exact obligation with an audit reason without fabricating an answer.
+Every request carries a response obligation. Replies must reuse the exact subject `Re: [mail-id] original subject`, which the broker validates strictly (existence, recipient/sender pair, exact subject text, single answer). Obligations are tracked with a durable reserve → deliver → commit / release protocol, so concurrent replies cannot double-answer and a failed reply delivery reopens the request. Only an exact successful `send_email` reply closes an obligation; final assistant text never becomes mail. Opted-in nested delegation parks the parent until its exact child result or sanitized terminal blocker arrives. If the user intentionally abandons work assigned to an inactive recipient, [`cancel_request`](cancel-request.md) durably closes that exact obligation with an audit reason without fabricating an answer.
 
 ### Durability
 
@@ -39,7 +39,7 @@ A cooperative proper-lockfile lease reduces accidental concurrent state writers 
 
 ### Lifecycle states and deadlines
 
-`queued` → `spawning` → `running` ⇄ `idle`, plus `failed`, `stopped`, `paused` (restored over capacity), and `archived` (capacity freed, context retained). See [`manage_agent`](manage-agent.md) for transitions and [Agent lifecycle deadlines](lifecycle.md) for initial-delegation policy, watchdog, recovery, and shutdown semantics.
+`queued` → `spawning` → `running` ⇄ `idle`, plus `parked` (run slot released for an open child dependency), `failed`, `stopped`, `paused` (restored over capacity), and `archived` (capacity freed, context retained). See [`manage_agent`](manage-agent.md) for transitions and [Agent lifecycle deadlines](lifecycle.md) for initial-delegation policy, watchdog, recovery, and shutdown semantics.
 
 ### Provider retry and terminal recovery
 
