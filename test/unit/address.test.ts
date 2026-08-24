@@ -116,6 +116,23 @@ describe("email address routing", () => {
     assert.throws(() => duplicate.resolveLegacyUnique("shared"), /original provider cannot be inferred/i);
   });
 
+  it("bounds unroutable-address catalog diagnostics without changing omitted model routability", () => {
+    const ids = Array.from({ length: 200 }, (_, index) => `model-${index.toString().padStart(4, "0")}-${"x".repeat(110)}`);
+    const catalog = new ModelCatalog(ids.map((id) => fakeModel(id, "provider-a")));
+    assert.throws(
+      () => parseNewSubagentAddress("worker.task@missing.com", catalog, "provider-a"),
+      (error: unknown) => {
+        assert.ok(error instanceof AddressError);
+        assert.ok(Buffer.byteLength(error.message, "utf8") <= 2_048);
+        assert.match(error.message, /192 routable model IDs omitted/i);
+        assert.match(error.message, /inspect_agent.*exact/i);
+        assert.doesNotMatch(error.message, new RegExp(ids.at(-1)!));
+        return true;
+      },
+    );
+    assert.equal(catalog.resolveNew(ids.at(-1)!, "provider-a").id, ids.at(-1));
+  });
+
   it("filters catalog IDs that cannot be represented by the exact email-domain grammar", () => {
     const catalog = new ModelCatalog([
       fakeModel("safe-model", "provider-a"),

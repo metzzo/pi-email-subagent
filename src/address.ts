@@ -35,6 +35,14 @@ function renderCandidates(models: readonly Model<any>[]): string {
   return `${shown.join(", ") || "none"}${omitted > 0 ? `, +${omitted} omitted` : ""}`;
 }
 
+function renderAvailableModelIds(modelIds: readonly string[]): string {
+  const shown = modelIds.slice(0, MAX_DIAGNOSTIC_CANDIDATES);
+  const omitted = modelIds.length - shown.length;
+  return `${shown.join(", ") || "none"}${omitted > 0
+    ? `; ${omitted} routable model IDs omitted. Use inspect_agent for an exact prospective routing decision`
+    : ""}`;
+}
+
 export class ModelCatalog {
   private readonly byId = new Map<string, Model<any>[]>();
 
@@ -61,7 +69,7 @@ export class ModelCatalog {
   resolveNew(modelId: string, preferredProvider?: string): Model<any> {
     const matches = this.byId.get(modelId.toLowerCase()) ?? [];
     if (matches.length === 0) {
-      const available = this.routableModelIds(preferredProvider).join(", ") || "none";
+      const available = renderAvailableModelIds(this.routableModelIds(preferredProvider));
       throw new AddressError(`Model ID "${modelId}" is not routable. Available email models: ${available}. No email was accepted.`);
     }
     if (matches.length === 1) return matches[0]!;
