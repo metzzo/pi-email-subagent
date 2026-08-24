@@ -51,8 +51,9 @@ Before opening a pull request:
 
 ```bash
 npm run validate
-npm audit --omit=dev --omit=peer
+npm run check:package
 npm run check:secrets # requires Gitleaks 8.30.1
+npm audit --omit=dev --omit=peer
 git diff --check
 ```
 
@@ -65,6 +66,8 @@ Describe:
 3. Tests added and commands run.
 4. Compatibility, security, migration, and documentation effects.
 5. Whether optional live acceptance was run.
+6. Exact pushed candidate commit and durable full-log artifact paths.
+7. Explicit untested coverage (paid/live providers, sudden-power-loss/fsync durability, Windows containment, escaped POSIX process groups/sessions, alternate Pi versions, and cross-parent workspace overlap unless separately tested).
 
 Do not include credentials, raw private mailbox state, hidden model reasoning, or paid-provider recordings containing sensitive data. See [`docs/release-security-checks.md`](docs/release-security-checks.md) for the secret and dependency-license policies.
 

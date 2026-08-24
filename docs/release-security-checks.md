@@ -41,6 +41,28 @@ npm run check:licenses -- --output /tmp/production-dependency-licenses.json
 
 The report records the policy and every shipped package name, version, license, and lockfile path. It contains no source files or credentials.
 
+## Candidate release gate
+
+Cut evidence only from one pushed commit with a clean worktree. Record the commit ID, then preserve complete command output rather than relying on terminal truncation or filtered pipes:
+
+```bash
+npm run validate        # check + licenses + all deterministic tests + packed install/load smoke
+npm run check:package   # authoritative tarball surface and Markdown-link policy
+npm run check:secrets   # Gitleaks history scan
+npm audit --omit=dev --omit=peer
+git diff --check
+```
+
+`npm test` inside `validate` drives the exact Pi 0.81.1 SDK/RPC fixtures. Evidence assertions parse their canonical formats: JSONL RPC records by event type/tool-call ID, mail journal JSON events by stable mail ID, registry JSON by exact address/generation, Pi session branches by entry/tool-call/message ID, process readiness/heartbeat JSON by schema, and the test runner's TAP result/exit status. Text grep counts are not release evidence.
+
+The package policy excludes tests, scripts, plans, workflows, state, and other internal paths; the packed smoke installs the tarball into an isolated consumer and loads `/agents` through the pinned Pi package. Secret scanning remains a separate gate. Before publication, inspect the listed tarball files and confirm that credentials, worker sessions/mail journals, and deterministic test sentinels are absent.
+
+Runtime structure checks run before extension registration or broker/state construction and improve missing-feature diagnostics. They do **not** certify event ordering, retries, durability, provider behavior, cleanup, or settings semantics. The exact tested Pi 0.81.1 dependency and the behavioral suite remain authoritative; wildcard host peers do not widen support.
+
+After writers stop changing the pushed candidate, the independent product-correctness and runtime-safety review gates run against that exact commit. Do not release with an S0/S1 finding in enabled-by-default behavior.
+
+Every release report must explicitly list untested coverage. Unless separately executed with preserved evidence, this includes paid/live providers, sudden power loss and filesystem-fsync durability, Windows process containment, escaped POSIX process groups/sessions, alternate Pi versions, and cross-parent workspace overlap. Deterministic custom-provider evidence is not a claim about every live provider.
+
 ## Supply-chain maintenance
 
 Third-party GitHub Actions are pinned to full commit SHAs, with a version comment for Dependabot. Downloaded security binaries are pinned by both version and digest. Review updates like code changes: confirm upstream tag-to-commit or artifact-to-digest associations, permissions, runtime, license, and release notes before merging.
