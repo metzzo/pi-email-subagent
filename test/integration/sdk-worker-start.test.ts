@@ -309,6 +309,8 @@ it("never writes shared settings while two workers start and change effort indep
     transport: "sse",
     httpIdleTimeoutMs: 3_001,
     websocketConnectTimeoutMs: 4_001,
+    httpProxy: "http://127.0.0.1:8765",
+    shellPath: "/bin/sh",
     compaction: { enabled: false, reserveTokens: 12_001, keepRecentTokens: 13_001 },
     branchSummary: { reserveTokens: 14_001, skipPrompt: true },
     shellCommandPrefix: "set -eu",
@@ -362,6 +364,8 @@ it("never writes shared settings while two workers start and change effort indep
     assert.equal(lowSession.settingsManager.getTransport(), "websocket");
     assert.equal(lowSession.settingsManager.getHttpIdleTimeoutMs(), 3_001);
     assert.equal(lowSession.settingsManager.getWebSocketConnectTimeoutMs(), 4_001);
+    assert.equal(lowSession.settingsManager.getGlobalSettings().httpProxy, "http://127.0.0.1:8765");
+    assert.equal(lowSession.settingsManager.getShellPath(), "/bin/sh");
     assert.deepEqual(lowSession.settingsManager.getCompactionSettings(), { enabled: false, reserveTokens: 15_001, keepRecentTokens: 13_001 });
     assert.deepEqual(lowSession.settingsManager.getBranchSummarySettings(), { reserveTokens: 14_001, skipPrompt: true });
     assert.equal(lowSession.settingsManager.getShellCommandPrefix(), "project-prefix");
