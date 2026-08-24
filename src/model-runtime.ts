@@ -1,42 +1,18 @@
+import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { CreateModelRuntimeOptions, ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-/**
- * Copy extension-registered providers from the parent Pi session into the
- * isolated runtime used by SDK workers. Model objects alone are insufficient:
- * custom providers can also supply request protocols, OAuth hooks, and stream
- * implementations that a newly-created ModelRuntime does not know about.
- */
-export function inheritRegisteredProviders(source: ModelRegistry, target: ModelRuntime): void {
-  for (const providerId of source.getRegisteredProviderIds()) {
-    const nativeProvider = source.getRegisteredNativeProvider(providerId);
-    if (nativeProvider) {
-      target.registerNativeProvider(nativeProvider);
-      continue;
-    }
-
-    const config = source.getRegisteredProviderConfig(providerId);
-    if (config) target.registerProvider(providerId, config);
-  }
-}
-
 export interface WorkerRuntimeSnapshot {
   runtime: ModelRuntime;
+  /** Exact frozen model object used by worker execution. */
   model: Model<Api>;
 }
 
 type RuntimeCreator = (options: CreateModelRuntimeOptions) => Promise<ModelRuntime>;
 type AuthStatus = ReturnType<ModelRegistry["getProviderAuthStatus"]>;
 
-type ProviderSnapshot =
-  | { kind: "native"; provider: NonNullable<ReturnType<ModelRegistry["getRegisteredNativeProvider"]>> }
-  | { kind: "configured"; id: string; config: NonNullable<ReturnType<ModelRegistry["getRegisteredProviderConfig"]>> };
-
-interface ModelCompatibilitySnapshot {
-  api: Api;
-  supportsLongCacheRetention: boolean;
-}
+type RequestModelSnapshot = Omit<Model<Api>, "headers">;
 
 function statusClass(status: AuthStatus): string {
   if (!status.configured) return "unconfigured";
@@ -98,13 +74,51 @@ export function assertCredentialSourceEquivalent(
   }
 }
 
-function compatibilitySnapshot(model: Model<Api>): ModelCompatibilitySnapshot {
-  return {
-    api: model.api,
-    // Pi's relevant provider adapters default this compatibility capability to
-    // true. An endpoint that rejects long retention must publish false.
-    supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
-  };
+function requestModelSnapshot(model: Model<Api>, providerId: string): RequestModelSnapshot {
+  // Pi 0.81.1 exposes resolved model headers but no public provenance that can
+  // distinguish static non-secret metadata from command/hook/secret-derived
+  // values. Do not compare or retain those values: narrow the route instead.
+  if (model.headers && Object.keys(model.headers).length > 0) {
+    throw new ProviderReadinessError(
+      providerId,
+      "model-header-provenance-unavailable",
+      `Model ${providerId}/${model.id} uses request headers whose non-secret provenance cannot be proven by Pi 0.81.1. Remove those headers or use the main session; no email was accepted.`,
+    );
+  }
+  const {
+    id,
+    name,
+    api,
+    provider,
+    baseUrl,
+    reasoning,
+    thinkingLevelMap,
+    input,
+    cost,
+    contextWindow,
+    maxTokens,
+    compat,
+  } = model;
+  return structuredClone({
+    id,
+    name,
+    api,
+    provider,
+    baseUrl,
+    reasoning,
+    ...(thinkingLevelMap !== undefined ? { thinkingLevelMap } : {}),
+    input,
+    cost,
+    contextWindow,
+    maxTokens,
+    ...(compat !== undefined ? { compat } : {}),
+  }) as RequestModelSnapshot;
+}
+
+function freezeRequestModel<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) freezeRequestModel(nested);
+  return Object.freeze(value);
 }
 
 function modelKey(providerId: string, modelId: string): string {
@@ -112,47 +126,46 @@ function modelKey(providerId: string, modelId: string): string {
 }
 
 /**
- * Creates one immutable-at-extension-start provider/model/auth-status snapshot
- * for workers. The same explicit auth and models paths used by main must be
- * supplied; later provider definition, metadata, or source-class changes
- * intentionally require an extension reload.
+ * Prepares one exact isolated runtime/model request object. Extension-registered
+ * providers are deliberately unsupported: Pi 0.81.1 registration starts an
+ * unacknowledged auth/availability refresh and custom hooks cannot be replayed
+ * into a self-contained worker without changing request policy.
  */
 export class WorkerRuntimeFactory {
-  private readonly providers: ProviderSnapshot[];
+  private readonly registeredProviderIds: ReadonlySet<string>;
   private readonly parentAuth = new Map<string, AuthStatus>();
-  private readonly modelCompatibility = new Map<string, ModelCompatibilitySnapshot>();
+  private readonly requestModels = new Map<string, RequestModelSnapshot>();
 
   constructor(
     private readonly source: ModelRegistry,
     private readonly options: CreateModelRuntimeOptions,
     private readonly createRuntime: RuntimeCreator = PiCodingAgent.ModelRuntime.create,
   ) {
-    this.providers = source.getRegisteredProviderIds().flatMap((id): ProviderSnapshot[] => {
-      const nativeProvider = source.getRegisteredNativeProvider(id);
-      if (nativeProvider) return [{ kind: "native", provider: nativeProvider }];
-      const config = source.getRegisteredProviderConfig(id);
-      return config ? [{ kind: "configured", id, config }] : [];
-    });
+    this.registeredProviderIds = new Set(source.getRegisteredProviderIds());
     for (const model of source.getAll()) {
       if (!this.parentAuth.has(model.provider)) {
         this.parentAuth.set(model.provider, { ...source.getProviderAuthStatus(model.provider) });
       }
-      this.modelCompatibility.set(modelKey(model.provider, model.id), compatibilitySnapshot(model));
+      this.requestModels.set(modelKey(model.provider, model.id), requestModelSnapshot(model, model.provider));
     }
   }
 
-  async preflight(providerId: string, modelId: string): Promise<void> {
-    await this.create(providerId, modelId);
+  async preflight(providerId: string, modelId: string): Promise<WorkerRuntimeSnapshot> {
+    return this.create(providerId, modelId);
   }
 
   async create(providerId: string, modelId: string): Promise<WorkerRuntimeSnapshot> {
+    if (this.registeredProviderIds.has(providerId)) {
+      throw new ProviderReadinessError(
+        providerId,
+        "registered-provider-policy-unavailable",
+        `Provider ${providerId} is extension-registered. Pi 0.81.1 exposes neither a registration/auth-refresh readiness receipt nor a self-contained hook policy for isolated workers; no email was accepted.`,
+      );
+    }
+
     let runtime: ModelRuntime;
     try {
       runtime = await this.createRuntime(this.options);
-      for (const provider of this.providers) {
-        if (provider.kind === "native") runtime.registerNativeProvider(provider.provider);
-        else runtime.registerProvider(provider.id, provider.config);
-      }
     } catch {
       throw new ProviderReadinessError(
         providerId,
@@ -170,21 +183,20 @@ export class WorkerRuntimeFactory {
       );
     }
 
-    const parentCompatibility = this.modelCompatibility.get(modelKey(providerId, modelId));
-    if (!parentCompatibility) {
+    const parentRequest = this.requestModels.get(modelKey(providerId, modelId));
+    if (!parentRequest) {
       throw new ProviderReadinessError(
         providerId,
         "model-snapshot-missing",
         `Model ${providerId}/${modelId} was not present in the extension-start model snapshot. Reload the extension.`,
       );
     }
-    const workerCompatibility = compatibilitySnapshot(model);
-    if (parentCompatibility.api !== workerCompatibility.api
-      || parentCompatibility.supportsLongCacheRetention !== workerCompatibility.supportsLongCacheRetention) {
+    const workerRequest = requestModelSnapshot(model, providerId);
+    if (!isDeepStrictEqual(parentRequest, workerRequest)) {
       throw new ProviderReadinessError(
         providerId,
-        "model-compatibility-mismatch",
-        `Model ${providerId}/${modelId} compatibility metadata for API family or long cache retention differs from the extension-start snapshot. Reload the extension after correcting model metadata.`,
+        "model-request-metadata-mismatch",
+        `Model ${providerId}/${modelId} request metadata differs from the extension-start snapshot. API, endpoint, reasoning/thinking, input, cost, context/output limits, or compatibility policy changed; reload the extension.`,
       );
     }
 
@@ -192,6 +204,8 @@ export class WorkerRuntimeFactory {
     const workerStatus = runtime.getProviderAuthStatus(providerId);
     assertCredentialSourceEquivalent(providerId, parentStatus, workerStatus);
 
-    return { runtime, model };
+    // This is the exact object passed to createAgentSession; no second runtime
+    // or model lookup occurs after mail admission.
+    return { runtime, model: freezeRequestModel(model) };
   }
 }

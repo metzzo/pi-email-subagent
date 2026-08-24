@@ -1,44 +1,48 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   assertCredentialSourceEquivalent,
-  inheritRegisteredProviders,
   ProviderReadinessError,
   WorkerRuntimeFactory,
 } from "../../src/model-runtime.ts";
+import { fakeModel } from "../helpers/fakes.ts";
 
 type CredentialStatus = Parameters<typeof assertCredentialSourceEquivalent>[1];
 
 const model = {
-  provider: "configured-provider",
-  id: "model-a",
+  ...fakeModel("model-a", "builtin-provider"),
   api: "openai-responses",
-  compat: { supportsLongCacheRetention: false },
-};
+  baseUrl: "https://example.invalid/v1",
+  reasoning: true,
+  thinkingLevelMap: { low: "low", high: "high" },
+  input: ["text"] as ("text" | "image")[],
+  cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+  contextWindow: 128_000,
+  maxTokens: 32_000,
+  compat: { supportsLongCacheRetention: false, supportsToolSearch: true },
+} as Model<any>;
 
 function sourceRegistry(
   status: CredentialStatus = { configured: true, source: "stored" },
+  sourceModel: Model<any> = model,
+  registered: readonly string[] = [],
 ): ModelRegistry {
-  const config = { api: "custom-api", baseUrl: "https://example.invalid", models: [] };
-  const native = { id: "native-provider" };
   return {
-    getAll: () => [model],
-    find: (provider: string, id: string) => provider === model.provider && id === model.id ? model : undefined,
-    getRegisteredProviderIds: () => ["configured-provider", "native-provider", "missing-provider"],
-    getRegisteredProviderConfig: (id: string) => id === "configured-provider" ? config : undefined,
-    getRegisteredNativeProvider: (id: string) => id === "native-provider" ? native : undefined,
+    getAll: () => [sourceModel],
+    getRegisteredProviderIds: () => registered,
+    getRegisteredProviderConfig: () => undefined,
+    getRegisteredNativeProvider: () => undefined,
     getProviderAuthStatus: () => status,
   } as unknown as ModelRegistry;
 }
 
 function targetRuntime(
   status: CredentialStatus = { configured: true, source: "stored" },
-  runtimeModel: typeof model = model,
+  runtimeModel: Model<any> = structuredClone(model),
 ): ModelRuntime {
   return {
-    registerProvider() {},
-    registerNativeProvider() {},
     getModel: (provider: string, id: string) => provider === runtimeModel.provider && id === runtimeModel.id ? runtimeModel : undefined,
     getProviderAuthStatus: () => status,
     getAuth: async () => { throw new Error("secret resolution must not be used for equivalence"); },
@@ -46,33 +50,16 @@ function targetRuntime(
 }
 
 describe("worker model runtime", () => {
-  it("inherits custom and native providers registered in the parent session", () => {
-    const configured: Array<[string, unknown]> = [];
-    const native: unknown[] = [];
-    const target = {
-      registerProvider: (id: string, config: unknown) => configured.push([id, config]),
-      registerNativeProvider: (provider: unknown) => native.push(provider),
-    } as unknown as ModelRuntime;
-
-    inheritRegisteredProviders(sourceRegistry(), target);
-
-    assert.deepEqual(configured, [[
-      "configured-provider",
-      { api: "custom-api", baseUrl: "https://example.invalid", models: [] },
-    ]]);
-    assert.deepEqual(native, [{ id: "native-provider" }]);
-  });
-
   it("allows only supported matching non-secret credential source classes", () => {
     for (const source of ["stored", "models_json_key"] as const) {
       assert.doesNotThrow(() => assertCredentialSourceEquivalent(
-        "configured-provider",
+        "builtin-provider",
         { configured: true, source },
         { configured: true, source },
       ));
     }
     assert.doesNotThrow(() => assertCredentialSourceEquivalent(
-      "configured-provider",
+      "builtin-provider",
       { configured: true, source: "environment", label: "FIXTURE_PROVIDER_KEY" },
       { configured: true, source: "environment", label: "FIXTURE_PROVIDER_KEY" },
     ));
@@ -81,7 +68,6 @@ describe("worker model runtime", () => {
   it("fails closed for runtime overrides, commands, fallbacks, mismatches, and indeterminate auth", () => {
     const rejected: Array<[CredentialStatus, CredentialStatus]> = [
       [{ configured: true, source: "runtime" }, { configured: true, source: "stored" }],
-      [{ configured: true, source: "runtime" }, { configured: false }],
       [{ configured: true, source: "models_json_command" }, { configured: true, source: "models_json_command" }],
       [{ configured: true, source: "fallback" }, { configured: true, source: "fallback" }],
       [{ configured: true, source: "environment", label: "PARENT_KEY" }, { configured: true, source: "stored" }],
@@ -90,98 +76,98 @@ describe("worker model runtime", () => {
       [{ configured: false }, { configured: false }],
     ];
     for (const [parent, worker] of rejected) {
-      assert.throws(
-        () => assertCredentialSourceEquivalent("configured-provider", parent, worker),
-        ProviderReadinessError,
-      );
+      assert.throws(() => assertCredentialSourceEquivalent("builtin-provider", parent, worker), ProviderReadinessError);
     }
   });
 
-  it("creates a provider snapshot without resolving or comparing credential material", async () => {
-    const target = targetRuntime();
-    const factory = new WorkerRuntimeFactory(
-      sourceRegistry(),
-      { authPath: "/agent/auth.json", modelsPath: "/agent/models.json" },
-      async () => target,
-    );
-
-    const snapshot = await factory.create("configured-provider", "model-a");
-    assert.equal(snapshot.runtime, target);
-    assert.equal(snapshot.model, model);
+  it("prepares one exact frozen request model without resolving or comparing secret material", async () => {
+    const runtimeModel = structuredClone(model);
+    const runtime = targetRuntime({ configured: true, source: "stored" }, runtimeModel);
+    const snapshot = await new WorkerRuntimeFactory(sourceRegistry(), {}, async () => runtime)
+      .preflight("builtin-provider", "model-a");
+    assert.equal(snapshot.runtime, runtime);
+    assert.equal(snapshot.model, runtimeModel);
+    assert.equal(Object.isFrozen(snapshot.model), true);
+    assert.equal(Object.isFrozen(snapshot.model.compat), true);
   });
 
-  it("allows stored OAuth and matching environment status without inspecting credentials", async () => {
-    const statuses: CredentialStatus[] = [
-      { configured: true, source: "stored" },
-      { configured: true, source: "environment", label: "FIXTURE_PROVIDER_KEY" },
-      { configured: true, source: "models_json_key" },
+  it("rejects drift in every non-secret request-affecting model field", async () => {
+    const changes: Array<[string, (value: any) => void]> = [
+      ["baseUrl", (value) => { value.baseUrl = "https://drift.invalid"; }],
+      ["reasoning", (value) => { value.reasoning = false; }],
+      ["thinking map", (value) => { value.thinkingLevelMap.high = "xhigh"; }],
+      ["input", (value) => { value.input = ["text", "image"]; }],
+      ["cost", (value) => { value.cost.input = 9; }],
+      ["context", (value) => { value.contextWindow = 64_000; }],
+      ["max tokens", (value) => { value.maxTokens = 8_000; }],
+      ["compat", (value) => { value.compat.supportsToolSearch = false; }],
+      ["api", (value) => { value.api = "openai-completions"; }],
     ];
-    for (const status of statuses) {
-      const factory = new WorkerRuntimeFactory(sourceRegistry(status), {}, async () => targetRuntime(status));
-      await assert.doesNotReject(factory.preflight("configured-provider", "model-a"));
-    }
-  });
-
-  it("rejects unsupported source classes before any model request or secret resolution", async () => {
-    const statuses: CredentialStatus[] = [
-      { configured: true, source: "runtime" },
-      { configured: true, source: "models_json_command" },
-      { configured: true, source: "fallback" },
-    ];
-    for (const status of statuses) {
-      const factory = new WorkerRuntimeFactory(sourceRegistry(status), {}, async () => targetRuntime(status));
+    for (const [label, mutate] of changes) {
+      const changed = structuredClone(model) as any;
+      mutate(changed);
       await assert.rejects(
-        factory.preflight("configured-provider", "model-a"),
-        /credential source.*configured-provider.*unsupported/i,
+        new WorkerRuntimeFactory(sourceRegistry(), {}, async () => targetRuntime(undefined, changed))
+          .create("builtin-provider", "model-a"),
+        /request metadata differs.*reload/i,
+        label,
       );
     }
   });
 
-  it("requires reload after source class or long-cache compatibility metadata changes", async () => {
-    const parentStatus: CredentialStatus = { configured: true, source: "environment", label: "FIXTURE_PROVIDER_KEY" };
-    const source = sourceRegistry(parentStatus);
-    const changedStatus: CredentialStatus = { configured: true, source: "stored" };
-    const changedModel = { ...model, compat: { supportsLongCacheRetention: true } };
-    const factory = new WorkerRuntimeFactory(source, {}, async () => targetRuntime(changedStatus));
-
-    await assert.rejects(
-      factory.create("configured-provider", "model-a"),
-      /credential source.*environment.*stored.*reload/i,
+  it("rejects header provenance and extension-registered provider hooks without exposing values", async () => {
+    const withHeaders = { ...structuredClone(model), headers: { authorization: "SENTINEL_SECRET_HEADER" } } as Model<any>;
+    assert.throws(
+      () => new WorkerRuntimeFactory(sourceRegistry(undefined, withHeaders), {}, async () => targetRuntime()),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /header.*provenance.*cannot be proven/i);
+        assert.doesNotMatch(error.message, /SENTINEL_SECRET_HEADER|authorization/i);
+        return true;
+      },
     );
 
-    const sameSourceFactory = new WorkerRuntimeFactory(source, {}, async () => targetRuntime(parentStatus, changedModel));
-    await assert.rejects(
-      sameSourceFactory.create("configured-provider", "model-a"),
-      /compatibility metadata.*long cache retention.*reload/i,
+    let created = false;
+    const factory = new WorkerRuntimeFactory(
+      sourceRegistry(undefined, model, ["builtin-provider"]),
+      {},
+      async () => { created = true; return targetRuntime(); },
     );
+    await assert.rejects(factory.create("builtin-provider", "model-a"), /extension-registered.*readiness receipt.*no email was accepted/i);
+    assert.equal(created, false, "custom hooks are not replayed into a worker runtime");
+  });
+
+  it("rejects unsupported source classes before a model request", async () => {
+    for (const source of ["runtime", "models_json_command", "fallback"] as const) {
+      const status: CredentialStatus = { configured: true, source };
+      const factory = new WorkerRuntimeFactory(sourceRegistry(status), {}, async () => targetRuntime(status));
+      await assert.rejects(factory.preflight("builtin-provider", "model-a"), /credential source.*unsupported/i);
+    }
   });
 
   it("keeps readiness diagnostics to provider and source classes", async () => {
     const parent: CredentialStatus = { configured: true, source: "environment", label: "SENTINEL_PARENT_CREDENTIAL_LABEL" };
     const worker: CredentialStatus = { configured: true, source: "environment", label: "SENTINEL_WORKER_CREDENTIAL_LABEL" };
-    const factory = new WorkerRuntimeFactory(sourceRegistry(parent), {}, async () => targetRuntime(worker));
-    let error: unknown;
-    try {
-      await factory.create("configured-provider", "model-a");
-      assert.fail("expected readiness rejection");
-    } catch (failure) {
-      error = failure;
-    }
-    assert.ok(error instanceof Error);
-    assert.match(error.message, /configured-provider.*environment/i);
-    assert.doesNotMatch(error.message, /SENTINEL|CREDENTIAL_LABEL|https?:|authorization|bearer/i);
+    await assert.rejects(
+      new WorkerRuntimeFactory(sourceRegistry(parent), {}, async () => targetRuntime(worker))
+        .create("builtin-provider", "model-a"),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /builtin-provider.*environment/i);
+        assert.doesNotMatch(error.message, /SENTINEL|CREDENTIAL_LABEL|https?:|authorization|bearer/i);
+        return true;
+      },
+    );
   });
 
   it("fails clearly when the exact selected model is absent", async () => {
     const noModels = {
-      registerProvider() {},
-      registerNativeProvider() {},
       getModel: () => undefined,
       getProviderAuthStatus: () => ({ configured: true, source: "stored" }),
     } as unknown as ModelRuntime;
     await assert.rejects(
-      new WorkerRuntimeFactory(sourceRegistry(), {}, async () => noModels).create("configured-provider", "missing"),
-      /model configured-provider\/missing is not available in the worker runtime snapshot/i,
+      new WorkerRuntimeFactory(sourceRegistry(), {}, async () => noModels).create("builtin-provider", "missing"),
+      /model builtin-provider\/missing is not available/i,
     );
   });
 });

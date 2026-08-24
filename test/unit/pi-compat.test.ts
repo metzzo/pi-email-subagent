@@ -11,6 +11,7 @@ import {
   collectedReplyPresentationCapability,
   directMutationAliasSerializationCapability,
   processQuiescenceReceiptCapability,
+  sessionPresentationReceiptCapability,
 } from "../../src/pi-compat.ts";
 
 it("accepts the supported Pi public feature surface", () => {
@@ -22,6 +23,14 @@ it("fails closed on collected-reply presentation without a staged Pi receipt", (
   assert.equal(capability.supported, false);
   assert.match(capability.reason, /Pi 0\.81\.1.*no post-append acknowledgement/i);
   assert.match(capability.requiredCoreContract, /stable request\/reply\/toolCall\/result-entry.*callback.*before Pi continues/i);
+});
+
+it("characterizes every general Pi presentation kill point as unacknowledged", () => {
+  const capability = sessionPresentationReceiptCapability();
+  assert.equal(capability.supported, false);
+  assert.equal(capability.detailCode, "PI_0_81_1_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE");
+  for (const boundary of [/sendMessage/i, /prompt preflight/i, /steer/i, /followUp/i]) assert.match(capability.reason, boundary);
+  assert.match(capability.requiredCoreContract, /stable envelope.*post-append.*recoverable.*crash/i);
 });
 
 it("keeps process cleanup and mutation-alias integrations disabled without released authoritative contracts", () => {
@@ -102,11 +111,22 @@ it("probes every public startup and restore method before use", () => {
         "AgentSession.prototype.subscribe",
         "AgentSession.prototype.getActiveToolNames",
         "AgentSession.prototype.prompt",
-        "AgentSession.prototype.steer",
-        "AgentSession.prototype.followUp",
       ]) assert.match(error.message, new RegExp(feature.replaceAll(".", "\\.")));
       return true;
     },
+  );
+});
+
+it("probes AgentSession steer and followUp before worker registration", () => {
+  class IncompleteAgentSession {}
+  assert.throws(
+    () => assertPiRuntimeFeatures(
+      { ...PiCodingAgent, AgentSession: IncompleteAgentSession } as unknown as Record<string, unknown>,
+      PiAi as unknown as Record<string, unknown>,
+      PiTui as unknown as Record<string, unknown>,
+      TypeBox as unknown as Record<string, unknown>,
+    ),
+    /AgentSession\.prototype\.steer.*AgentSession\.prototype\.followUp/s,
   );
 });
 

@@ -392,7 +392,7 @@ export interface WorkerStartConfig {
   sessionDir: string;
   projectTrusted: boolean;
   systemPrompt: string;
-  sendEmail: (input: SendEmailInput) => Promise<SendEmailResult>;
+  sendEmail: (input: SendEmailInput, signal?: AbortSignal) => Promise<SendEmailResult>;
   fetchEmails: () => { emails: EmailEnvelope[]; total: number };
 }
 
@@ -441,8 +441,9 @@ export interface BrokerOptions {
   models: Model<any>[];
   preferredProvider?: string;
   mainAdapter: MainAdapter;
-  /** Deterministic new-identity readiness gate; runs before email.created. */
-  workerPreflight?: (model: Model<any>) => void | Promise<void>;
-  workerFactory: (model: Model<any>) => WorkerTransport | Promise<WorkerTransport>;
+  /** Prepares the exact new-identity runtime request object before email.created. */
+  workerPreflight?: (model: Model<any>) => unknown | Promise<unknown>;
+  /** Must consume the exact preparation returned above when one is supplied. */
+  workerFactory: (model: Model<any>, preparation?: unknown) => WorkerTransport | Promise<WorkerTransport>;
   projectTrusted: boolean;
 }

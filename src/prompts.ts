@@ -1,3 +1,4 @@
+import { isConfiguredWritable } from "./capability.ts";
 import type { AgentRecord, EmailEnvelope, SubagentConfig } from "./types.ts";
 import { DEFAULT_CONFIG, DEFAULT_MODEL_POLICY, isSafeConfigSemanticText, resolveAgentProfile } from "./config.ts";
 import { makeReplySubject } from "./reply.ts";
@@ -102,7 +103,6 @@ A terminal failure leaves every original obligation authoritative. Review Work a
 `;
 }
 
-const MUTATION_TOOLS = new Set(["bash", "edit", "write"]);
 export const CAPABILITY_SUMMARY_MAX_BYTES = 8 * 1024;
 export const CAPABILITY_SUMMARY_MAX_LINES = 64;
 export const CAPABILITY_SUMMARY_MAX_ADDRESS_ENTRIES = 24;
@@ -116,8 +116,8 @@ interface CapabilitySummaryEntry {
 
 export function effectiveRoleToolSummary(config: SubagentConfig): string {
   const describe = (label: string, profile: { tools: readonly string[]; canSpawn: boolean }): CapabilitySummaryEntry => {
-    const capability = profile.tools.some((tool) => MUTATION_TOOLS.has(tool)) ? "writable" : "read-only";
-    const delegation = profile.canSpawn ? "can delegate" : "delegation disabled";
+    const capability = isConfiguredWritable(profile.tools) ? "writable" : "read-only";
+    const delegation = "delegation disabled";
     return {
       label,
       line: `- ${label}: ${profile.tools.join(", ") || "(none)"} (${capability}, ${delegation})`,

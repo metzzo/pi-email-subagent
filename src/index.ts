@@ -7,7 +7,7 @@ import { makeMainAddress } from "./address.ts";
 import { AgentBroker } from "./broker.ts";
 import { isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
-import { WorkerRuntimeFactory } from "./model-runtime.ts";
+import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
 import { assertExtensionApiFeatures, assertSupportedPiRuntime } from "./pi-compat.ts";
 import { formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
@@ -81,9 +81,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   };
 
   const [sendTool, fetchTool] = createWorkerMailTools({
-    sendEmail: async (input) => {
+    sendEmail: async (input, signal) => {
       if (!broker) throw new Error("Email broker is not ready.");
-      return broker.send(broker.mainAddress, input);
+      return broker.send(broker.mainAddress, input, signal);
     },
     fetchEmails: () => {
       if (!broker) throw new Error("Email broker is not ready.");
@@ -329,9 +329,13 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       models: availableModels(ctx),
       preferredProvider: ctx.model?.provider,
       mainAdapter: adapter,
-      workerPreflight: async (model) => runtimeFactory.preflight(model.provider, model.id),
-      workerFactory: async (model) => {
-        const snapshot = await runtimeFactory.create(model.provider, model.id);
+      workerPreflight: (model) => runtimeFactory.preflight(model.provider, model.id),
+      workerFactory: async (model, preparation) => {
+        const snapshot = preparation as WorkerRuntimeSnapshot | undefined
+          ?? await runtimeFactory.create(model.provider, model.id);
+        if (snapshot.model.provider !== model.provider || snapshot.model.id !== model.id) {
+          throw new Error("Prepared worker runtime does not match the exact selected provider/model binding.");
+        }
         return new SdkWorker(snapshot.runtime, snapshot.model, workerSettings);
       },
       projectTrusted,

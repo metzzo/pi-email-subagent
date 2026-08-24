@@ -4,6 +4,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
+import { isConfiguredWritable } from "./capability.ts";
 import { isThinkingLevel } from "./config.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import type { AgentInspection, AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
@@ -601,8 +602,7 @@ export class DashboardComponent {
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg("accent", `${statusIcon(agent.state)} ${address}`));
         const runtimeTools = agent.activeTools ?? agent.tools;
-        const writable = runtimeTools.some((tool) => tool === "edit" || tool === "write" || tool === "bash"
-          || !["read", "grep", "find", "ls", "send_email", "fetch_emails"].includes(tool));
+        const writable = isConfiguredWritable(runtimeTools);
         const capabilityLabel = agent.activeTools ? "live" : "configured";
         lines.push(this.theme.fg("muted", `${displayStatus(agent.state)} · ${provider}/${modelId} · effort ${agent.effort} · ${capabilityLabel} ${writable ? "writable" : "read-only"}`));
         lines.push(this.theme.fg("dim", `[${this.tab === "work" ? "Work" : "work"}] [${this.tab === "activity" ? "Activity" : "activity"}] [${this.tab === "inbox" ? "Inbox" : "inbox"}] [${this.tab === "profile" ? "Profile/Lifecycle" : "profile/lifecycle"}]`));
