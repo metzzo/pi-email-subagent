@@ -8,7 +8,7 @@ import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, 
 import { clone, nowIso } from "./util.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const STATES = new Set<AgentStatus>(["queued", "spawning", "running", "idle", "failed", "stopped", "paused", "archived"]);
+const STATES = new Set<AgentStatus>(["queued", "spawning", "running", "idle", "parked", "failed", "stopped", "paused", "archived"]);
 const ACTIVITY_KINDS = new Set<ActivityItem["kind"]>(["status", "tool", "text", "error"]);
 const WORK_KINDS = new Set<WorkItem["kind"]>(["edit", "write", "shell", "custom"]);
 const WORK_STATUSES = new Set<WorkItem["status"]>(["running", "succeeded", "failed", "interrupted"]);

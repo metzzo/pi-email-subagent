@@ -30,6 +30,7 @@ function statusIcon(state: AgentRecord["state"]): string {
     case "running": return "●";
     case "queued": return "◷";
     case "idle": return "○";
+    case "parked": return "◫";
     case "failed": return "✗";
     case "spawning": return "◌";
     default: return "■";
@@ -791,6 +792,7 @@ export class UIController {
       const running = agents.filter((agent) => agent.state === "running").length;
       const queued = agents.filter((agent) => agent.state === "queued").length;
       const idle = agents.filter((agent) => agent.state === "idle").length;
+      const parked = agents.filter((agent) => agent.state === "parked").length;
       const failed = agents.filter((agent) => agent.state === "failed").length;
       const spawning = agents.filter((agent) => agent.state === "spawning").length;
       const cleanupUnknown = agents.filter((agent) => Boolean(agent.cleanup)).length;
@@ -800,7 +802,7 @@ export class UIController {
       const work = activeMutations.length ? ` · now ${activeMutations.slice(0, 2).join("; ")}${activeMutations.length > 2 ? ` +${activeMutations.length - 2}` : ""}` : "";
       const warning = conflicts.size ? ` · ⚠ ${conflicts.size} path conflict${conflicts.size === 1 ? "" : "s"}` : "";
       const capacity = ` · identity capacity ${this.snapshot.capacity.identitiesUsed}/${this.snapshot.capacity.identitiesLimit}${this.snapshot.capacity.identitiesUsed >= this.snapshot.capacity.identitiesLimit ? " FULL" : ""} · run slots ${this.snapshot.capacity.runSlotsUsed}/${this.snapshot.capacity.runSlotsLimit}`;
-      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${capacity}${work}${warning}`, 240);
+      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${parked ? ` · ${parked} parked` : ""}${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${capacity}${work}${warning}`, 240);
       // The below-editor widget is the canonical agents bar. Clear the legacy
       // footer status instead of rendering a redundant, unaligned `agents:0/1`.
       this.ctx.ui.setStatus("pi-email-subagent", undefined);

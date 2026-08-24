@@ -4,7 +4,7 @@ import type { Model } from "@earendil-works/pi-ai";
 export type EmailPriority = "high" | "low";
 export type EmailKind = "request" | "reply";
 export type DeliveryState = "queued" | "delivered" | "failed" | "cancelled";
-export type AgentStatus = "queued" | "spawning" | "running" | "idle" | "failed" | "stopped" | "paused" | "archived";
+export type AgentStatus = "queued" | "spawning" | "running" | "idle" | "parked" | "failed" | "stopped" | "paused" | "archived";
 
 export interface ModelBinding {
   provider: string;
