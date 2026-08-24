@@ -285,6 +285,17 @@ function planMain(messages: readonly Message[]): Plan {
       ],
     };
   }
+  if (lastText.includes("E2E NATIVE PROVIDER REJECT")) {
+    return { toolCalls: [{
+      name: "send_email",
+      arguments: {
+        to: "worker.native@unsafe-native-model.com",
+        subject: "Unsafe native provider must fail before mail",
+        message: "Do not invoke provider hooks.",
+        priority: "low",
+      },
+    }] };
+  }
   if (lastText.includes("E2E SEND INVALID")) {
     return {
       toolCalls: [

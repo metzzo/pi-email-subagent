@@ -1,3 +1,4 @@
+import { isEmailModelId } from "./address.ts";
 import { isConfiguredWritable } from "./capability.ts";
 import type { AgentRecord, EmailEnvelope, SubagentConfig } from "./types.ts";
 import { DEFAULT_CONFIG, DEFAULT_MODEL_POLICY, isSafeConfigSemanticText, resolveAgentProfile } from "./config.ts";
@@ -34,6 +35,37 @@ export function formatUnanswered(emails: readonly EmailEnvelope[]): string {
   return `UNANSWERED EMAILS (${emails.length})\n\n${formatEmailBatch(emails)}`;
 }
 
+export const AVAILABLE_MODEL_SECTION_MAX_BYTES = 6 * 1024;
+export const AVAILABLE_MODEL_SECTION_MAX_LINES = 52;
+export const AVAILABLE_MODEL_SECTION_MAX_ENTRIES = 48;
+
+function availableModelSection(modelIds: readonly string[]): string {
+  const valid = [...new Set(modelIds
+    .filter(isEmailModelId)
+    .map((modelId) => modelId.toLowerCase()))].sort();
+  const render = (shown: readonly string[]): string => {
+    const omitted = valid.length - shown.length;
+    const status = omitted > 0
+      ? `List status: partial; ${shown.length} of ${valid.length} routable model IDs shown.`
+      : `List status: complete; all ${valid.length} routable model IDs shown.`;
+    const omission = omitted > 0
+      ? `\n${omitted} routable model IDs omitted; use inspect_agent for an exact prospective routing and capability decision.`
+      : "";
+    return `<available-email-models>\n${status}\n${shown.join("\n") || "(none)"}${omission}\n</available-email-models>`;
+  };
+
+  const shown: string[] = [];
+  for (const modelId of valid) {
+    if (shown.length >= AVAILABLE_MODEL_SECTION_MAX_ENTRIES) break;
+    const candidate = [...shown, modelId];
+    const section = render(candidate);
+    if (section.split("\n").length > AVAILABLE_MODEL_SECTION_MAX_LINES
+      || Buffer.byteLength(section, "utf8") > AVAILABLE_MODEL_SECTION_MAX_BYTES) break;
+    shown.push(modelId);
+  }
+  return render(shown);
+}
+
 export function sharedMailPrompt(
   identity: { address: string; modelId: string; effort: string },
   modelIds: readonly string[],
@@ -57,9 +89,7 @@ You can communicate with other agents using:
 Subagents use \`<name>.<task-slug>@<model>.com\`. The main Pi thread uses \`main@<model>.com\`.
 Only use these currently routable model IDs:
 
-<available-email-models>
-${modelIds.map(xml).join("\n") || "(none)"}
-</available-email-models>
+${availableModelSection(modelIds)}
 
 Never invent or guess a model name. The address domain is a model ID, not a provider ID. For an unknown address, a globally unique model ID is selected directly; a duplicate ID is selectable only when the current main provider identifies exactly one candidate. The first accepted mail persists that provider/model binding. Sending to an existing address reuses its persistent identity and exact original provider/model regardless of later main-model or catalog preference changes; no same-ID cross-provider substitution occurs. Provider catalog/configuration changes require an extension reload. An optional \`effort\` override (\`off|minimal|low|medium|high|xhigh|max\`) is accepted only on the first send that creates an unknown identity and is then persisted.
 
@@ -86,7 +116,7 @@ Mail-journal acceptance is durable and every envelope has a stable email ID. Pi 
 
 Pi core owns automatic Pi agent retries. Do not automatically re-prompt, restart, re-send an accepted envelope, switch providers, or replay work because a provider/transport attempt failed. A live Pi-managed retry remains active; wait for settlement because it is not terminal.
 
-A terminal failure leaves every original obligation authoritative. Review Work and Conversation; absence of recorded work is not proof of no effect. Recovery of possible-effect work is explicit and uses the same identity, persistent session, and provider binding. Do not redelegate the same possible-effect scope while the original obligation remains open unless the user explicitly chooses that duplicate-effect risk and resolves the original obligation. Failed recipients queue mail and require explicit restart. Cleanup quarantine for process-capable risk has no automatic release on Pi 0.81.1.
+A terminal failure leaves every original obligation authoritative. Review Work and Conversation; absence of recorded work is not proof of no effect. Recovery of possible-effect work is explicit and uses the same identity, persistent session, and provider binding. Never redelegate the same possible-effect scope while the original obligation remains open; resolve the original obligation before assigning any distinct replacement scope. Failed recipients queue mail and require explicit restart. Cleanup quarantine for process-capable risk has no automatic release on Pi 0.81.1.
 
 ### Required email etiquette
 
@@ -184,7 +214,7 @@ ${capabilitySummary}
 
 A delegation email must be self-contained: include the objective, relevant paths/context, constraints, whether changes are allowed, expected response, and validation required. For coding or other repository-change work, explicitly authorize and require the recipient to edit the relevant files and to run appropriate validation. If the work must be read-only, say so explicitly instead; never imply edit permission for a read-only task. Parallel writers must have disjoint files or clearly disjoint scopes; otherwise use one writer and, only when beneficial, one read-only reviewer.
 
-Once you delegate a scope, do not independently perform that delegated work or silently take it back. You may inspect the same files to coordinate, review the result, and run validation, and you may continue useful work outside the delegated scope. If the recipient fails, stalls, or returns only suggestions for authorized implementation work, make at most one justified recovery attempt by explicitly restarting that same identity after effect review. Do not delegate the same possible-effect scope while its original obligation remains open unless the user explicitly accepts the duplicate-effect risk and resolves that obligation. If that same-identity recovery is not justified or fails, then report the failure or blocker to the user. Do not conceal a delegation failure by completing the scope yourself.
+Once you delegate a scope, do not independently perform that delegated work or silently take it back. You may inspect the same files to coordinate, review the result, and run validation, and you may continue useful work outside the delegated scope. If the recipient fails, stalls, or returns only suggestions for authorized implementation work, make at most one justified recovery attempt by explicitly restarting that same identity after effect review. Never delegate the same possible-effect scope while its original obligation remains open. If that same-identity recovery is not justified or fails, then report the failure or blocker to the user. Do not conceal a delegation failure by completing the scope yourself.
 
 Use low priority for ordinary delegation. A nonexistent recipient is idle, so low mail still starts it immediately. After delegating, continue useful work instead of polling. Before giving the user a final answer, call \`fetch_emails()\` and answer every response-required email returned by \`fetch_emails()\`, not only those judged relevant to the current task.
 
@@ -225,7 +255,7 @@ Execute the requested task with its objective, scope, constraints, and deliverab
 
 If work is incomplete, still reply with what was completed, what remains, why you are blocked, and the requester's next step. Do not merely print a result in assistant text; send it with \`send_email\`.
 
-You remain responsible for the requested result. Do not redelegate by default. You may redelegate only a genuinely independent, self-contained work package with a clear benefit, using one relevant existing agent where possible rather than redundant identities. Never use redelegation to replace your own assigned scope or obligation to the requester.
+You remain responsible for the requested result. Do not redelegate. Nested delegation is disabled, so complete your assigned scope yourself or report the concrete blocker to the main thread.
 `;
 }
 

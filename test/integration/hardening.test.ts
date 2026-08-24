@@ -8,7 +8,6 @@ import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { MailStore } from "../../src/mail-store.ts";
 import { makeReplySubject } from "../../src/reply.ts";
 import type { MainDelivery, SubagentConfig, WorkerStartConfig } from "../../src/types.ts";
-import { appendRecent, emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
 import { createWorkerFactory, eventually, FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
 
 async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string, main = new FakeMainAdapter()) {
@@ -26,12 +25,6 @@ async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string
   });
   await broker.init();
   return { root, broker, workers, main };
-}
-
-function delegatingRoles(): SubagentConfig["roles"] {
-  const roles = structuredClone(DEFAULT_CONFIG.roles);
-  roles.worker!.canSpawn = true;
-  return roles;
 }
 
 async function answerAndSettle(broker: AgentBroker, worker: FakeWorker, request: { id: string; subject: string }) {
@@ -256,15 +249,18 @@ describe("broker hardening", () => {
     }
   });
 
-  it.skip("legacy child reply queue (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
+  it("restores a canonical queued legacy child reply without re-enabling delegation", async () => {
+    const { broker, workers } = await setup();
     try {
       const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.failed-parent@gpt-5.4.com", subject: "Parent", message: "Delegate once.", priority: "low",
+        to: "worker.failed-parent@gpt-5.4.com", subject: "Parent", message: "Legacy child fixture.", priority: "low",
       });
+      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
+      records.get(upstream.envelope.to)!.canSpawn = true;
       const childRequest = await workers[0]!.send({
         to: "worker.failed-child@gpt-5.4.com", subject: "Child", message: "Return a child result.", priority: "low",
       });
+      records.get(upstream.envelope.to)!.canSpawn = false;
       workers[0]!.fail("parent failed before child reply");
       await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "failed"));
 
@@ -335,15 +331,18 @@ describe("broker hardening", () => {
     }
   });
 
-  it.skip("legacy parked parent child reply (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
+  it("wakes a parked parent for an exact canonical legacy child reply", async () => {
+    const { broker, workers } = await setup();
     try {
       const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.parked-parent@gpt-5.4.com", subject: "Upstream", message: "Delegate and wait.", priority: "low",
+        to: "worker.parked-parent@gpt-5.4.com", subject: "Upstream", message: "Legacy child fixture.", priority: "low",
       });
+      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
+      records.get(upstream.envelope.to)!.canSpawn = true;
       const child = await workers[0]!.send({
         to: "worker.parked-child@gpt-5.4.com", subject: "Child", message: "Return the dependency result.", priority: "low",
       });
+      records.get(upstream.envelope.to)!.canSpawn = false;
 
       workers[0]!.settle("Interim text must not answer upstream.");
       await eventually(() => {
@@ -445,132 +444,17 @@ describe("broker hardening", () => {
     } finally { await broker.shutdown(); }
   });
 
-  it.skip("legacy child-answer transition (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.fast-parent@gpt-5.4.com", subject: "Fast parent", message: "Delegate and answer after the child.", priority: "low",
-      });
-      const child = await workers[0]!.send({
-        to: "worker.fast-child@gpt-5.4.com", subject: "Fast child", message: "Reply quickly.", priority: "low",
-      });
-      workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "parked"));
-
-      const originalPrompt = workers[0]!.prompt.bind(workers[0]!);
-      let fastUpstreamReply: Promise<unknown> | undefined;
-      workers[0]!.prompt = async (message) => {
-        await originalPrompt(message);
-        if (message.includes("Fast child result")) {
-          fastUpstreamReply = workers[0]!.send({
-            to: broker.mainAddress,
-            subject: upstream.expectedReplySubject!,
-            message: "Upstream result after the committed child answer.",
-            priority: "low",
-          });
-        }
-      };
-
-      const childReply = await workers[1]!.send({
-        to: upstream.envelope.to,
-        subject: child.expectedReplySubject!,
-        message: "Fast child result.",
-        priority: "low",
-      });
-      assert.ok(fastUpstreamReply, "resumed parent issued its upstream reply during the accepted prompt run");
-      await fastUpstreamReply;
-      assert.equal(broker.mailStore.get(child.envelope.id)?.answeredBy, childReply.envelope.id);
-      assert.ok(broker.mailStore.get(upstream.envelope.id)?.answeredAt);
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
-  it.skip("legacy child admission serialization (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.atomic-parent@gpt-5.4.com", subject: "Atomic", message: "Exercise the admission boundary.", priority: "low",
-      });
-      let releaseAccept!: () => void;
-      let enteredAccept!: () => void;
-      const acceptEntered = new Promise<void>((resolve) => { enteredAccept = resolve; });
-      const acceptRelease = new Promise<void>((resolve) => { releaseAccept = resolve; });
-      const realAccept = broker.mailStore.accept.bind(broker.mailStore);
-      broker.mailStore.accept = async (email) => {
-        if (email.from === upstream.envelope.to && email.to === "worker.atomic-child@gpt-5.4.com") {
-          enteredAccept();
-          await acceptRelease;
-        }
-        await realAccept(email);
-      };
-
-      const childSend = workers[0]!.send({
-        to: "worker.atomic-child@gpt-5.4.com", subject: "Child", message: "Commit dependency first.", priority: "low",
-      });
-      await acceptEntered;
-      const upstreamReply = workers[0]!.send({
-        to: broker.mainAddress,
-        subject: upstream.expectedReplySubject!,
-        message: "Must lose after the dependency commits.",
-        priority: "low",
-      });
-      const rejectedReply = assert.rejects(upstreamReply, /outgoing child dependency.*still open/i);
-      releaseAccept();
-      const child = await childSend;
-      await rejectedReply;
-      broker.mailStore.accept = realAccept;
-
-      assert.equal(broker.mailStore.get(child.envelope.id)?.deliveryState, "delivered");
-      assert.equal(broker.mailStore.get(upstream.envelope.id)?.replyReservedBy, undefined);
-      const journal = (await readFile(join((broker as any).options.namespaceDir, "mail.jsonl"), "utf8"))
-        .split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; id?: string });
-      assert.equal(journal.some((event) => event.type === "email.reply_reserved" && event.id === upstream.envelope.id), false);
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
-  it.skip("legacy child blocker reply (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.blocker-parent@gpt-5.4.com", subject: "Parent", message: "Delegate child.", priority: "low",
-      });
-      const child = await workers[0]!.send({
-        to: "worker.blocker-child@gpt-5.4.com", subject: "Child private subject", message: "PRIVATE CHILD BODY", priority: "low",
-      });
-      workers[1]!.fail("RAW PRIVATE PROVIDER FAILURE");
-
-      await eventually(() => {
-        const original = broker.mailStore.get(child.envelope.id)!;
-        assert.ok(original.replyReservedBy);
-        const blocker = broker.mailStore.get(original.replyReservedBy!)!;
-        assert.equal(blocker.kind, "reply");
-        assert.equal(blocker.inReplyTo, child.envelope.id);
-        assert.match(blocker.message, new RegExp(child.envelope.id));
-        assert.match(blocker.message, /worker\.blocker-child@gpt-5\.4\.com.*openai-codex\/gpt-5\.4/is);
-        assert.match(blocker.message, /not proof of pre-tool failure/i);
-        assert.match(blocker.message, /effect review.*explicit.*same identity/i);
-        assert.doesNotMatch(blocker.message, /RAW PRIVATE PROVIDER FAILURE|PRIVATE CHILD BODY/);
-      });
-      await (broker as any).ensureTerminalChildBlockers(broker.getSnapshot().agents.find((agent) => agent.address === child.envelope.to));
-      const blockerReplies = broker.mailStore.list().filter((email) => email.kind === "reply" && email.inReplyTo === child.envelope.id);
-      assert.equal(blockerReplies.length, 1, "recovery scans are idempotent by exact child request ID");
-      assert.equal(broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined);
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
-  it.skip("legacy child blocker recovery (nested delegation is fail-closed disabled)", async () => {
-    const first = await setup({ roles: delegatingRoles() });
+  it("recovers one terminal blocker from canonical pre-upgrade child journal state", async () => {
+    const first = await setup();
     const upstream = await first.broker.send(first.broker.mainAddress, {
-      to: "worker.crash-parent@gpt-5.4.com", subject: "Parent", message: "Delegate before simulated crash.", priority: "low",
+      to: "worker.crash-parent@gpt-5.4.com", subject: "Parent", message: "Legacy child fixture.", priority: "low",
     });
+    const records = (first.broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
+    records.get(upstream.envelope.to)!.canSpawn = true;
     const child = await first.workers[0]!.send({
       to: "worker.crash-child@gpt-5.4.com", subject: "Child", message: "Remain open across recovery.", priority: "low",
     });
+    records.get(upstream.envelope.to)!.canSpawn = false;
     await first.broker.shutdown();
 
     const registryPath = join(first.root, "state", "registry.json");
@@ -580,7 +464,7 @@ describe("broker hardening", () => {
     failedChild.failure = "simulated crash before blocker journal commit";
     await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
 
-    const afterBeforeCommit = await setup({ roles: delegatingRoles() }, first.root);
+    const afterBeforeCommit = await setup({}, first.root);
     try {
       await eventually(() => {
         const blockers = afterBeforeCommit.broker.mailStore.list().filter((email) =>
@@ -592,78 +476,13 @@ describe("broker hardening", () => {
       await afterBeforeCommit.broker.shutdown();
     }
 
-    const afterCommittedCrash = await setup({ roles: delegatingRoles() }, first.root);
+    const afterCommittedCrash = await setup({}, first.root);
     try {
       const blockers = afterCommittedCrash.broker.mailStore.list().filter((email) =>
         email.kind === "reply" && email.inReplyTo === child.envelope.id);
       assert.equal(blockers.length, 1, "post-commit recovery never creates a replacement blocker ID");
     } finally {
       await afterCommittedCrash.broker.shutdown();
-    }
-  });
-
-  it.skip("legacy child blocker effects (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
-    try {
-      await broker.send(broker.mainAddress, {
-        to: "worker.effect-parent@gpt-5.4.com", subject: "Parent", message: "Delegate effectful child.", priority: "low",
-      });
-      const child = await workers[0]!.send({
-        to: "worker.effect-child@gpt-5.4.com", subject: "Child", message: "PRIVATE EFFECT TASK", priority: "low",
-      });
-      workers[1]!.record!.work = emptyWorkState();
-      workers[1]!.record!.work!.currentBatchId = 1;
-      appendRecent(workers[1]!.record!.work!, finishWorkItem(
-        startWorkItem("effect-shell", "bash", { command: "echo PRIVATE_EFFECT" }, 1, "/work")!,
-        {},
-        false,
-      ));
-      workers[1]!.fail("PRIVATE FAILURE");
-      await eventually(() => {
-        const request = broker.mailStore.get(child.envelope.id)!;
-        const blocker = broker.mailStore.get(request.replyReservedBy!)!;
-        assert.match(blocker.message, /work evidence indicates.*effects may exist/i);
-        assert.doesNotMatch(blocker.message, /PRIVATE_EFFECT|PRIVATE EFFECT TASK|PRIVATE FAILURE/);
-      });
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
-  it.skip("legacy queued child reply (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
-    try {
-      const mainRequest = await broker.send(broker.mainAddress, {
-        to: "worker.sender@gpt-5.4.com", subject: "Parent work", message: "Coordinate child.", priority: "low",
-      });
-      const sender = workers[0]!;
-      const childRequest = await sender.send({
-        to: "worker.responder@gpt-5.4.com", subject: "Child work", message: "Reply to sender.", priority: "low",
-      });
-      const responder = workers[1]!;
-      await responder.send({
-        to: sender.record!.address,
-        subject: makeReplySubject(childRequest.envelope.id, childRequest.envelope.subject),
-        message: "This queued reply will fail delivery.",
-        priority: "low",
-      });
-      responder.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(responder.record!.address).state, "idle"));
-      sender.prompt = async () => { throw new Error("queued prompt rejected"); };
-      sender.settle();
-
-      await eventually(() => assert.equal(broker.inspectAgent(sender.record!.address).state, "failed"));
-      const reserved = broker.mailStore.get(childRequest.envelope.id);
-      assert.ok(reserved?.replyReservedBy, "failed parent delivery keeps the exact child reply reserved");
-      assert.equal(responder.prompts.length, 1, "the child is not re-enforced for an already accepted blocker/result");
-
-      await broker.restart(sender.record!.address);
-      await eventually(() => assert.equal(workers[2]!.prompts.length, 1));
-      assert.match(workers[2]!.prompts[0]!, /This queued reply will fail delivery/);
-      assert.equal(broker.mailStore.get(childRequest.envelope.id)?.answeredBy, reserved!.replyReservedBy);
-      assert.equal(broker.mailStore.get(mainRequest.envelope.id)?.answeredAt, undefined);
-    } finally {
-      await broker.shutdown();
     }
   });
 
@@ -957,16 +776,19 @@ describe("broker hardening", () => {
     }
   });
 
-  it.skip("legacy nested outgoing archive blocker (nested delegation is fail-closed disabled)", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
+  it("keeps canonical legacy outgoing child requests as archive blockers", async () => {
+    const { broker, workers } = await setup();
     try {
       const parent = await broker.send(broker.mainAddress, {
-        to: "worker.outbound-owner@gpt-5.4.com", subject: "Parent", message: "Delegate child.", priority: "low",
+        to: "worker.outbound-owner@gpt-5.4.com", subject: "Parent", message: "Legacy child fixture.", priority: "low",
       });
       const owner = workers[0]!;
+      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
+      records.get(parent.envelope.to)!.canSpawn = true;
       await owner.send({
         to: "worker.outbound-peer@gpt-5.4.com", subject: "Outstanding child", message: "Do not reply yet.", priority: "low",
       });
+      records.get(parent.envelope.to)!.canSpawn = false;
       await broker.stop(owner.record!.address);
       assert.equal(broker.mailStore.get(parent.envelope.id)?.answeredAt, undefined);
       await assert.rejects(broker.archive(owner.record!.address), /queued mail or unanswered obligations/);
