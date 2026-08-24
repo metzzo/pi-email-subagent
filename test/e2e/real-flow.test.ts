@@ -449,7 +449,7 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.deepEqual(result.items.map((item) => [item.requestId, item.state]), [[requestId, "pending"]]);
       assert.match(toolText(waitEnd), /pending requests remain correlated/i);
       assert.match(toolText(waitEnd), /ordinary main presentation is attempted.*no durable.*acknowledgement/i);
-      assert.match(toolText(waitEnd), /no immediate.*wait_for_replies.*keep.*alive/i);
+      assert.match(toolText(waitEnd), /no immediate keepalive rejoin/i);
 
       const mainCompletion = await client.waitFor(
         assistantText("E2E WAIT WINDOW ENDED"),
