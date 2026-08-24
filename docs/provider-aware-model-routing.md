@@ -56,10 +56,10 @@ When an existing exact tuple is absent:
 - its original address, provider, model ID, session file, mailbox, effort, lifecycle, tools/profile, and creation time remain inspectable;
 - active/restorable state becomes failed/unavailable, while stopped or archived lifecycle state is preserved;
 - no worker or ordinary activation lease is created (a pre-existing cleanup quarantine still retains its safety ownership);
-- send/restart fails before accepting replacement mail; and
+- ordinary mail to the known failed identity is accepted and queued under its stable ID without catalog re-resolution, while explicit restart fails until the exact tuple returns; and
 - diagnostics name the persisted binding and explicitly say it was not rebound.
 
-Unrelated valid records continue restoring. Reintroducing the exact provider/model on a later process start permits the original identity/session to restore. Provider rename is removal plus addition; there is no automatic alias or migration.
+Unrelated valid records continue restoring. Reintroducing the exact provider/model on a later process start makes explicit same-identity restart available, but does not automatically create a worker from the failed state; queued mail stays queued until that operator action. Provider rename is removal plus addition; there is no automatic alias or migration.
 
 ## Observability and privacy
 

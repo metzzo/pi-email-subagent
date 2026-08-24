@@ -296,10 +296,18 @@ describe("real Pi provider-aware durable routing", { concurrency: false }, () =>
       registry = await eventuallyRegistry(
         agentDir,
         returned.sessionId,
-        (value) => agent(value, ALPHA_ADDRESS).state !== "failed" && agent(value, ALPHA_ADDRESS).provider === ALPHA,
-        "reintroduced exact alpha restored",
+        (value) => agent(value, ALPHA_ADDRESS).state === "failed" && agent(value, ALPHA_ADDRESS).provider === ALPHA,
+        "reintroduced exact alpha remains failed pending explicit restart",
       );
       assert.equal(agent(registry, ALPHA_ADDRESS).sessionFile, alphaSession);
+      const explicitRestart = await promptManage(current, "E2E ROUTE RESTART ALPHA");
+      assert.match(resultText(explicitRestart), /restart completed.*State: (idle|running)/is);
+      registry = await eventuallyRegistry(
+        agentDir,
+        returned.sessionId,
+        (value) => agent(value, ALPHA_ADDRESS).state !== "failed",
+        "explicitly restarted alpha",
+      );
       assert.deepEqual([...new Set(assistantProviders(alphaSession))], [ALPHA]);
 
       const journal = await readJournal(agentDir, returned.sessionId);
