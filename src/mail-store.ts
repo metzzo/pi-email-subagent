@@ -7,7 +7,7 @@ import { isThinkingLevel, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.
 import type { EmailEnvelope, LifecyclePolicy, ModelBinding } from "./types.ts";
 import { byteLength, clone, nowIso } from "./util.ts";
 
-type MailEvent =
+export type MailEvent =
   | { type: "email.created"; email: EmailEnvelope }
   | { type: "email.delivered"; id: string; at: string }
   | { type: "email.failed"; id: string; at: string; error: string }
@@ -125,7 +125,7 @@ function parseEmail(value: unknown): EmailEnvelope {
   return email;
 }
 
-function parseEvent(value: unknown): MailEvent {
+export function parseMailEvent(value: unknown): MailEvent {
   const raw = object(value, "mail event");
   const type = string(raw.type, "mail event.type");
   if (type === "email.created") return { type, email: parseEmail(raw.email) };
@@ -218,7 +218,7 @@ export class MailStore {
         continue;
       }
       try {
-        this.apply(parseEvent(parsed));
+        this.apply(parseMailEvent(parsed));
         validLines.push(line);
       } catch (error) {
         throw new Error(`Corrupt mail journal at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);

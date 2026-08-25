@@ -31,11 +31,18 @@ npm run test:package
 Optional paid-provider acceptance:
 
 ```bash
-LIVE_MODEL=openai-codex/gpt-5.6-terra \
-LIVE_EMAIL_MODEL=k3 \
-LIVE_EXTENSIONS=pi-provider-kimi-code \
+LIVE_MODEL=openai-codex/gpt-5.6-sol \
+LIVE_EMAIL_MODEL=gpt-5.6-sol \
 npm run test:live
 ```
+
+The helper requires the CLI and email model IDs to match. It waits for the
+main `agent_end`/`agent_settled` boundary plus a bounded grace (configurable
+with `LIVE_SETTLE_GRACE_MS`), validates the canonical registry and mail
+journal, and writes a secret-free summary under `.test-workspaces/live-e2e`.
+A clean namespace is removed only after that evidence is saved and read back;
+failed or incomplete namespaces are preserved for investigation. Provider
+extensions can still be supplied with `LIVE_EXTENSIONS`.
 
 ## Change expectations
 

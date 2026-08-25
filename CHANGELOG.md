@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
+- The optional paid live-provider helper now waits for final main settlement plus a bounded grace, rejects RPC/tool/extension and canonical namespace inconsistencies, preserves unsafe state, and removes only verified-clean namespaces after secret-free evidence is saved and read back.
 - Removed mechanical completion replies: only an exact successful `send_email` reply closes a mail obligation, while final assistant text remains session-local and exhausted enforcement leaves requests unanswered.
 - Known failed recipients now accept and preserve queued mail without catalog re-resolution, attached-worker routing, implicit replacement, or automatic recovery when a removed exact binding returns; only explicit same-identity restart can resume delivery.
 - `canSpawn` is retained only as parsed legacy configuration. Nested response-required delegation is fail-closed disabled for every subagent on Pi 0.81.1; exact replies plus ordinary mail to main remain available.
