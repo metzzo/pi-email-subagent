@@ -39,11 +39,14 @@ describe("release contract truth", () => {
       assert.match(value, /operator-attested|operator attestation/i, path);
       assert.match(value, /not Pi-verified|Pi did not verify/i, path);
       assert.match(value, /capacity pressure.*never authorization/i, path);
+      assert.match(value, /human-command-only|human-only.*\/agents recover-cleanup|no model-callable/i, path);
+      assert.match(value, /never (?:automatically |auto-?)?(?:restore|restart|create).*worker|no automatic (?:restore|restart)/i, path);
     }
     for (const path of ["README.md", "docs/lifecycle.md", "docs/manage-agent.md"]) {
       const value = await text(path);
       assert.match(value, /exit the live owner[\s\S]*resume the same session[\s\S]*startup(?:\s|\*)+fails[\s\S]*recover-cleanup[\s\S]*\/reload[\s\S]*(restart|archive)/i, path);
       assert.match(value, /clone.*fresh mailbox.*(?:does not|cannot).*recover.*old obligations/i, path);
+      assert.match(value, /cleanup-recovery\.guard[\s\S]*(?:manually|deliberately) remove|(?:manually|deliberately) remove[\s\S]*cleanup-recovery\.guard/i, path);
     }
   });
 

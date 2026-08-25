@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { AgentBroker } from "../../src/broker.ts";
+import { executeCleanupRecoveryCommand } from "../../src/cleanup-recovery.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
+import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import { makeReplySubject } from "../../src/reply.ts";
 import type { AgentRecord } from "../../src/types.ts";
 import { FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
@@ -27,9 +29,19 @@ async function brokerAt(root: string, workers: FakeWorker[] = []): Promise<Agent
   return broker;
 }
 
+async function waitForDelivery(broker: AgentBroker, id: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (broker.mailStore.get(id)?.deliveryState === "delivered") return;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 10));
+  }
+  assert.fail(`mail ${id} was not delivered after explicit restart`);
+}
+
 async function seedPersistedUnknown(root: string, overrides: Record<string, unknown> = {}): Promise<void> {
   const first = await brokerAt(root);
-  await first.send(first.mainAddress, { to: ADDRESS, subject: "Original", message: "Preserve this obligation.", priority: "low" });
+  const original = await first.send(first.mainAddress, { to: ADDRESS, subject: "Original", message: "Create the durable identity.", priority: "low" });
+  await first.stop(ADDRESS);
+  await first.cancelRequest(original.envelope.id, "Fixture closes the identity-creation request.");
   await first.shutdown();
   const path = join(root, "state", "registry.json");
   const registry = JSON.parse(await readFile(path, "utf8")) as any;
@@ -81,14 +93,8 @@ describe("explicit cleanup-quarantine recovery", () => {
       });
       assert.equal(queued.envelope.deliveryState, "queued");
       queuedId = queued.envelope.id;
-      const deferred = await broker.send(broker.mainAddress, {
-        to: "worker.deferred-release@gpt-5.4.com",
-        subject: "Deferred by quarantine",
-        message: "Do not deliver during recovery.",
-        priority: "low",
-      });
-      assert.equal(deferred.envelope.deliveryState, "queued");
-      assert.equal(broker.inspectAgent(deferred.envelope.to).capacityAvailable, false, "cleanup quarantine holds mutable admission");
+      const deferredAddress = "worker.deferred-release@gpt-5.4.com";
+      assert.equal(broker.inspectAgent(deferredAddress).capacityAvailable, false, "cleanup quarantine holds mutable admission");
       const before = broker.getSnapshot().capacity;
 
       const audit = await broker.recoverCleanup(ADDRESS, 9, EVIDENCE);
@@ -110,8 +116,7 @@ describe("explicit cleanup-quarantine recovery", () => {
       assert.equal(inspection.holdsActivationLease, true, "operator release is not archive");
       assert.equal(workers.length, 0, "recovery never creates a worker");
       assert.equal(broker.mailStore.get(queued.envelope.id)?.deliveryState, "queued", "recovery never delivers target mail");
-      assert.equal(broker.mailStore.get(deferred.envelope.id)?.deliveryState, "queued", "recovery never pumps deferred mail");
-      assert.equal(broker.inspectAgent(deferred.envelope.to).capacityAvailable, true, "exact quarantine capacity is released");
+      assert.equal(broker.inspectAgent(deferredAddress).capacityAvailable, true, "exact quarantine capacity is released without spawning");
 
       const persisted = await storedRecord(root);
       assert.equal(persisted.cleanup, undefined);
@@ -122,15 +127,63 @@ describe("explicit cleanup-quarantine recovery", () => {
       await broker.shutdown();
     }
 
-    const restored = await brokerAt(root);
+    const restoredWorkers: FakeWorker[] = [];
+    const restored = await brokerAt(root, restoredWorkers);
     try {
       const inspection = restored.inspectAgent(ADDRESS);
       assert.equal(inspection.cleanup, undefined);
       assert.equal(inspection.state, "failed");
       assert.equal(inspection.lastCleanupRecovery?.source, "operator-attested");
       assert.equal(restored.mailStore.get(queuedId)?.deliveryState, "queued");
+      assert.equal(restoredWorkers.length, 0, "operator-released must never auto-restore a worker");
+
+      await restored.restart(ADDRESS);
+      assert.equal(restoredWorkers.length, 1, "a later explicit restart creates exactly one worker");
+      await waitForDelivery(restored, queuedId);
+      const restarted = restored.getSnapshot().agents.find((candidate) => candidate.address === ADDRESS)!;
+      assert.equal(restarted.workerEpoch?.generation, 10);
+      assert.equal(restarted.workerEpoch?.phase, "activated");
+
+      const beforeStaleRetry = await readFile(join(root, "state", "registry.json"), "utf8");
+      await assert.rejects(executeCleanupRecoveryCommand(
+        `recover-cleanup ${ADDRESS} 9 --confirm ${EVIDENCE}`,
+        restored,
+        join(root, "state"),
+      ), /stale|current.*generation|no cleanup quarantine/i);
+      assert.equal(await readFile(join(root, "state", "registry.json"), "utf8"), beforeStaleRetry);
     } finally {
       await restored.shutdown();
+    }
+  });
+
+  it("keeps manage_agent mechanically unable to recover byte-identical quarantine while the direct human command succeeds", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-command-boundary-"));
+    await seedPersistedUnknown(root);
+    const broker = await brokerAt(root);
+    try {
+      const registryPath = join(root, "state", "registry.json");
+      const before = await readFile(registryPath, "utf8");
+      const manage = createMainCoordinationTools(() => broker)[3];
+      await assert.rejects(manage.execute("forged-recovery", {
+        address: ADDRESS,
+        action: "recover_cleanup",
+        workerGeneration: 9,
+        operatorEvidence: "Model-forged evidence must never be accepted.",
+      } as never, undefined, undefined, {} as never), /unsupported.*action|could not manage/i);
+      assert.equal(await readFile(registryPath, "utf8"), before, "model tool attempt must preserve quarantine byte-for-byte");
+      assert.equal(broker.inspectAgent(ADDRESS).cleanup?.workerGeneration, 9);
+
+      const result = await executeCleanupRecoveryCommand(
+        `recover-cleanup ${ADDRESS} 9 --confirm ${EVIDENCE}`,
+        broker,
+        join(root, "state"),
+      );
+      assert.equal(result.audit.source, "operator-attested");
+      assert.equal(result.offline, false);
+      assert.equal(broker.inspectAgent(ADDRESS).cleanup, undefined);
+      assert.equal(broker.inspectAgent(ADDRESS).state, "failed");
+    } finally {
+      await broker.shutdown();
     }
   });
 
