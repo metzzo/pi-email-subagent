@@ -11,8 +11,9 @@ import {
   MAX_CONFIG_TOOL_NAME_BYTES,
   MAX_TIMER_DELAY_MS,
 } from "./config.ts";
-import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
+import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, OperatorCleanupRecovery, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
+import { safeErrorSummary } from "./safe-summary.ts";
 import { clone, nowIso } from "./util.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -27,8 +28,9 @@ const CLEANUP_STATES = new Set<CleanupDiagnostic["state"]>(["pending", "unknown"
 const CLEANUP_PHASES = new Set<CleanupDiagnostic["abort"]>(["pending", "succeeded", "failed", "timed-out"]);
 const MAX_CLEANUP_DETAIL_CHARS = 2_000;
 const MAX_CLEANUP_TOOLS = 64;
-const WORKER_EPOCH_PHASES = new Set<WorkerCapabilityEpoch["phase"]>(["spawning", "activated", "verified-clean"]);
+const WORKER_EPOCH_PHASES = new Set<WorkerCapabilityEpoch["phase"]>(["spawning", "activated", "verified-clean", "operator-released"]);
 const MAX_WORKER_EPOCH_TOOLS = 128;
+export const MAX_OPERATOR_CLEANUP_EVIDENCE_BYTES = 1_024;
 export const MAX_REGISTRY_ACTIVITY_ITEMS = 40;
 export const MAX_REGISTRY_ACTIVITY_SUMMARY_BYTES = 2_000;
 export const MAX_REGISTRY_DIAGNOSTIC_BYTES = 2_048;
@@ -249,6 +251,23 @@ function parseWorkerEpoch(value: unknown, label: string): WorkerCapabilityEpoch 
   };
 }
 
+function parseOperatorCleanupRecovery(value: unknown, label: string): OperatorCleanupRecovery | undefined {
+  if (value === undefined) return undefined;
+  const raw = object(value, label);
+  if (!Number.isSafeInteger(raw.workerGeneration) || (raw.workerGeneration as number) < 1) {
+    throw new Error(`${label}.workerGeneration must be a positive safe integer.`);
+  }
+  if (raw.source !== "operator-attested") throw new Error(`${label}.source must be operator-attested.`);
+  const evidence = boundedString(raw.evidence, `${label}.evidence`, MAX_OPERATOR_CLEANUP_EVIDENCE_BYTES);
+  if (evidence.trim().length < 8) throw new Error(`${label}.evidence must contain at least 8 characters.`);
+  return {
+    workerGeneration: raw.workerGeneration as number,
+    releasedAt: timestamp(raw.releasedAt, `${label}.releasedAt`),
+    evidence: safeErrorSummary(evidence),
+    source: "operator-attested",
+  };
+}
+
 function parseCleanup(value: unknown, label: string, fallbackTools: readonly string[]): CleanupDiagnostic | undefined {
   if (value === undefined) return undefined;
   const raw = object(value, label);
@@ -341,6 +360,15 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   if (workerEpoch) record.workerEpoch = workerEpoch;
   const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`, record.workerEpoch?.tools ?? record.tools);
   if (cleanup) record.cleanup = cleanup;
+  const lastCleanupRecovery = parseOperatorCleanupRecovery(raw.lastCleanupRecovery, `${label}.lastCleanupRecovery`);
+  if (lastCleanupRecovery) record.lastCleanupRecovery = lastCleanupRecovery;
+  if (record.workerEpoch?.phase === "operator-released"
+    && (!lastCleanupRecovery
+      || lastCleanupRecovery.workerGeneration !== record.workerEpoch.generation
+      || record.workerEpoch.runSlotHeld
+      || cleanup)) {
+    throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit and no cleanup quarantine.`);
+  }
   const instructions = raw.instructions === undefined
     ? undefined
     : boundedString(raw.instructions, `${label}.instructions`, MAX_CONFIG_INSTRUCTIONS_BYTES);

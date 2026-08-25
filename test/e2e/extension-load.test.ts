@@ -20,6 +20,7 @@ it("loads the packaged extension with tools, command, and renderers and no confl
     "wait_for_replies",
   ]);
   assert.equal(extension.commands.has("agents"), true);
+  assert.match(extension.commands.get("agents")!.description ?? "", /offline recovery.*recover-cleanup/i);
   assert.equal(extension.shortcuts.size, 1);
   assert.equal(extension.messageRenderers.has("pi-email-subagent.email"), true);
   assert.equal(extension.messageRenderers.has("pi-email-subagent.alert"), true);

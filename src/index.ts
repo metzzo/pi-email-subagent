@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import * as PiTui from "@earendil-works/pi-tui";
 import { makeMainAddress } from "./address.ts";
 import { AgentBroker } from "./broker.ts";
+import { parseCleanupRecoveryCommand, recoverOrphanedCleanup } from "./cleanup-recovery.ts";
 import { isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
@@ -202,13 +203,25 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   async function showAgents(args: string, ctx: ExtensionContext): Promise<void> {
-    if (!broker) {
-      ctx.ui.notify("Email subagent broker is not ready.", "warning");
-      return;
-    }
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const action = parts[0];
     try {
+      if (action === "recover-cleanup") {
+        const recovery = parseCleanupRecoveryCommand(args);
+        if (broker) {
+          const audit = await broker.recoverCleanup(recovery.address, recovery.workerGeneration, recovery.evidence);
+          ctx.ui.notify(`Cleanup generation ${audit.workerGeneration} operator-released (not Pi-verified). Explicitly restart or archive next.`, "warning");
+        } else {
+          const namespaceDir = join(getAgentDir(), "subagents", ctx.sessionManager.getSessionId());
+          const result = await recoverOrphanedCleanup(namespaceDir, recovery);
+          ctx.ui.notify(`Cleanup generation ${result.audit.workerGeneration} operator-released offline (not Pi-verified). ${result.nextStep}`, "warning");
+        }
+        return;
+      }
+      if (!broker) {
+        ctx.ui.notify("Email subagent broker is not ready. Only /agents recover-cleanup remains available for an explicitly authorized exact generation.", "warning");
+        return;
+      }
       if (action === "stop" && parts[1]) {
         await broker.stop(parts[1]);
         ctx.ui.notify(`Stopped ${parts[1]}.`, "info");
@@ -238,7 +251,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("agents", {
-    description: "Inspect and control email subagents: /agents [address|stop|restart|archive|cancel|clear-failure|effort]",
+    description: "Inspect/control subagents, including offline recovery: /agents [address|stop|restart|archive|cancel|clear-failure|recover-cleanup|effort]",
     handler: showAgents,
   });
 

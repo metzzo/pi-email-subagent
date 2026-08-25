@@ -579,7 +579,11 @@ export class DashboardComponent {
         const address = sanitizeConversationLabel(agent.address);
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg(color, `${prefix} ${statusIcon(agent.state)} ${address}`));
-        const quarantine = agent.cleanup ? " · cleanup unknown · capacity held" : "";
+        const quarantine = agent.cleanup
+          ? " · cleanup unknown · capacity held"
+          : agent.lastCleanupRecovery && agent.workerEpoch?.phase === "operator-released"
+            ? ` · cleanup gen ${agent.lastCleanupRecovery.workerGeneration} operator-released (not Pi-verified)`
+            : "";
         lines.push(this.theme.fg("dim", `    ${displayStatus(agent.state)} · ${modelId} · effort ${agent.effort} · ${usage}${quarantine}`));
         const work = agent.work;
         const active = [...(work?.active ?? [])].sort((a, b) => (a.attribution === "explicit" ? -1 : 1) - (b.attribution === "explicit" ? -1 : 1));
@@ -610,6 +614,9 @@ export class DashboardComponent {
         lines.push(this.theme.fg("dim", `lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms · prompt ${agent.lifecycle.promptAcceptanceTimeoutMs}ms · run ${agent.lifecycle.runTimeoutMs}ms · idle ${agent.lifecycle.idleTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
         if (agent.cleanup) {
           lines.push(this.theme.fg("error", `cleanup ${agent.cleanup.state}: quiescence unknown · capacity held · restart/archive blocked`));
+        } else if (agent.lastCleanupRecovery) {
+          const next = agent.workerEpoch?.phase === "operator-released" ? " · explicit restart/archive required" : "";
+          lines.push(this.theme.fg("warning", `last cleanup generation ${agent.lastCleanupRecovery.workerGeneration}: operator-released at ${agent.lastCleanupRecovery.releasedAt} · not Pi-verified${next}`));
         }
         lines.push("");
         if (this.tab === "work") {
@@ -679,8 +686,10 @@ export class DashboardComponent {
               + inspection.archiveBlockers.outgoingUnanswered.count
               + inspection.archiveBlockers.pendingReplies.count;
             const recovery = inspection.cleanup
-              ? "no automatic cleanup release in Pi 0.81.1; external quiescence review required; capacity stays held"
-              : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
+              ? "recover only after human authorization for this exact generation and external quiescence evidence; capacity pressure is never authorization"
+              : inspection.lastCleanupRecovery && agent.workerEpoch?.phase === "operator-released"
+                ? `generation ${inspection.lastCleanupRecovery.workerGeneration} operator-released, not Pi-verified; explicitly restart/archive next`
+                : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
                 ? "restart real obligations; cancel only an explicitly abandoned exact request; then archive when clean"
                 : inspection.archiveEligible && inspection.holdsActivationLease
                   ? "reuse if relevant, or archive this clean identity; stop alone does not free its lease"
