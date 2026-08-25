@@ -11,6 +11,7 @@ import {
   parseSubagentAddressShape,
 } from "./address.ts";
 import { isConfiguredWritable, isConservativeCleanupCapable } from "./capability.ts";
+import { transitionCleanupRecovery } from "./cleanup-recovery.ts";
 import {
   isSafeConfigSemanticText,
   isThinkingLevel,
@@ -55,6 +56,7 @@ import type {
   WorkerTransport,
   WorkItem,
   AgentWorkState,
+  OperatorCleanupRecovery,
 } from "./types.ts";
 import { byteLength, clone, nowIso, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
@@ -201,6 +203,7 @@ interface WorkerCleanupLease {
   mutationCapable: boolean;
   targetState: "failed" | "stopped" | "paused" | "archived";
   alerted: boolean;
+  operationSettled: boolean;
   operation: Promise<WorkerCleanupReport>;
   settled: Promise<WorkerCleanupReport>;
 }
@@ -353,7 +356,7 @@ export class AgentBroker {
         const rawLegacyTools = [...record.tools];
         const abandonedEpoch = record.workerEpoch;
         const abandonedMutationCapable = abandonedEpoch
-          ? abandonedEpoch.phase !== "verified-clean" && abandonedEpoch.mutationCapable
+          ? (abandonedEpoch.phase === "spawning" || abandonedEpoch.phase === "activated") && abandonedEpoch.mutationCapable
           : this.isToolSetMutationCapable(rawLegacyTools);
         if (this.namespaceLock.abandonedOwner
           && !record.cleanup
@@ -621,7 +624,7 @@ export class AgentBroker {
     const worker = this.workers.get(record.address);
     const generation = worker ? this.workerGenerations.get(worker) : undefined;
     if (record.workerEpoch
-      && record.workerEpoch.phase !== "verified-clean"
+      && (record.workerEpoch.phase === "spawning" || record.workerEpoch.phase === "activated")
       && ((worker && generation === record.workerEpoch.generation) || record.state === "spawning")) {
       return record.workerEpoch.mutationCapable;
     }
@@ -719,6 +722,7 @@ export class AgentBroker {
       mutationCapable: exactEpoch?.mutationCapable ?? true,
       targetState,
       alerted: false,
+      operationSettled: false,
       operation: undefined as never,
       settled: undefined as never,
     };
@@ -762,10 +766,12 @@ export class AgentBroker {
             `WORKER_CLEANUP_REPORT_UNKNOWN${toolCodes.length > 0 ? `: ${toolCodes.join(",")}` : ""}`,
           );
         }
+        lease.operationSettled = true;
         return report;
       },
       async (error) => {
         await this.markCleanupUnknown(lease, "failed", "failed", "WORKER_CLEANUP_REJECTED");
+        lease.operationSettled = true;
         throw error;
       },
     );
@@ -2904,6 +2910,58 @@ export class AgentBroker {
     });
   }
 
+  async recoverCleanup(addressInput: string, workerGeneration: number, evidence: string): Promise<OperatorCleanupRecovery> {
+    const address = parseSubagentAddressShape(addressInput).address;
+    // Recovery must fail rather than wait behind a lifecycle action: the human
+    // authorization applies to the exact state observed for this generation.
+    if (this.addressTails.has(address)) {
+      throw new Error(`A concurrent lifecycle operation is already in progress for ${address}.`);
+    }
+    return this.withAddressOperation(address, async () => {
+      const record = this.records.get(address);
+      if (!record) throw new Error(`Unknown agent ${address}.`);
+      const quarantine = this.cleanupQuarantines.get(address);
+      if (quarantine && quarantine.workerGeneration !== workerGeneration) {
+        throw new Error(`Cleanup generation mismatch: live quarantine is ${quarantine.workerGeneration}, request is ${workerGeneration}.`);
+      }
+      const provisionalWorker = [...this.provisionalWorkers].some((worker) => this.workerAddresses.get(worker) === address);
+      const transition = transitionCleanupRecovery(record, { address, workerGeneration, evidence }, {
+        attachedWorker: this.workers.has(address),
+        provisionalWorker,
+        pendingFactory: this.pendingFactories.has(address),
+        cleanupOperationPending: Boolean(quarantine && !quarantine.operationSettled),
+        activeTool: Boolean(this.toolLifecycles.get(address)?.calls.size),
+        activeRunSlot: this.active.has(address),
+      });
+      if (transition.idempotent) return transition.audit;
+
+      const previous = clone(record);
+      this.records.set(address, transition.record);
+      try {
+        await this.persistRegistry();
+      } catch (error) {
+        this.records.set(address, previous);
+        this.requiredRegistry().agents = [...this.records.values()].map(clone);
+        throw new Error(`Cleanup recovery persistence failed; quarantine remains unchanged: ${errorMessage(error)}`, { cause: error });
+      }
+
+      if (quarantine) {
+        this.cleanupQuarantines.delete(address);
+        this.cleanupLeases.delete(quarantine.worker);
+        this.provisionalWorkers.delete(quarantine.worker);
+        if (quarantine.mutationCapable) this.mutationAdmissionEpoch += 1;
+      }
+      this.active.delete(address);
+      for (let index = this.pendingStarts.length - 1; index >= 0; index -= 1) {
+        if (this.pendingStarts[index] === address) this.pendingStarts.splice(index, 1);
+      }
+      this.publish();
+      // Deliberately do not pump, create a worker, deliver mail, restart, or
+      // archive. A separate explicit lifecycle action is required.
+      return transition.audit;
+    });
+  }
+
   async clearFailure(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
     await this.withAddressOperation(address, async () => {
@@ -2991,6 +3049,11 @@ export class AgentBroker {
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
       ...(cleanup ? { cleanup: clone(cleanup) } : {}),
+      ...(record?.lastCleanupRecovery ? { lastCleanupRecovery: {
+        workerGeneration: record.lastCleanupRecovery.workerGeneration,
+        releasedAt: record.lastCleanupRecovery.releasedAt,
+        source: record.lastCleanupRecovery.source,
+      } } : {}),
       providerReady: this.workers.has(address)
         ? "available"
         : (record && !this.routableRecords.has(address) ? "unavailable" : "unknown"),

@@ -122,6 +122,33 @@ describe("registry schema", () => {
     }
   });
 
+  it("round-trips an operator-released epoch only with its exact durable non-Pi audit", () => {
+    const base = record();
+    const at = new Date().toISOString();
+    base.workerEpoch = {
+      generation: 9,
+      phase: "operator-released",
+      tools: ["bash"],
+      mutationCapable: true,
+      runSlotHeld: false,
+    };
+    base.lastCleanupRecovery = {
+      workerGeneration: 9,
+      releasedAt: at,
+      evidence: "External check; Authorization: Bearer secret-value",
+      source: "operator-attested",
+    };
+    const parsed = parseRegistry({ ...registry(), agents: [base] });
+    assert.equal(parsed.agents[0]?.workerEpoch?.phase, "operator-released");
+    assert.equal(parsed.agents[0]?.lastCleanupRecovery?.source, "operator-attested");
+    assert.match(parsed.agents[0]?.lastCleanupRecovery?.evidence ?? "", /Authorization: \[redacted\]/i);
+    assert.doesNotMatch(parsed.agents[0]?.lastCleanupRecovery?.evidence ?? "", /secret-value/);
+
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: undefined }] }), /operator-released.*audit/i);
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, source: "Pi-verified" } }] }), /operator-attested/i);
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, workerGeneration: 8 } }] }), /operator-released.*exact/i);
+  });
+
   it("round-trips bounded cleanup quarantine and rejects malformed diagnostics", () => {
     const base = record();
     const now = new Date().toISOString();

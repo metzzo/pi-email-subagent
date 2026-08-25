@@ -168,11 +168,21 @@ export interface CleanupToolRef {
 /** Persisted fail-closed summary; an in-memory cleanup Promise is never persisted. */
 export interface WorkerCapabilityEpoch {
   generation: number;
-  phase: "spawning" | "activated" | "verified-clean";
+  phase: "spawning" | "activated" | "verified-clean" | "operator-released";
   tools: string[];
   mutationCapable: boolean;
   runSlotHeld: boolean;
 }
+
+/** Durable exact-generation audit for a human-authorized quarantine release. */
+export interface OperatorCleanupRecovery {
+  workerGeneration: number;
+  releasedAt: string;
+  evidence: string;
+  source: "operator-attested";
+}
+
+export type OperatorCleanupRecoverySummary = Omit<OperatorCleanupRecovery, "evidence">;
 
 export interface CleanupDiagnostic {
   state: "pending" | "unknown";
@@ -214,6 +224,8 @@ export interface AgentRecord {
   currentActivity?: string;
   failure?: string;
   cleanup?: CleanupDiagnostic;
+  /** Last explicit operator release; this is not Pi verification. */
+  lastCleanupRecovery?: OperatorCleanupRecovery;
   enforcementAttempts: number;
   lifecycle: LifecyclePolicy;
   usage: UsageSnapshot;
@@ -311,6 +323,7 @@ export interface AgentInspection {
   usage: UsageSnapshot;
   failure?: string;
   cleanup?: CleanupDiagnostic;
+  lastCleanupRecovery?: OperatorCleanupRecoverySummary;
   providerReady: "available" | "unavailable" | "unknown";
   lifecycle: LifecyclePolicy;
 }

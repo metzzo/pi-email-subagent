@@ -32,6 +32,21 @@ describe("release contract truth", () => {
     }
   });
 
+  it("documents exact operator-attested cleanup recovery and the startup-blocked session sequence", async () => {
+    for (const path of ["README.md", "docs/README.md", "docs/lifecycle.md", "docs/manage-agent.md", "docs/inspect-agent.md"]) {
+      const value = await text(path);
+      assert.match(value, /recover.cleanup|recover_cleanup/i, path);
+      assert.match(value, /operator-attested|operator attestation/i, path);
+      assert.match(value, /not Pi-verified|Pi did not verify/i, path);
+      assert.match(value, /capacity pressure.*never authorization/i, path);
+    }
+    for (const path of ["README.md", "docs/lifecycle.md", "docs/manage-agent.md"]) {
+      const value = await text(path);
+      assert.match(value, /exit the live owner[\s\S]*resume the same session[\s\S]*startup(?:\s|\*)+fails[\s\S]*recover-cleanup[\s\S]*\/reload[\s\S]*(restart|archive)/i, path);
+      assert.match(value, /clone.*fresh mailbox.*(?:does not|cannot).*recover.*old obligations/i, path);
+    }
+  });
+
   it("records the exact production audit inside full-range release evidence", async () => {
     const script = await text("scripts/release-evidence.ts");
     assert.match(script, /\["audit", "--omit=dev", "--omit=peer"\]/);

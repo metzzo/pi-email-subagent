@@ -13,7 +13,7 @@ export interface NamespaceLockHooks {
   afterFilesystemLockReleased?: () => void | Promise<void>;
 }
 
-interface NamespaceOwner {
+export interface NamespaceOwner {
   pid: number;
   token: string;
   acquiredAt: string;
@@ -22,12 +22,12 @@ interface NamespaceOwner {
   processStartTime?: string;
 }
 
-interface KernelProcessIdentity {
+export interface KernelProcessIdentity {
   bootId: string;
   processStartTime: string;
 }
 
-async function kernelProcessIdentity(pid: number): Promise<KernelProcessIdentity> {
+export async function kernelProcessIdentity(pid: number): Promise<KernelProcessIdentity> {
   if (process.platform !== "linux") {
     throw new Error("safe local namespace ownership requires Linux /proc boot-ID and process-start fencing");
   }
@@ -81,7 +81,7 @@ async function ownerStillLive(owner: NamespaceOwner): Promise<boolean> {
   }
 }
 
-function isOwner(value: unknown): value is NamespaceOwner {
+export function isNamespaceOwner(value: unknown): value is NamespaceOwner {
   if (!value || typeof value !== "object") return false;
   const owner = value as Partial<NamespaceOwner>;
   return Number.isInteger(owner.pid)
@@ -94,7 +94,7 @@ function isOwner(value: unknown): value is NamespaceOwner {
 async function readOwner(path: string): Promise<NamespaceOwner | undefined> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
-    return isOwner(parsed) ? parsed : undefined;
+    return isNamespaceOwner(parsed) ? parsed : undefined;
   } catch {
     return undefined;
   }
