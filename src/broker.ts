@@ -10,6 +10,7 @@ import {
   parseNewSubagentAddress,
   parseSubagentAddressShape,
 } from "./address.ts";
+import { transitionAbandonedOwnerRecovery } from "./abandoned-owner-recovery.ts";
 import { isConfiguredWritable, isConservativeCleanupCapable } from "./capability.ts";
 import { transitionCleanupRecovery } from "./cleanup-recovery.ts";
 import {
@@ -350,57 +351,11 @@ export class AgentBroker {
       const startupFailures: string[] = [];
       for (const loaded of this.registry.agents) {
         const shape = parseSubagentAddressShape(loaded.address);
-        const record = clone(loaded);
+        let record = clone(loaded);
         sanitizePersistedRecordErrors(record);
         record.address = shape.address;
-        const rawLegacyTools = [...record.tools];
-        const abandonedEpoch = record.workerEpoch;
-        const abandonedMutationCapable = abandonedEpoch
-          ? (abandonedEpoch.phase === "spawning" || abandonedEpoch.phase === "activated") && abandonedEpoch.mutationCapable
-          : this.isToolSetMutationCapable(rawLegacyTools);
-        if (this.namespaceLock.abandonedOwner
-          && !record.cleanup
-          && record.state !== "archived"
-          && abandonedMutationCapable) {
-          const now = nowIso();
-          record.cleanup = {
-            state: "unknown",
-            reasonCode: "ABANDONED_OWNER_RECOVERY",
-            workerGeneration: abandonedEpoch?.generation ?? 1,
-            startedAt: now,
-            updatedAt: now,
-            abort: "timed-out",
-            dispose: "timed-out",
-            quiescence: "unknown",
-            mutationCapableAtStart: true,
-            // Without an epoch, even a failed/stopped label cannot prove that
-            // the prior generation released its exact run slot before loss.
-            heldRunSlot: abandonedEpoch?.runSlotHeld ?? true,
-            activeTools: [],
-            detail: "The prior broker owner ended abruptly; Pi exposes no receipt proving that its completed or active process-capable tools are quiescent.",
-          };
-        }
-        if (record.cleanup) {
-          const cleanupOwnerWasLive = record.cleanup.state === "pending"
-            || record.cleanup.abort === "pending"
-            || record.cleanup.dispose === "pending";
-          if (cleanupOwnerWasLive) {
-            const priorDetail = record.cleanup.detail;
-            record.cleanup.state = "unknown";
-            record.cleanup.updatedAt = nowIso();
-            if (record.cleanup.abort === "pending") record.cleanup.abort = "timed-out";
-            if (record.cleanup.dispose === "pending") record.cleanup.dispose = "timed-out";
-            record.cleanup.detail = truncateText(
-              `Cleanup promise owner was lost across process restart; authoritative quiescence remains unknown.${priorDetail ? ` Prior detail: ${priorDetail}` : ""}`,
-              1_500,
-            );
-          }
-          record.state = "failed";
-          const cleanupFailure = `Cleanup quarantine restored for worker generation ${record.cleanup.workerGeneration}; capacity held.`;
-          if (!record.failure) record.failure = cleanupFailure;
-          else if (!record.failure.includes("Cleanup quarantine")) record.failure = truncateText(`${record.failure}; ${cleanupFailure}`, 1_500);
-          record.currentActivity = cleanupFailure;
-          record.updatedAt = nowIso();
+        if (this.namespaceLock.abandonedOwner || record.cleanup) {
+          record = transitionAbandonedOwnerRecovery(record).record;
         }
         record.name = shape.name;
         record.taskSlug = shape.taskSlug;
@@ -540,7 +495,9 @@ export class AgentBroker {
       this.checkpoint(generation);
 
       const restorable = [...this.records.values()]
-        .filter((record) => this.activationLeases.has(record.address) && !["stopped", "failed", "archived"].includes(record.state));
+        .filter((record) => this.activationLeases.has(record.address)
+          && record.workerEpoch?.phase !== "operator-released"
+          && !["stopped", "failed", "archived"].includes(record.state));
       const restored = await Promise.allSettled(restorable.map(async (record) => {
         try {
           const parsed = this.resolveExistingRecord(record);

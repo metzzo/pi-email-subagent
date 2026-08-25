@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -14,7 +14,7 @@ const ADDRESS = "worker.offline-release@gpt-5.4.com";
 const OTHER = "worker.preserved@gpt-5.4.com";
 const EVIDENCE = "Operator inspected the external process tree and confirmed quiescence.";
 
-async function brokerAt(root: string): Promise<AgentBroker> {
+async function brokerAt(root: string, workers: FakeWorker[] = []): Promise<AgentBroker> {
   const broker = new AgentBroker({
     cwd: root,
     agentDir: root,
@@ -22,20 +22,25 @@ async function brokerAt(root: string): Promise<AgentBroker> {
     config: structuredClone(DEFAULT_CONFIG),
     models: [fakeModel("gpt-5.4")],
     mainAdapter: new FakeMainAdapter(),
-    workerFactory: () => new FakeWorker(),
+    workerFactory: () => { const worker = new FakeWorker(); workers.push(worker); return worker; },
     projectTrusted: true,
   });
   await broker.init();
   return broker;
 }
 
-async function seed(root: string): Promise<{ namespaceDir: string; registryBefore: any; mailBefore: string; queuedId: string }> {
+async function seed(root: string): Promise<{ namespaceDir: string; registryBefore: any; mailBefore: string; queuedId: string; otherQueuedId: string }> {
   const broker = await brokerAt(root);
-  await broker.send(broker.mainAddress, { to: ADDRESS, subject: "Target", message: "Keep target obligation.", priority: "low" });
+  const targetInitial = await broker.send(broker.mainAddress, { to: ADDRESS, subject: "Target", message: "Create target identity.", priority: "low" });
   await broker.stop(ADDRESS);
+  await broker.cancelRequest(targetInitial.envelope.id, "Fixture closes the target identity-creation request.");
   const queued = await broker.send(broker.mainAddress, { to: ADDRESS, subject: "Queued target", message: "Keep this queued mail.", priority: "low" });
   assert.equal(queued.envelope.deliveryState, "queued");
-  await broker.send(broker.mainAddress, { to: OTHER, subject: "Other", message: "Keep other record.", priority: "low" });
+  const otherInitial = await broker.send(broker.mainAddress, { to: OTHER, subject: "Other", message: "Create other identity.", priority: "low" });
+  await broker.stop(OTHER);
+  await broker.cancelRequest(otherInitial.envelope.id, "Fixture closes the other identity-creation request.");
+  const otherQueued = await broker.send(broker.mainAddress, { to: OTHER, subject: "Other queued", message: "Keep other queued mail.", priority: "low" });
+  assert.equal(otherQueued.envelope.deliveryState, "queued");
   await broker.shutdown();
   const namespaceDir = join(root, "state");
   const registryPath = join(namespaceDir, "registry.json");
@@ -63,7 +68,7 @@ async function seed(root: string): Promise<{ namespaceDir: string; registryBefor
   };
   await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
   const mailBefore = await readFile(join(namespaceDir, "mail.jsonl"), "utf8");
-  return { namespaceDir, registryBefore: registry, mailBefore, queuedId: queued.envelope.id };
+  return { namespaceDir, registryBefore: registry, mailBefore, queuedId: queued.envelope.id, otherQueuedId: otherQueued.envelope.id };
 }
 
 async function waitForHolder(child: ReturnType<typeof spawn>, stderr: () => string): Promise<number> {
@@ -80,6 +85,37 @@ async function waitForHolder(child: ReturnType<typeof spawn>, stderr: () => stri
       if (!/^READY /m.test(stdout)) { clearTimeout(timer); reject(new Error(`Holder exited ${code}/${signal}: ${stderr()}`)); }
     });
   });
+}
+
+async function runRecoveryChild(namespaceDir: string, marker: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [
+    "--import", "tsx", "test/e2e/helpers/offline-cleanup-recovery-runner.ts",
+    namespaceDir, ADDRESS, "9", EVIDENCE, marker,
+  ], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"], env: process.env });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
+  child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  return { code, stdout, stderr };
+}
+
+async function waitForDelivery(broker: AgentBroker, id: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (broker.mailStore.get(id)?.deliveryState === "delivered") return;
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 10));
+  }
+  assert.fail(`mail ${id} was not delivered after explicit restart`);
+}
+
+async function exists(path: string): Promise<boolean> {
+  try { await stat(path); return true; } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function deadOwnerIdentity(namespaceDir: string, token: string): Promise<Record<string, unknown>> {
@@ -142,7 +178,8 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
     const backup = JSON.parse(await readFile(join(seeded.namespaceDir, backups[0]!), "utf8")) as any;
     assert.equal(backup.agents.find((record: any) => record.address === ADDRESS).cleanup.workerGeneration, 9);
 
-    const reloaded = await brokerAt(root);
+    const reloadedWorkers: FakeWorker[] = [];
+    const reloaded = await brokerAt(root, reloadedWorkers);
     try {
       const inspection = reloaded.inspectAgent(ADDRESS);
       assert.equal(inspection.state, "failed");
@@ -150,8 +187,67 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
       assert.equal(inspection.lastCleanupRecovery?.source, "operator-attested");
       assert.equal(reloaded.mailStore.get(seeded.queuedId)?.deliveryState, "queued");
       assert.equal(reloaded.mailStore.get(seeded.queuedId)?.answeredAt, undefined);
+      assert.equal(reloadedWorkers.length, 0, "operator-released and stopped records must not auto-restore");
+      await reloaded.restart(ADDRESS);
+      assert.equal(reloadedWorkers.length, 1, "only explicit restart creates one worker");
+      await waitForDelivery(reloaded, seeded.queuedId);
+      const restarted = reloaded.getSnapshot().agents.find((candidate) => candidate.address === ADDRESS)!;
+      assert.equal(restarted.workerEpoch?.generation, 10);
+      assert.equal(restarted.workerEpoch?.phase, "activated");
     } finally {
       await reloaded.shutdown();
+    }
+  });
+
+  it("normalizes every unsafe dead-owner record before releasing only the requested generation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-offline-namespace-normalize-"));
+    const seeded = await seed(root);
+    const registryPath = join(seeded.namespaceDir, "registry.json");
+    const before = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    const unsafeOther = before.agents.find((record: any) => record.address === OTHER);
+    unsafeOther.state = "paused";
+    delete unsafeOther.cleanup;
+    unsafeOther.workerEpoch = {
+      generation: 7,
+      phase: "activated",
+      tools: ["bash"],
+      mutationCapable: true,
+      runSlotHeld: false,
+    };
+    await writeFile(registryPath, `${JSON.stringify(before, null, 2)}\n`);
+    const mailBefore = await readFile(join(seeded.namespaceDir, "mail.jsonl"), "utf8");
+    await deadOwner(seeded.namespaceDir);
+
+    await recoverOrphanedCleanup(seeded.namespaceDir, {
+      address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+    });
+
+    const normalized = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    const released = normalized.agents.find((record: any) => record.address === ADDRESS);
+    const quarantined = normalized.agents.find((record: any) => record.address === OTHER);
+    assert.equal(released.cleanup, undefined);
+    assert.equal(released.workerEpoch.phase, "operator-released");
+    assert.equal(released.state, "failed");
+    assert.equal(quarantined.state, "failed");
+    assert.equal(quarantined.cleanup.reasonCode, "ABANDONED_OWNER_RECOVERY");
+    assert.equal(quarantined.cleanup.workerGeneration, 7);
+    assert.equal(quarantined.cleanup.quiescence, "unknown");
+    assert.equal(quarantined.workerEpoch.phase, "activated");
+    assert.equal(await readFile(join(seeded.namespaceDir, "mail.jsonl"), "utf8"), mailBefore);
+
+    const workers: FakeWorker[] = [];
+    const reacquired = await brokerAt(root, workers);
+    try {
+      assert.equal(workers.length, 0, "reload must create no replacement for either released A or quarantined B");
+      assert.equal(reacquired.inspectAgent(OTHER).cleanup?.reasonCode, "ABANDONED_OWNER_RECOVERY");
+      assert.equal(reacquired.mailStore.get(seeded.otherQueuedId)?.deliveryState, "queued");
+      await reacquired.restart(ADDRESS);
+      assert.equal(workers.length, 1, "explicit A restart creates only A");
+      assert.equal(reacquired.mailStore.get(seeded.queuedId)?.deliveryState, "queued", "B quarantine still blocks mutable scheduling");
+      assert.equal(reacquired.mailStore.get(seeded.otherQueuedId)?.deliveryState, "queued");
+      assert.equal(reacquired.inspectAgent(OTHER).cleanup?.workerGeneration, 7);
+    } finally {
+      await reacquired.shutdown().catch(() => undefined);
     }
   });
 
@@ -229,6 +325,41 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
     }
   });
 
+  it("rejects a stale generation-9 retry after the current epoch advanced to activated generation 10 without touching owner, lock, or registry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-offline-stale-retry-"));
+    const seeded = await seed(root);
+    await deadOwner(seeded.namespaceDir);
+    await recoverOrphanedCleanup(seeded.namespaceDir, {
+      address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+    });
+
+    const registryPath = join(seeded.namespaceDir, "registry.json");
+    const advanced = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    const record = advanced.agents.find((candidate: any) => candidate.address === ADDRESS);
+    record.state = "failed";
+    record.workerEpoch = {
+      generation: 10, phase: "activated", tools: ["bash"], mutationCapable: true, runSlotHeld: false,
+    };
+    await writeFile(registryPath, `${JSON.stringify(advanced, null, 2)}\n`);
+    await deadOwner(seeded.namespaceDir);
+
+    const ownerPath = join(seeded.namespaceDir, ".broker-owner.json");
+    const lockPath = `${seeded.namespaceDir}.lock`;
+    const registryBefore = await readFile(registryPath, "utf8");
+    const ownerBefore = await readFile(ownerPath, "utf8");
+    const lockBefore = await stat(lockPath);
+    await assert.rejects(recoverOrphanedCleanup(seeded.namespaceDir, {
+      address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+    }), /stale|current.*generation|operator-released/i);
+    assert.equal(await readFile(registryPath, "utf8"), registryBefore);
+    assert.equal(await readFile(ownerPath, "utf8"), ownerBefore);
+    const lockAfter = await stat(lockPath);
+    assert.deepEqual(
+      [lockAfter.ino, lockAfter.mode, lockAfter.size, lockAfter.mtimeMs],
+      [lockBefore.ino, lockBefore.mode, lockBefore.size, lockBefore.mtimeMs],
+    );
+  });
+
   it("recovers idempotently after a crash window immediately following the durable registry commit", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-offline-post-commit-"));
     const seeded = await seed(root);
@@ -247,12 +378,61 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
       `${JSON.stringify(await deadOwnerIdentity(seeded.namespaceDir, "crashed-recovery-operation"), null, 2)}\n`,
     );
 
+    await assert.rejects(recoverOrphanedCleanup(seeded.namespaceDir, {
+      address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+    }), /guard.*exists|manual.*guard/i);
+    assert.ok(await stat(join(seeded.namespaceDir, ".cleanup-recovery.guard")));
+    await unlink(join(seeded.namespaceDir, ".cleanup-recovery.guard"));
+
     const retried = await recoverOrphanedCleanup(seeded.namespaceDir, {
       address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
     });
     assert.deepEqual(retried.audit, record.lastCleanupRecovery);
     await assert.rejects(stat(join(seeded.namespaceDir, ".broker-owner.json")), /ENOENT/);
     await assert.rejects(stat(`${seeded.namespaceDir}.lock`), /ENOENT/);
+  });
+
+  it("never auto-reclaims a dead guard across processes; deliberate removal permits exactly one new writer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-offline-dead-guard-race-"));
+    const seeded = await seed(root);
+    await deadOwner(seeded.namespaceDir);
+    const guardPath = join(seeded.namespaceDir, ".cleanup-recovery.guard");
+    const deadGuard = `${JSON.stringify(await deadOwnerIdentity(seeded.namespaceDir, "dead-guard-g0"), null, 2)}\n`;
+    await writeFile(guardPath, deadGuard);
+    const registryPath = join(seeded.namespaceDir, "registry.json");
+    const registryBefore = await readFile(registryPath, "utf8");
+    const ownerBefore = await readFile(join(seeded.namespaceDir, ".broker-owner.json"), "utf8");
+    const marker0 = join(root, "writer-0");
+    const marker1 = join(root, "writer-1");
+
+    const blocked = await Promise.all([
+      runRecoveryChild(seeded.namespaceDir, marker0),
+      runRecoveryChild(seeded.namespaceDir, marker1),
+    ]);
+    for (const result of blocked) {
+      assert.equal(result.code, 2, result.stdout + result.stderr);
+      assert.match(result.stderr, /guard.*exists|manual.*guard/i);
+    }
+    assert.equal(await readFile(guardPath, "utf8"), deadGuard, "dead G0 is never read-then-unlinked or replaced");
+    assert.equal(await readFile(registryPath, "utf8"), registryBefore);
+    assert.equal(await readFile(join(seeded.namespaceDir, ".broker-owner.json"), "utf8"), ownerBefore);
+    assert.equal(await exists(`${marker0}.guard`), false, "blocked writer never acquires the guard");
+    assert.equal(await exists(`${marker1}.guard`), false, "blocked writer never acquires the guard");
+    assert.equal(await exists(`${marker0}.backup`), false, "blocked writer never reaches backup");
+    assert.equal(await exists(`${marker1}.backup`), false, "blocked writer never reaches backup");
+    assert.deepEqual(
+      (await readdir(seeded.namespaceDir)).filter((name) => name.startsWith("registry.json.cleanup-recovery-")),
+      [],
+    );
+
+    await unlink(guardPath); // Deliberate operator action after exact dead-guard inspection.
+    const marker2 = join(root, "writer-2");
+    const allowed = await runRecoveryChild(seeded.namespaceDir, marker2);
+    assert.equal(allowed.code, 0, allowed.stdout + allowed.stderr);
+    assert.equal(await exists(`${marker2}.guard`), true);
+    assert.equal(await exists(`${marker2}.backup`), true);
+    const committed = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    assert.equal(committed.agents.find((record: any) => record.address === ADDRESS).workerEpoch.phase, "operator-released");
   });
 
   it("uses an exclusive recovery guard and exact retries return the existing audit", async () => {

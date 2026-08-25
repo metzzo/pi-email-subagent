@@ -83,18 +83,15 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
     /Could not cancel request: Email broker is not ready/,
   );
   const action = (tools[3].parameters as { properties: { action: unknown } }).properties.action;
-  assert.deepEqual(action, { type: "string", enum: ["stop", "restart", "archive", "clear_failure", "recover_cleanup"] });
+  assert.deepEqual(action, { type: "string", enum: ["stop", "restart", "archive", "clear_failure"] });
   assert.match(tools[0].description, /identity-lease.*run-slot.*archive blockers/i);
   const manageGuidance = (tools[3].promptGuidelines ?? []).join("\n");
   assert.match(manageGuidance, /stop.*does not free.*maxAgents/i);
   assert.match(manageGuidance, /cancel only.*explicitly abandoned.*exact requests/i);
   assert.match(manageGuidance, /restarting a failed agent.*inspect.*Work.*Conversation.*restart.*same identity/i);
-  assert.match(manageGuidance, /recover_cleanup only after the human explicitly authorizes.*exact.*workerGeneration.*external quiescence/i);
-  assert.match(manageGuidance, /capacity pressure alone is never authorization/i);
+  assert.doesNotMatch(`${tools[3].description}\n${tools[3].promptSnippet}\n${manageGuidance}`, /recover.cleanup|operatorEvidence|workerGeneration/i);
   const manageProperties = (tools[3].parameters as { properties: Record<string, any> }).properties;
-  assert.equal(manageProperties.workerGeneration.minimum, 1);
-  assert.equal(manageProperties.operatorEvidence.minLength, 8);
-  assert.equal(manageProperties.operatorEvidence.maxLength, 1024);
+  assert.deepEqual(Object.keys(manageProperties).sort(), ["action", "address"]);
 });
 
 it("returns exact bounded prospective capability details without truncating tool names", async () => {
@@ -274,7 +271,7 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
     "inspect-cleanup", { address: inspection.address }, undefined, undefined, {} as never,
   );
   const quarantineText = (quarantined.content[0] as { text: string }).text;
-  assert.match(quarantineText, /human-authorized exact-generation recover_cleanup.*external quiescence verification/is);
+  assert.match(quarantineText, /no model-callable recovery action.*human-command-only.*\/agents recover-cleanup.*external quiescence verification/is);
   assert.match(quarantineText, /capacity pressure alone is never authorization/i);
   assert.doesNotMatch(quarantineText, /wait for.*cleanup/i);
 });
@@ -374,48 +371,24 @@ it("reports actual post-action identity capacity in manage_agent results", async
   assert.equal((archived.details as any).capacity.identitiesUsed, 0);
 });
 
-it("renders recover_cleanup as operator-attested without exposing the evidence or performing another action", async () => {
+it("cannot invoke cleanup recovery through model-callable manage_agent", async () => {
   const calls: string[] = [];
-  const inspection = {
-    address: "worker.recovery@gpt-5.4.com",
-    state: "failed",
-    holdsActivationLease: true,
-    capacity: { identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1 },
-    archiveEligible: false,
-  };
   const broker = {
-    recoverCleanup: async (_address: string, generation: number, _evidence: string) => {
-      calls.push(`recover:${generation}`);
-      return {
-        workerGeneration: generation,
-        releasedAt: "2026-08-23T00:00:00.000Z",
-        evidence: "PRIVATE OPERATOR EVIDENCE",
-        source: "operator-attested" as const,
-      };
-    },
+    recoverCleanup: async () => { calls.push("recover"); },
     stop: async () => { calls.push("stop"); },
     restart: async () => { calls.push("restart"); },
     archive: async () => { calls.push("archive"); },
     clearFailure: async () => { calls.push("clear"); },
-    inspectAgent: () => inspection,
+    inspectAgent: () => { throw new Error("inspection must not run"); },
   } as unknown as AgentBroker;
   const manage = createMainCoordinationTools(() => broker)[3];
-  const result = await manage.execute("manage-recovery", {
-    address: inspection.address,
+  await assert.rejects(manage.execute("manage-recovery", {
+    address: "worker.recovery@gpt-5.4.com",
     action: "recover_cleanup",
     workerGeneration: 9,
-    operatorEvidence: "Operator verified external quiescence.",
-  }, undefined, undefined, {} as never);
-  assert.deepEqual(calls, ["recover:9"]);
-  const text = (result.content[0] as { text: string }).text;
-  assert.match(text, /generation 9.*operator-released.*not Pi-verified.*no restart, archive, or mail delivery/is);
-  assert.doesNotMatch(text, /PRIVATE OPERATOR EVIDENCE/);
-  assert.deepEqual((result.details as any).cleanupRecovery, {
-    workerGeneration: 9,
-    releasedAt: "2026-08-23T00:00:00.000Z",
-    source: "operator-attested",
-  });
-  assert.equal((result.details as any).cleanupRecovery.evidence, undefined);
+    operatorEvidence: "A model cannot supply operator evidence.",
+  } as never, undefined, undefined, {} as never), /unsupported.*action|could not manage/i);
+  assert.deepEqual(calls, []);
 });
 
 it("guides timed-out pending waits without changing exact structured results", async () => {

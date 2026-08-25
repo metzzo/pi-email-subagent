@@ -366,8 +366,9 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     && (!lastCleanupRecovery
       || lastCleanupRecovery.workerGeneration !== record.workerEpoch.generation
       || record.workerEpoch.runSlotHeld
-      || cleanup)) {
-    throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit and no cleanup quarantine.`);
+      || cleanup
+      || record.state !== "failed")) {
+    throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit, inactive failed state, and no cleanup quarantine.`);
   }
   const instructions = raw.instructions === undefined
     ? undefined

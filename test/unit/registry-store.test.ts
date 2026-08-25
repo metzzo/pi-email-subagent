@@ -125,6 +125,7 @@ describe("registry schema", () => {
   it("round-trips an operator-released epoch only with its exact durable non-Pi audit", () => {
     const base = record();
     const at = new Date().toISOString();
+    base.state = "failed";
     base.workerEpoch = {
       generation: 9,
       phase: "operator-released",
@@ -147,6 +148,7 @@ describe("registry schema", () => {
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: undefined }] }), /operator-released.*audit/i);
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, source: "Pi-verified" } }] }), /operator-attested/i);
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, workerGeneration: 8 } }] }), /operator-released.*exact/i);
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, state: "paused" }] }), /operator-released.*failed/i);
   });
 
   it("round-trips bounded cleanup quarantine and rejects malformed diagnostics", () => {

@@ -31,12 +31,11 @@ export interface CancelRequestToolDetails {
 
 export interface ManageAgentToolDetails {
   address?: string;
-  action?: "stop" | "restart" | "archive" | "clear_failure" | "recover_cleanup";
+  action?: "stop" | "restart" | "archive" | "clear_failure";
   state?: string;
   capacity?: AgentCapacitySnapshot;
   holdsActivationLease?: boolean;
   archiveEligible?: boolean;
-  cleanupRecovery?: { workerGeneration: number; releasedAt: string; source: "operator-attested" };
 }
 
 function compactEnvelopeDetails(envelope: EmailEnvelope | undefined): EmailEnvelope | undefined {
@@ -55,7 +54,7 @@ function inspectionRecovery(inspection: AgentInspection): string {
     + inspection.archiveBlockers.incomingUnanswered.count
     + inspection.archiveBlockers.outgoingUnanswered.count
     + inspection.archiveBlockers.pendingReplies.count;
-  if (inspection.cleanup) return "Cleanup quiescence is unknown. Only a human-authorized exact-generation recover_cleanup may release a settled persisted quarantine after external quiescence verification; capacity pressure alone is never authorization. Restart/archive remain separate explicit actions.";
+  if (inspection.cleanup) return "Cleanup quiescence is unknown. There is no model-callable recovery action. Only the human-command-only literal /agents recover-cleanup exact-address exact-generation form may release a settled persisted quarantine after external quiescence verification; capacity pressure alone is never authorization. Restart/archive remain separate explicit actions.";
   if (inspection.lastCleanupRecovery && (inspection.state === "failed" || inspection.state === "paused")) return `Cleanup generation ${inspection.lastCleanupRecovery.workerGeneration} was operator-released, not Pi-verified. Explicitly restart or archive as appropriate; queued obligations remain authoritative.`;
   if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity or ask main to resolve real obligations and archive a clean identity before retrying.";
   if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity or archive another clean identity first.";
@@ -256,41 +255,27 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
     name: "manage_agent",
     label: "Manage agent",
     description:
-      "Control an existing email agent without assigning work. Main-thread only. Stop retains the identity lease; restart resumes the same persistent work; only verified clean archive releases identity capacity. recover_cleanup is a separate operator-attested, exact-generation release for a settled persisted unknown quarantine; it is never Pi verification and never restarts, archives, or delivers mail. Cancellation of explicitly abandoned exact requests is separate.",
-    promptSnippet: "Stop, restart, archive, clear a failure, or explicitly recover an exact cleanup quarantine with operator authorization.",
+      "Control an existing email agent without assigning work. Main-thread only. Stop retains the identity lease; restart resumes the same persistent work; only verified clean archive releases identity capacity. Cancellation of explicitly abandoned exact requests is separate.",
+    promptSnippet: "Stop, restart, archive, or clear a failure.",
     promptGuidelines: [
       "Stop only to make work inactive; it does not free maxAgents identity capacity.",
       "Cancel only explicitly abandoned exact requests after the recipient is inactive, then archive only when all blockers are clear.",
       "Before restarting a failed agent, inspect its current-batch Work and native Conversation; explicitly restart the same identity only after accounting for possible effects.",
-      "Invoke recover_cleanup only after the human explicitly authorizes that exact address and workerGeneration based on external quiescence verification, and preserve their bounded evidence statement. Capacity pressure alone is never authorization.",
     ],
     executionMode: "sequential" as const,
     parameters: Type.Object({
       address: Type.String({ description: "Existing subagent address" }),
-      action: PiAi.StringEnum(["stop", "restart", "archive", "clear_failure", "recover_cleanup"] as const),
-      workerGeneration: Type.Optional(Type.Integer({ minimum: 1, description: "Required exact worker generation for recover_cleanup only" })),
-      operatorEvidence: Type.Optional(Type.String({ minLength: 8, maxLength: 1024, description: "Required human-provided external quiescence evidence for recover_cleanup only; never credentials" })),
+      action: PiAi.StringEnum(["stop", "restart", "archive", "clear_failure"] as const),
     }, { additionalProperties: false }),
     async execute(_id, params) {
       try {
         const broker = getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
-        let cleanupRecovery: { workerGeneration: number; releasedAt: string; source: "operator-attested" } | undefined;
-        if (params.action !== "recover_cleanup"
-          && (params.workerGeneration !== undefined || params.operatorEvidence !== undefined)) {
-          throw new Error("workerGeneration and operatorEvidence are valid only for recover_cleanup.");
-        }
         if (params.action === "stop") await broker.stop(params.address);
         else if (params.action === "restart") await broker.restart(params.address);
         else if (params.action === "archive") await broker.archive(params.address);
         else if (params.action === "clear_failure") await broker.clearFailure(params.address);
-        else {
-          if (params.workerGeneration === undefined || params.operatorEvidence === undefined) {
-            throw new Error("recover_cleanup requires exact workerGeneration and operatorEvidence.");
-          }
-          const audit = await broker.recoverCleanup(params.address, params.workerGeneration, params.operatorEvidence);
-          cleanupRecovery = { workerGeneration: audit.workerGeneration, releasedAt: audit.releasedAt, source: audit.source };
-        }
+        else throw new Error(`Unsupported manage_agent action: ${String((params as { action?: unknown }).action)}.`);
         const inspection = broker.inspectAgent(params.address);
         const state = inspection.state;
         const capacityText = `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} activation leases used · run concurrency: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit} slots used.`;
@@ -300,9 +285,7 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
             ? "The same persistent session and mailbox are resumed; genuine obligations remain authoritative."
             : params.action === "archive"
               ? `Identity lease released: ${inspection.holdsActivationLease ? "no" : "yes"}.`
-              : params.action === "clear_failure"
-                ? "Clearing a failure diagnostic does not resolve or cancel any obligation."
-                : `Cleanup generation ${cleanupRecovery!.workerGeneration} is operator-released, not Pi-verified; no restart, archive, or mail delivery was performed.`;
+              : "Clearing a failure diagnostic does not resolve or cancel any obligation.";
         return textResult(
           `${params.action} completed for ${params.address}. State: ${state}.\n${actionText} ${capacityText}`,
           {
@@ -312,7 +295,6 @@ export function createMainCoordinationTools(getBroker: () => AgentBroker | undef
             capacity: inspection.capacity,
             holdsActivationLease: inspection.holdsActivationLease,
             archiveEligible: inspection.archiveEligible,
-            ...(cleanupRecovery ? { cleanupRecovery } : {}),
           } satisfies ManageAgentToolDetails,
         );
       } catch (error) {

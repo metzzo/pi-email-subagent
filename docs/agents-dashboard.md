@@ -28,7 +28,7 @@ Pi 0.81.1's public direct-mutation queue serializes one computed path key within
 - `i`: open Inbox
 - `e`, `k`, `r`, `a`, `x`, `m`: compose, stop, restart, archive, clear failure, change effort
 - `/agents cancel <request-id> <reason>`: durably close an intentionally abandoned Inbox obligation after its recipient is inactive
-- `/agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>`: human-authorized exact cleanup release, including when broker startup is blocked
+- `/agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>`: human-command-only exact cleanup release with no model-callable equivalent, including when broker startup is blocked; release remains failed and never auto-restores a worker
 - `Esc`: close
 
 The third row prioritizes active edit/write intent, then unverified shell/custom work, then runtime activity. Its run aggregate includes successful explicit mutations only. Pi-managed retry scheduling and recovery appear as ordinary bounded **Pi agent retry** activity; they do not turn the row red, mark the identity failed, or change mail state.

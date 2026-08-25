@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseSubagentAddressShape } from "./address.ts";
+import { transitionAbandonedOwnerRecovery } from "./abandoned-owner-recovery.ts";
 import { isNamespaceOwner, kernelProcessIdentity, type NamespaceOwner } from "./namespace-lock.ts";
 import { MAX_OPERATOR_CLEANUP_EVIDENCE_BYTES, parseRegistry } from "./registry-store.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
@@ -98,7 +99,22 @@ export function transitionCleanupRecovery(
 
   if (!source.cleanup) {
     if (source.lastCleanupRecovery && sameAudit(source.lastCleanupRecovery, input)) {
-      return { record: clone(source), audit: clone(source.lastCleanupRecovery), idempotent: true };
+      const exactReleasedEpoch = source.workerEpoch?.phase === "operator-released"
+        && source.workerEpoch.generation === input.workerGeneration
+        && !source.workerEpoch.runSlotHeld;
+      const exactInactiveState = source.state === "failed";
+      const noLiveState = !facts.attachedWorker
+        && !facts.provisionalWorker
+        && !facts.pendingFactory
+        && !facts.cleanupOperationPending
+        && !facts.activeTool
+        && !facts.activeRunSlot;
+      if (exactReleasedEpoch && exactInactiveState && noLiveState) {
+        return { record: clone(source), audit: clone(source.lastCleanupRecovery), idempotent: true };
+      }
+      throw new Error(
+        `Stale cleanup recovery retry for generation ${input.workerGeneration}: the current epoch is ${source.workerEpoch?.phase ?? "missing"} generation ${source.workerEpoch?.generation ?? "missing"}, not the same inactive operator-released epoch.`,
+      );
     }
     if (source.lastCleanupRecovery) {
       throw new Error(`Cleanup generation ${source.lastCleanupRecovery.workerGeneration} was already operator-released with a different exact audit; refusing a conflicting retry.`);
@@ -107,6 +123,11 @@ export function transitionCleanupRecovery(
   }
 
   if (source.lastCleanupRecovery?.workerGeneration === input.workerGeneration) {
+    if (source.workerEpoch?.generation !== input.workerGeneration || source.workerEpoch.phase !== "operator-released") {
+      throw new Error(
+        `Stale cleanup recovery retry for generation ${input.workerGeneration}: current epoch is ${source.workerEpoch?.phase ?? "missing"} generation ${source.workerEpoch?.generation ?? "missing"}.`,
+      );
+    }
     throw new Error(`Cleanup generation ${input.workerGeneration} has both a quarantine and an existing recovery audit; registry state is incoherent.`);
   }
   if (facts.attachedWorker) throw new Error("Cleanup recovery requires no attached or live worker.");
@@ -145,6 +166,7 @@ export function transitionCleanupRecovery(
   delete record.cleanup;
   record.lastCleanupRecovery = audit;
   record.workerEpoch = { ...record.workerEpoch!, phase: "operator-released", runSlotHeld: false };
+  record.state = "failed";
   record.failure = `Cleanup quarantine operator-released for worker generation ${input.workerGeneration} by operator attestation; Pi did not verify quiescence. Explicit restart or archive is required.`;
   record.currentActivity = `Cleanup operator-released for generation ${input.workerGeneration}; Pi did not verify quiescence`;
   record.updatedAt = releasedAt;
@@ -238,27 +260,17 @@ async function acquireRecoveryGuard(path: string, namespaceDir: string): Promise
     ...identity,
   };
   const raw = `${JSON.stringify(owner, null, 2)}\n`;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      await writeFile(path, raw, { encoding: "utf8", mode: 0o600, flag: "wx" });
-      await chmod(path, 0o600);
-      return raw;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    const existing = await readStrictOwner(path, namespaceDir);
-    if (await exactOwnerLive(existing.owner)) {
-      throw new Error("A cleanup recovery operation guard is already held by a live exact process; another recovery operation is in progress.");
-    }
-    // A dead recovery operation can leave only the pre-rename old registry or
-    // post-rename new registry. Recheck the exact guard before removing it;
-    // this does not attest worker quiescence or authorize cleanup release.
-    await readUnchanged(path, existing.raw, "Cleanup recovery operation guard");
-    try { await unlink(path); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
+  try {
+    await writeFile(path, raw, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await chmod(path, 0o600);
+    return raw;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    throw new Error(
+      "The fixed .cleanup-recovery.guard already exists; recovery fails closed without reading, replacing, or reclaiming it. Inspect its exact PID, Linux boot ID, and process-start identity; inspect the registry and backups for the crash stage; only after proving that guard owner dead, deliberately remove that one guard and retry.",
+      { cause: error },
+    );
   }
-  throw new Error("Could not acquire the exclusive cleanup recovery operation guard; recovery fails closed.");
 }
 
 async function releaseGuard(path: string, expectedRaw: string): Promise<void> {
@@ -299,6 +311,8 @@ export async function recoverOrphanedCleanup(
     try { registry = parseRegistry(JSON.parse(registryRaw)); } catch (error) {
       throw new Error("Canonical registry is malformed; recovery fails closed.", { cause: error });
     }
+    const abandonedAt = nowIso();
+    registry.agents = registry.agents.map((record) => transitionAbandonedOwnerRecovery(record, abandonedAt).record);
     const index = registry.agents.findIndex((record) => record.address === input.address);
     if (index < 0) throw new Error(`Unknown exact recovery address ${input.address}.`);
     const transition = transitionCleanupRecovery(registry.agents[index]!, input, {
@@ -351,6 +365,33 @@ export async function recoverOrphanedCleanup(
   } finally {
     await releaseGuard(guardPath, guardRaw);
   }
+}
+
+export interface OnlineCleanupRecoveryBroker {
+  recoverCleanup(address: string, workerGeneration: number, evidence: string): Promise<OperatorCleanupRecovery>;
+}
+
+export interface CleanupRecoveryCommandResult {
+  audit: OperatorCleanupRecovery;
+  offline: boolean;
+  nextStep?: OfflineCleanupRecoveryResult["nextStep"];
+}
+
+/** The single human command boundary shared by online and startup-blocked use. */
+export async function executeCleanupRecoveryCommand(
+  args: string,
+  broker: OnlineCleanupRecoveryBroker | undefined,
+  namespaceDir: string,
+): Promise<CleanupRecoveryCommandResult> {
+  const recovery = parseCleanupRecoveryCommand(args);
+  if (broker) {
+    return {
+      audit: await broker.recoverCleanup(recovery.address, recovery.workerGeneration, recovery.evidence),
+      offline: false,
+    };
+  }
+  const result = await recoverOrphanedCleanup(namespaceDir, recovery);
+  return { audit: result.audit, offline: true, nextStep: result.nextStep };
 }
 
 export function parseCleanupRecoveryCommand(args: string): OfflineCleanupRecoveryInput {
