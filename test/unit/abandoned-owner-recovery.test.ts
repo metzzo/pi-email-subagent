@@ -71,6 +71,36 @@ it("conservatively quarantines writable legacy records and retains existing clea
   assert.equal(normalizedExisting.cleanup?.dispose, "timed-out");
 });
 
+it("narrowly migrates the prior paused exact operator-release shape to failed", () => {
+  const prior = record();
+  prior.workerEpoch = {
+    generation: 9, phase: "operator-released", tools: ["bash"], mutationCapable: true, runSlotHeld: false,
+  };
+  prior.lastCleanupRecovery = {
+    workerGeneration: 9,
+    releasedAt: "2026-08-25T01:00:00.000Z",
+    evidence: "Operator checked external quiescence.",
+    source: "operator-attested",
+  };
+  const migrated = transitionAbandonedOwnerRecovery(prior, "2026-08-25T02:00:00.000Z");
+  assert.equal(migrated.changed, true);
+  assert.equal(migrated.record.state, "failed");
+  assert.equal(migrated.record.cleanup, undefined);
+  assert.deepEqual(migrated.record.lastCleanupRecovery, prior.lastCleanupRecovery);
+  assert.equal(migrated.record.updatedAt, "2026-08-25T02:00:00.000Z");
+
+  for (const state of ["idle", "stopped", "running"] as const) {
+    const invalid = structuredClone(prior);
+    invalid.state = state;
+    const untouched = transitionAbandonedOwnerRecovery(invalid, "2026-08-25T02:00:00.000Z");
+    assert.equal(untouched.changed, false, state);
+    assert.equal(untouched.record.state, state, state);
+  }
+  const stale = structuredClone(prior);
+  stale.workerEpoch = { ...stale.workerEpoch!, generation: 10 };
+  assert.equal(transitionAbandonedOwnerRecovery(stale).record.state, "paused");
+});
+
 it("does not synthesize quarantine for exact verified-clean or exact operator-released current epochs", () => {
   const verified = record();
   verified.state = "stopped";

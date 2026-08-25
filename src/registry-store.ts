@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { transitionAbandonedOwnerRecovery } from "./abandoned-owner-recovery.ts";
 import {
   DEFAULT_LIFECYCLE,
   isSafeConfigSemanticText,
@@ -336,7 +337,7 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   if (raw.canSpawn !== undefined && typeof raw.canSpawn !== "boolean") {
     throw new Error(`${label}.canSpawn must be a boolean.`);
   }
-  const record: AgentRecord = {
+  let record: AgentRecord = {
     address: string(raw.address, `${label}.address`).toLowerCase(),
     name: string(raw.name, `${label}.name`),
     taskSlug: string(raw.taskSlug, `${label}.taskSlug`),
@@ -362,13 +363,17 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   if (cleanup) record.cleanup = cleanup;
   const lastCleanupRecovery = parseOperatorCleanupRecovery(raw.lastCleanupRecovery, `${label}.lastCleanupRecovery`);
   if (lastCleanupRecovery) record.lastCleanupRecovery = lastCleanupRecovery;
-  if (record.workerEpoch?.phase === "operator-released"
-    && (!lastCleanupRecovery
+  if (record.workerEpoch?.phase === "operator-released") {
+    if (!lastCleanupRecovery
       || lastCleanupRecovery.workerGeneration !== record.workerEpoch.generation
       || record.workerEpoch.runSlotHeld
-      || cleanup
-      || record.state !== "failed")) {
-    throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit, inactive failed state, and no cleanup quarantine.`);
+      || cleanup) {
+      throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit, inactive failed state, and no cleanup quarantine.`);
+    }
+    record = transitionAbandonedOwnerRecovery(record).record;
+    if (record.state !== "failed") {
+      throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit, inactive failed state, and no cleanup quarantine.`);
+    }
   }
   const instructions = raw.instructions === undefined
     ? undefined
