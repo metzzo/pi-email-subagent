@@ -325,6 +325,69 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
     }
   });
 
+  it("migrates an exact paused operator-release from the prior candidate during offline crash retry", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-offline-prior-release-migration-"));
+    const seeded = await seed(root);
+    const registryPath = join(seeded.namespaceDir, "registry.json");
+    const prior = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    const target = prior.agents.find((candidate: any) => candidate.address === ADDRESS);
+    const sessionFile = target.sessionFile;
+    const releasedAt = "2026-08-25T01:23:45.000Z";
+    const audit = {
+      workerGeneration: 9,
+      releasedAt,
+      evidence: EVIDENCE,
+      source: "operator-attested",
+    };
+    target.state = "paused";
+    delete target.cleanup;
+    target.workerEpoch = {
+      generation: 9, phase: "operator-released", tools: ["bash"], mutationCapable: true, runSlotHeld: false,
+    };
+    target.lastCleanupRecovery = audit;
+    target.failure = "Cleanup quarantine operator-released for worker generation 9 by operator attestation; Pi did not verify quiescence. Explicit restart or archive is required.";
+    target.currentActivity = "Cleanup operator-released for generation 9; Pi did not verify quiescence";
+    target.updatedAt = releasedAt;
+    await writeFile(registryPath, `${JSON.stringify(prior, null, 2)}\n`);
+    const mailBefore = await readFile(join(seeded.namespaceDir, "mail.jsonl"), "utf8");
+    const otherBefore = structuredClone(prior.agents.find((candidate: any) => candidate.address === OTHER));
+    await deadOwner(seeded.namespaceDir);
+
+    const retried = await recoverOrphanedCleanup(seeded.namespaceDir, {
+      address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+    });
+    assert.equal(retried.idempotent, true);
+    assert.deepEqual(retried.audit, audit);
+    await assert.rejects(stat(join(seeded.namespaceDir, ".broker-owner.json")), /ENOENT/);
+    await assert.rejects(stat(`${seeded.namespaceDir}.lock`), /ENOENT/);
+    assert.equal(await readFile(join(seeded.namespaceDir, "mail.jsonl"), "utf8"), mailBefore);
+
+    const canonical = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    const migrated = canonical.agents.find((candidate: any) => candidate.address === ADDRESS);
+    assert.equal(migrated.state, "failed");
+    assert.equal(migrated.cleanup, undefined);
+    assert.equal(migrated.workerEpoch.phase, "operator-released");
+    assert.deepEqual(migrated.lastCleanupRecovery, audit);
+    assert.equal(migrated.sessionFile, sessionFile);
+    assert.deepEqual(canonical.agents.find((candidate: any) => candidate.address === OTHER), otherBefore);
+
+    const workers: FakeWorker[] = [];
+    const reloaded = await brokerAt(root, workers);
+    try {
+      assert.equal(workers.length, 0, "migrated operator release never auto-restores");
+      assert.equal(reloaded.mailStore.get(seeded.queuedId)?.deliveryState, "queued");
+      assert.equal(reloaded.inspectAgent(ADDRESS).state, "failed");
+      await reloaded.restart(ADDRESS);
+      assert.equal(workers.length, 1, "later explicit restart creates exactly one worker");
+      await waitForDelivery(reloaded, seeded.queuedId);
+      const restarted = reloaded.getSnapshot().agents.find((candidate) => candidate.address === ADDRESS)!;
+      assert.equal(restarted.workerEpoch?.generation, 10);
+      assert.equal(restarted.workerEpoch?.phase, "activated");
+    } finally {
+      await reloaded.shutdown();
+    }
+  });
+
   it("rejects a stale generation-9 retry after the current epoch advanced to activated generation 10 without touching owner, lock, or registry", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-offline-stale-retry-"));
     const seeded = await seed(root);

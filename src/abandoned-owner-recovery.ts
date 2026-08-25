@@ -7,10 +7,9 @@ export interface AbandonedOwnerRecoveryTransition {
   changed: boolean;
 }
 
-function exactOperatorRelease(record: AgentRecord): boolean {
+function structurallyExactOperatorRelease(record: AgentRecord): boolean {
   const epoch = record.workerEpoch;
   return epoch?.phase === "operator-released"
-    && record.state === "failed"
     && !record.cleanup
     && !epoch.runSlotHeld
     && record.lastCleanupRecovery?.source === "operator-attested"
@@ -31,7 +30,17 @@ export function transitionAbandonedOwnerRecovery(
 
   const epoch = record.workerEpoch;
   const exactVerifiedClean = epoch?.phase === "verified-clean" && !epoch.runSlotHeld && !record.cleanup;
-  const exactReleased = exactOperatorRelease(record);
+  const exactReleaseShape = structurallyExactOperatorRelease(record);
+  let changed = false;
+  // Candidate 19ad1b1 could commit this exact inactive shape before orphan
+  // artifact removal. Canonicalize only that narrow prior state; later epochs,
+  // cleanup/run holds, and all other lifecycle states remain fail-closed.
+  if (exactReleaseShape && record.state === "paused") {
+    record.state = "failed";
+    record.updatedAt = at;
+    changed = true;
+  }
+  const exactReleased = exactReleaseShape && record.state === "failed";
   const unsafeCurrentEpoch = Boolean(
     epoch
     && (epoch.phase === "spawning" || epoch.phase === "activated")
@@ -39,7 +48,6 @@ export function transitionAbandonedOwnerRecovery(
   );
   const unsafeLegacy = !epoch && isConservativeCleanupCapable(record.tools);
 
-  let changed = false;
   if (!record.cleanup && !exactVerifiedClean && !exactReleased && (unsafeCurrentEpoch || unsafeLegacy)) {
     record.cleanup = {
       state: "unknown",
@@ -60,7 +68,7 @@ export function transitionAbandonedOwnerRecovery(
     changed = true;
   }
 
-  if (!record.cleanup) return { record, changed: false };
+  if (!record.cleanup) return { record, changed };
 
   const cleanupOwnerWasLive = record.cleanup.state === "pending"
     || record.cleanup.abort === "pending"

@@ -148,7 +148,9 @@ describe("registry schema", () => {
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: undefined }] }), /operator-released.*audit/i);
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, source: "Pi-verified" } }] }), /operator-attested/i);
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, workerGeneration: 8 } }] }), /operator-released.*exact/i);
-    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, state: "paused" }] }), /operator-released.*failed/i);
+    const migrated = parseRegistry({ ...registry(), agents: [{ ...base, state: "paused" }] });
+    assert.equal(migrated.agents[0]?.state, "failed");
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, state: "stopped" }] }), /operator-released.*failed/i);
   });
 
   it("round-trips bounded cleanup quarantine and rejects malformed diagnostics", () => {
