@@ -13,7 +13,7 @@ const EVIDENCE = "The human said they externally verified exact generation 9 is 
 interface FakeContextOptions {
   mode?: ExtensionContext["mode"];
   hasUI?: boolean;
-  confirm?: (title: string, message: string, options?: { timeout?: number; signal?: AbortSignal }) => Promise<boolean>;
+  confirm?: (title: string, message: string, options?: { timeout?: number; signal?: AbortSignal }) => Promise<unknown>;
   sessionId?: string;
 }
 
@@ -95,6 +95,23 @@ describe("one-use cleanup recovery confirmation capability", () => {
       }), /live Pi UI.*unavailable|not authorized/i);
       assert.equal(prompted, false);
       assert.equal(executions, 0);
+    }
+  });
+
+  it("requires exact boolean true and rejects every other runtime confirmation value", async () => {
+    const rejectedValues: unknown[] = ["false", "true", "", 0, 1, -1, {}, [], null, undefined];
+    for (const [index, value] of rejectedValues.entries()) {
+      let executions = 0;
+      const context = fakeContext({ confirm: async () => value });
+      const capability = createCleanupRecoveryProposalCapability({
+        getState: () => ({ context, generation: 1, broker: undefined }),
+        namespaceDir: () => "/tmp/untrusted-confirmation",
+        execute: async () => { executions += 1; return commandResult(); },
+      });
+      await assert.rejects(capability.propose(`tool-untrusted-${index}`, {
+        address: ADDRESS, workerGeneration: 9, operatorEvidence: EVIDENCE,
+      }), /proposal rejected.*confirmation.*denied|not authorized/i, JSON.stringify(value));
+      assert.equal(executions, 0, JSON.stringify(value));
     }
   });
 
