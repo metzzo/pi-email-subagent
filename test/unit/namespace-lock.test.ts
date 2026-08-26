@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -30,6 +30,51 @@ it("excludes a second owner, reports the PID, and releases idempotently", async 
   await first.release();
   const replacement = await NamespaceLock.acquire(namespace, () => undefined);
   await replacement.release();
+});
+
+it("rejects POSIX-valid newline and overbound namespace paths before creating any artifact", async () => {
+  const fixtures = [
+    {
+      label: "newline",
+      makeNamespace: (root: string) => join(root, "valid-posix\nnamespace"),
+    },
+    {
+      label: "overbound",
+      makeNamespace: (root: string) => join(root, ...Array.from({ length: 24 }, () => "x".repeat(180))),
+    },
+  ];
+  for (const fixture of fixtures) {
+    const root = await mkdtemp(join(tmpdir(), `pi-email-invalid-namespace-${fixture.label}-`));
+    const namespace = fixture.makeNamespace(root);
+    assert.ok(Buffer.byteLength(namespace, "utf8") > 4_096 || namespace.includes("\n"));
+    let acquired: NamespaceLock | undefined;
+    let acquisitionError: unknown;
+    try {
+      acquired = await NamespaceLock.acquire(namespace, () => undefined);
+    } catch (error) {
+      acquisitionError = error;
+    }
+    await acquired?.release().catch(() => undefined);
+    assert.match(String(acquisitionError), /namespace path.*invalid.*before.*artifact/i, fixture.label);
+    assert.deepEqual(await readdir(root), [], `${fixture.label}: no namespace, owner, lock, or transition artifact`);
+  }
+});
+
+it("does not report clean release when its own owner sidecar is no longer recognizable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-unreadable-own-owner-"));
+  const namespace = join(root, "state");
+  const ownerPath = join(namespace, ".broker-owner.json");
+  const lease = await NamespaceLock.acquire(namespace, () => undefined);
+  const validOwner = await readFile(ownerPath, "utf8");
+  await writeFile(ownerPath, "{malformed-own-owner\n");
+  try {
+    await assert.rejects(lease.release(), /own namespace owner.*not recognizable.*fails closed/i);
+    assert.equal(await readFile(ownerPath, "utf8"), "{malformed-own-owner\n");
+    await stat(`${namespace}.lock`);
+  } finally {
+    await writeFile(ownerPath, validOwner);
+    await lease.release();
+  }
 });
 
 it("blocks contenders on both controlled owner-publication and release gaps", async () => {

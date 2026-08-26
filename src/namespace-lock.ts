@@ -87,6 +87,13 @@ function isCanonicalIsoTimestamp(value: string): boolean {
   return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
+function isValidOwnerNamespace(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && Buffer.byteLength(value, "utf8") <= MAX_OWNER_NAMESPACE_BYTES
+    && !/[\0\r\n]/.test(value);
+}
+
 export function isNamespaceOwner(value: unknown, expectedNamespaceDir?: string): value is NamespaceOwner {
   if (!value || typeof value !== "object") return false;
   const owner = value as Partial<NamespaceOwner>;
@@ -95,10 +102,7 @@ export function isNamespaceOwner(value: unknown, expectedNamespaceDir?: string):
     || !/^[\x21-\x7e]+$/.test(owner.token)
     || Buffer.byteLength(owner.token, "utf8") > MAX_OWNER_TOKEN_BYTES) return false;
   if (typeof owner.acquiredAt !== "string" || !isCanonicalIsoTimestamp(owner.acquiredAt)) return false;
-  if (typeof owner.namespaceDir !== "string"
-    || owner.namespaceDir.length === 0
-    || Buffer.byteLength(owner.namespaceDir, "utf8") > MAX_OWNER_NAMESPACE_BYTES
-    || /[\0\r\n]/.test(owner.namespaceDir)
+  if (!isValidOwnerNamespace(owner.namespaceDir)
     || (expectedNamespaceDir !== undefined && owner.namespaceDir !== expectedNamespaceDir)) return false;
   if (owner.bootId !== undefined && (typeof owner.bootId !== "string" || !BOOT_ID_PATTERN.test(owner.bootId))) return false;
   if (owner.processStartTime !== undefined
@@ -145,6 +149,9 @@ export class NamespaceLock {
     onCompromised: (error: Error) => void,
     hooks: NamespaceLockHooks = {},
   ): Promise<NamespaceLock> {
+    if (!isValidOwnerNamespace(namespaceDir)) {
+      throw new Error("Subagent namespace path is invalid before any owner, lock, or transition artifact can be created.");
+    }
     await mkdir(namespaceDir, { recursive: true, mode: 0o700 });
     await restrictMode(namespaceDir, 0o700);
     // Serialize owner inspection, dead-owner lock removal, filesystem lock
@@ -249,9 +256,14 @@ export class NamespaceLock {
       namespaceDir,
       ...(identity ?? {}),
     };
+    const roundTrippedOwner = JSON.parse(JSON.stringify(owner)) as unknown;
+    if (!isNamespaceOwner(roundTrippedOwner, namespaceDir)) {
+      await releaseLock().catch(() => undefined);
+      throw new Error("Generated subagent namespace owner did not round-trip through strict owner validation; publication was blocked.");
+    }
     try {
-      await replaceOwner(ownerPath, owner);
-      return new NamespaceLock(namespaceDir, abandonedOwner, ownerPath, owner, releaseLock, hooks);
+      await replaceOwner(ownerPath, roundTrippedOwner);
+      return new NamespaceLock(namespaceDir, abandonedOwner, ownerPath, roundTrippedOwner, releaseLock, hooks);
     } catch (error) {
       await releaseLock().catch(() => undefined);
       throw new Error(`Could not persist subagent namespace ownership: ${errorMessage(error)}`, { cause: error });
@@ -260,13 +272,26 @@ export class NamespaceLock {
 
   async release(): Promise<void> {
     if (this.released) return;
+    const owned = await readOwner(this.ownerPath, this.namespaceDir);
+    if (!owned) {
+      throw new Error("The lease's own namespace owner sidecar is not recognizable before release; clean release fails closed.");
+    }
+    if (owned.token !== this.owner.token) {
+      throw new Error("The lease's own namespace owner generation changed before release; clean release fails closed.");
+    }
     // Release the kernel/filesystem lock first. During the following sidecar
     // gap, contenders still fail closed on this exact live owner. This order
     // prevents an old callback from deleting metadata for a newer lease.
     await this.releaseLock();
     await this.hooks.afterFilesystemLockReleased?.();
     const current = await readOwner(this.ownerPath, this.namespaceDir);
-    if (current?.token === this.owner.token) await unlink(this.ownerPath).catch(() => undefined);
+    if (!current) {
+      throw new Error("The lease's own namespace owner sidecar is not recognizable during release; clean release fails closed.");
+    }
+    if (current.token !== this.owner.token) {
+      throw new Error("The lease's own namespace owner generation changed during release; clean release fails closed.");
+    }
+    await unlink(this.ownerPath);
     this.released = true;
   }
 }
