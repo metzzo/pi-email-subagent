@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, readFile, readdir, stat, unlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentBroker } from "../../src/broker.ts";
 import { recoverOrphanedCleanup } from "../../src/cleanup-recovery.ts";
+import { createCleanupRecoveryProposalCapability } from "../../src/confirmed-cleanup-recovery.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { NamespaceLock } from "../../src/namespace-lock.ts";
 import { FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
@@ -135,7 +137,67 @@ async function deadOwner(namespaceDir: string): Promise<void> {
   await mkdir(`${namespaceDir}.lock`);
 }
 
+function approvedOfflineCapability(namespaceDir: string) {
+  const context = {
+    mode: "tui",
+    hasUI: true,
+    sessionManager: { getSessionId: () => "approved-offline" },
+    ui: { confirm: async () => true },
+  } as unknown as ExtensionContext;
+  return createCleanupRecoveryProposalCapability({
+    getState: () => ({ context, generation: 1, broker: undefined }),
+    namespaceDir: () => namespaceDir,
+  });
+}
+
 describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux" ? "Linux /proc owner identity is required" : false }, () => {
+  it("requires a live UI approval before the shared startup-blocked callback reads or mutates orphan state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-offline-confirmed-proposal-"));
+    const seeded = await seed(root);
+    await deadOwner(seeded.namespaceDir);
+    const registryPath = join(seeded.namespaceDir, "registry.json");
+    const ownerPath = join(seeded.namespaceDir, ".broker-owner.json");
+    const lockPath = `${seeded.namespaceDir}.lock`;
+    const registryBefore = await readFile(registryPath, "utf8");
+    const ownerBefore = await readFile(ownerPath, "utf8");
+    const lockBefore = await stat(lockPath);
+    let approved = false;
+    let prompts = 0;
+    const context = {
+      mode: "rpc",
+      hasUI: true,
+      sessionManager: { getSessionId: () => "offline-confirmed" },
+      ui: { confirm: async () => { prompts += 1; return approved; } },
+    } as unknown as ExtensionContext;
+    const capability = createCleanupRecoveryProposalCapability({
+      getState: () => ({ context, generation: 3, broker: undefined }),
+      namespaceDir: () => seeded.namespaceDir,
+    });
+    const proposal = { address: ADDRESS, workerGeneration: 9, operatorEvidence: EVIDENCE };
+
+    await assert.rejects(capability.propose("offline-denied", proposal), /proposal rejected.*denied/i);
+    assert.equal(await readFile(registryPath, "utf8"), registryBefore);
+    assert.equal(await readFile(ownerPath, "utf8"), ownerBefore);
+    const lockAfterDenial = await stat(lockPath);
+    assert.deepEqual(
+      [lockAfterDenial.ino, lockAfterDenial.mode, lockAfterDenial.mtimeMs],
+      [lockBefore.ino, lockBefore.mode, lockBefore.mtimeMs],
+    );
+    assert.equal((await readdir(seeded.namespaceDir)).some((name) => name.includes("cleanup-recovery")), false);
+
+    approved = true;
+    const recovered = await capability.propose("offline-approved", proposal);
+    assert.equal(prompts, 2);
+    assert.equal(recovered.address, ADDRESS);
+    assert.equal(recovered.offline, true);
+    assert.equal(recovered.audit.workerGeneration, 9);
+    assert.equal(recovered.nextStep, "Run /reload, then explicitly restart or archive the recovered identity as appropriate.");
+    await assert.rejects(stat(ownerPath), /ENOENT/);
+    await assert.rejects(stat(lockPath), /ENOENT/);
+    const registry = JSON.parse(await readFile(registryPath, "utf8")) as any;
+    assert.equal(registry.agents.find((record: any) => record.address === ADDRESS).workerEpoch.phase, "operator-released");
+  });
+
   it("backs up and atomically releases only a dead exact owner after an explicit confirmed audit", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-offline-recovery-"));
     const seeded = await seed(root);
@@ -257,8 +319,8 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
     const owner = await NamespaceLock.acquire(seeded.namespaceDir, () => undefined);
     try {
       const before = await readFile(join(seeded.namespaceDir, "registry.json"), "utf8");
-      await assert.rejects(recoverOrphanedCleanup(seeded.namespaceDir, {
-        address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+      await assert.rejects(approvedOfflineCapability(seeded.namespaceDir).propose("approved-live-owner", {
+        address: ADDRESS, workerGeneration: 9, operatorEvidence: EVIDENCE,
       }), new RegExp(`owner.*${process.pid}.*live|live.*owner`, "i"));
       assert.equal(await readFile(join(seeded.namespaceDir, "registry.json"), "utf8"), before);
       assert.equal((JSON.parse(await readFile(join(seeded.namespaceDir, ".broker-owner.json"), "utf8")) as any).pid, process.pid);
@@ -279,8 +341,8 @@ describe("startup-blocked cleanup recovery", { skip: process.platform !== "linux
     try {
       const pid = await waitForHolder(child, () => stderr);
       assert.equal(child.kill("SIGSTOP"), true);
-      await assert.rejects(recoverOrphanedCleanup(seeded.namespaceDir, {
-        address: ADDRESS, workerGeneration: 9, evidence: EVIDENCE, confirmed: true,
+      await assert.rejects(approvedOfflineCapability(seeded.namespaceDir).propose("approved-sigstop-owner", {
+        address: ADDRESS, workerGeneration: 9, operatorEvidence: EVIDENCE,
       }), new RegExp(`owner pid ${pid}.*still live|still live.*${pid}`, "i"));
       assert.ok((await stat(join(seeded.namespaceDir, ".broker-owner.json"))).isFile());
     } finally {

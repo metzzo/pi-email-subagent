@@ -3,8 +3,10 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { AgentBroker } from "../../src/broker.ts";
 import { executeCleanupRecoveryCommand } from "../../src/cleanup-recovery.ts";
+import { createCleanupRecoveryProposalCapability } from "../../src/confirmed-cleanup-recovery.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import { makeReplySubject } from "../../src/reply.ts";
@@ -156,34 +158,102 @@ describe("explicit cleanup-quarantine recovery", () => {
     }
   });
 
-  it("keeps manage_agent mechanically unable to recover byte-identical quarantine while the direct human command succeeds", async () => {
+  it("gives model evidence zero authority until one exact UI approval and keeps the direct human command functional", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-command-boundary-"));
     await seedPersistedUnknown(root);
     const broker = await brokerAt(root);
     try {
       const registryPath = join(root, "state", "registry.json");
       const before = await readFile(registryPath, "utf8");
-      const manage = createMainCoordinationTools(() => broker)[3];
-      await assert.rejects(manage.execute("forged-recovery", {
+      let approved = false;
+      let prompts = 0;
+      const context = {
+        mode: "tui",
+        hasUI: true,
+        sessionManager: { getSessionId: () => "confirmed-online" },
+        ui: { confirm: async () => { prompts += 1; return approved; } },
+      } as unknown as ExtensionContext;
+      const capability = createCleanupRecoveryProposalCapability({
+        getState: () => ({ context, generation: 1, broker }),
+        namespaceDir: () => join(root, "state"),
+      });
+      const manage = createMainCoordinationTools(() => broker, capability)[3];
+      const proposal = {
         address: ADDRESS,
-        action: "recover_cleanup",
+        action: "recover_cleanup" as const,
         workerGeneration: 9,
-        operatorEvidence: "Model-forged evidence must never be accepted.",
-      } as never, undefined, undefined, {} as never), /unsupported.*action|could not manage/i);
-      assert.equal(await readFile(registryPath, "utf8"), before, "model tool attempt must preserve quarantine byte-for-byte");
+        operatorEvidence: EVIDENCE,
+      };
+
+      await assert.rejects(
+        manage.execute("forged-recovery", proposal, undefined, undefined, {} as never),
+        /proposal rejected.*confirmation.*denied/i,
+      );
+      assert.equal(await readFile(registryPath, "utf8"), before, "denied model proposal preserves quarantine byte-for-byte");
       assert.equal(broker.inspectAgent(ADDRESS).cleanup?.workerGeneration, 9);
 
-      const result = await executeCleanupRecoveryCommand(
+      approved = true;
+      const confirmed = await manage.execute("confirmed-recovery", proposal, undefined, undefined, {} as never);
+      assert.equal(prompts, 2, "the approved retry receives its own new confirmation");
+      assert.match((confirmed.content[0] as { text: string }).text, /confirmed.*not Pi-verified/i);
+      assert.equal(JSON.stringify(confirmed).includes(EVIDENCE), false, "the tool result omits the evidence body");
+      assert.equal(broker.inspectAgent(ADDRESS).cleanup, undefined);
+      assert.equal(broker.inspectAgent(ADDRESS).state, "failed");
+
+      const afterConfirmed = await readFile(registryPath, "utf8");
+      const direct = await executeCleanupRecoveryCommand(
         `recover-cleanup ${ADDRESS} 9 --confirm ${EVIDENCE}`,
         broker,
         join(root, "state"),
       );
-      assert.equal(result.audit.source, "operator-attested");
-      assert.equal(result.offline, false);
-      assert.equal(broker.inspectAgent(ADDRESS).cleanup, undefined);
-      assert.equal(broker.inspectAgent(ADDRESS).state, "failed");
+      assert.equal(direct.audit.source, "operator-attested");
+      assert.equal(direct.offline, false);
+      assert.equal(await readFile(registryPath, "utf8"), afterConfirmed, "the exact direct-human retry is idempotent");
     } finally {
       await broker.shutdown();
+    }
+  });
+
+  it("rejects when the exact cleanup generation changes while the confirmation dialog is open", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-cleanup-confirmation-generation-race-"));
+    await seedPersistedUnknown(root);
+    const broker = await brokerAt(root);
+    const internal = broker as any;
+    const record = internal.records.get(ADDRESS) as AgentRecord;
+    const registryPath = join(root, "state", "registry.json");
+    const persistedBefore = await readFile(registryPath, "utf8");
+    let stateAfterExternalChange: AgentRecord | undefined;
+    const context = {
+      mode: "tui",
+      hasUI: true,
+      sessionManager: { getSessionId: () => "generation-race" },
+      ui: {
+        confirm: async () => {
+          record.cleanup!.workerGeneration = 10;
+          record.workerEpoch!.generation = 10;
+          stateAfterExternalChange = structuredClone(record);
+          return true;
+        },
+      },
+    } as unknown as ExtensionContext;
+    const capability = createCleanupRecoveryProposalCapability({
+      getState: () => ({ context, generation: 2, broker }),
+      namespaceDir: () => join(root, "state"),
+    });
+    const manage = createMainCoordinationTools(() => broker, capability)[3];
+    try {
+      await assert.rejects(manage.execute("generation-race", {
+        address: ADDRESS,
+        action: "recover_cleanup",
+        workerGeneration: 9,
+        operatorEvidence: EVIDENCE,
+      }, undefined, undefined, {} as never), /generation mismatch.*10.*9/i);
+      assert.deepEqual(record, stateAfterExternalChange, "recovery adds no mutation after observing the changed generation");
+      assert.equal(await readFile(registryPath, "utf8"), persistedBefore, "the stale confirmation commits no registry write");
+    } finally {
+      record.cleanup!.workerGeneration = 9;
+      record.workerEpoch!.generation = 9;
+      await broker.shutdown().catch(() => undefined);
     }
   });
 

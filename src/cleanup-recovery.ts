@@ -68,7 +68,7 @@ export function sanitizeCleanupRecoveryEvidence(value: string): string {
   return safeErrorSummary(trimmed);
 }
 
-function normalizedInput(input: CleanupRecoveryInput): CleanupRecoveryInput {
+export function normalizeCleanupRecoveryInput(input: CleanupRecoveryInput): CleanupRecoveryInput {
   const address = parseSubagentAddressShape(input.address).address;
   if (!Number.isSafeInteger(input.workerGeneration) || input.workerGeneration < 1) {
     throw new Error("workerGeneration must be a positive safe integer.");
@@ -94,7 +94,7 @@ export function transitionCleanupRecovery(
   facts: CleanupRecoveryFacts,
   releasedAt = nowIso(),
 ): CleanupRecoveryTransition {
-  const input = normalizedInput(rawInput);
+  const input = normalizeCleanupRecoveryInput(rawInput);
   if (source.address !== input.address) throw new Error(`Recovery address does not exactly match ${source.address}.`);
 
   if (!source.cleanup) {
@@ -287,7 +287,7 @@ export async function recoverOrphanedCleanup(
 ): Promise<OfflineCleanupRecoveryResult> {
   if (!rawInput.confirmed) throw new Error("Offline cleanup recovery requires the explicit --confirm authorization.");
   if (process.platform !== "linux") throw new Error("Offline cleanup recovery requires Linux boot-ID and /proc process-start verification.");
-  const input = normalizedInput(rawInput);
+  const input = normalizeCleanupRecoveryInput(rawInput);
   const guardPath = join(namespaceDir, RECOVERY_GUARD_FILE);
   const guardRaw = await acquireRecoveryGuard(guardPath, namespaceDir);
 
@@ -372,26 +372,45 @@ export interface OnlineCleanupRecoveryBroker {
 }
 
 export interface CleanupRecoveryCommandResult {
+  address: string;
   audit: OperatorCleanupRecovery;
   offline: boolean;
+  idempotent?: boolean;
   nextStep?: OfflineCleanupRecoveryResult["nextStep"];
 }
 
-/** The single human command boundary shared by online and startup-blocked use. */
+/** Shared exact transition callback for confirmed model proposals and the literal human command. */
+export async function executeCleanupRecovery(
+  rawInput: CleanupRecoveryInput,
+  broker: OnlineCleanupRecoveryBroker | undefined,
+  namespaceDir: string,
+): Promise<CleanupRecoveryCommandResult> {
+  const recovery = normalizeCleanupRecoveryInput(rawInput);
+  if (broker) {
+    return {
+      address: recovery.address,
+      audit: await broker.recoverCleanup(recovery.address, recovery.workerGeneration, recovery.evidence),
+      offline: false,
+    };
+  }
+  const result = await recoverOrphanedCleanup(namespaceDir, { ...recovery, confirmed: true });
+  return {
+    address: recovery.address,
+    audit: result.audit,
+    offline: true,
+    idempotent: result.idempotent,
+    nextStep: result.nextStep,
+  };
+}
+
+/** Direct human command boundary shared by online and startup-blocked use. */
 export async function executeCleanupRecoveryCommand(
   args: string,
   broker: OnlineCleanupRecoveryBroker | undefined,
   namespaceDir: string,
 ): Promise<CleanupRecoveryCommandResult> {
   const recovery = parseCleanupRecoveryCommand(args);
-  if (broker) {
-    return {
-      audit: await broker.recoverCleanup(recovery.address, recovery.workerGeneration, recovery.evidence),
-      offline: false,
-    };
-  }
-  const result = await recoverOrphanedCleanup(namespaceDir, recovery);
-  return { audit: result.audit, offline: true, nextStep: result.nextStep };
+  return executeCleanupRecovery(recovery, broker, namespaceDir);
 }
 
 export function parseCleanupRecoveryCommand(args: string): OfflineCleanupRecoveryInput {

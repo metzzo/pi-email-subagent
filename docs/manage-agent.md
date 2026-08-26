@@ -6,10 +6,12 @@ Control an existing agent's lifecycle without assigning work. Main-thread only. 
 
 | Parameter | Type | Required | Description |
 |-----------|------|:--------:|-------------|
-| `address` | string | ✓ | Existing subagent address |
-| `action` | `"stop" \| "restart" \| "archive" \| "clear_failure"` | ✓ | Lifecycle action |
+| `address` | string | ✓ | Exact existing subagent address |
+| `action` | `"stop" \| "restart" \| "archive" \| "clear_failure" \| "recover_cleanup"` | ✓ | Lifecycle action or recovery proposal |
+| `workerGeneration` | positive safe integer | recovery only | Exact quarantined generation; rejected on other actions |
+| `operatorEvidence` | bounded string | recovery only | Quote/summary of what the human said they externally verified; rejected on other actions |
 
-Cleanup recovery is deliberately absent from this model-callable tool and schema. There is no `recover_cleanup` action, `workerGeneration` parameter, or `operatorEvidence` parameter.
+The four ordinary lifecycle calls remain compatible with only `address` and `action`. Recovery-only fields are required together for `recover_cleanup` and rejected on every other action.
 
 ## Actions
 
@@ -36,15 +38,21 @@ The activation lease is released only after any live worker reports verified cle
 
 Deletes the stored `failure` diagnostic. Only valid while the agent is `idle`, `stopped`, or `archived`, and never while cleanup is quarantined: clearing text cannot establish quiescence or release held capacity. A failure on a live obligation path must be resolved by `restart` or by answering the mail, not by clearing the message.
 
-## Human-command-only cleanup recovery
+### `recover_cleanup`
 
-Cleanup recovery is not a `manage_agent` action and is not model-callable. Only a human may type the literal command after explicitly authorizing the exact address and worker generation and supplying a substantive statement confirming external quiescence verification. A model must not invoke the command or synthesize/paraphrase the evidence. Capacity pressure, elapsed time, abort/dispose success, a detached worker, or a dead namespace owner is never authorization.
+This action is a **proposal**, not model authorization. The agent may call it only after the user explicitly says they externally verified quiescence for the exact address and worker generation. `operatorEvidence` quotes or summarizes what that human said; a plausible model-generated statement has zero authority by itself. Capacity pressure, elapsed time, abort/dispose success, a detached worker, or a dead namespace owner is never authorization.
 
-The same literal `/agents` command is used while the online broker is active and when startup is blocked by the orphan namespace lease:
+Before any online/offline recovery read, write, or release, the tool synchronously opens Pi's supported `ctx.ui.confirm` dialog. The dialog shows the canonical address, exact generation, bounded/control-sanitized/redacted evidence, and a warning that Pi did not prove process quiescence and surviving effects may overlap. It has a finite timeout. Only an affirmative response authorizes one immediate execution for that exact tool call and session generation. Denial, cancellation, timeout, no UI (`json`/`print`), stale context, session replacement, or generation/state change rejects without using the recovery transition. RPC mode uses Pi's `extension_ui_request`/`extension_ui_response` `confirm` protocol; the client must return `confirmed: true`. No reusable token is created, and a replay prompts again.
+
+After confirmation, the capability rechecks the exact tuple/session and calls the shared online/offline transition, which rechecks all current cleanup facts immediately before release. A generation change while the dialog is open rejects and needs a new confirmation. Success remains `failed`/`operator-released`; the tool result reports confirmed status and the separate `/reload`/restart/archive next step without returning the evidence body. A rejected call is a native tool error that says the proposal was rejected.
+
+A model must never invoke or claim approval for the literal command below. It remains a direct human-command-only alternative while the online broker is active and when startup is blocked by the orphan namespace lease:
 
 ```text
 /agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>
 ```
+
+This `/agents recover-cleanup` form is the direct human-command-only alternative; the agent may not invoke it.
 
 The online broker accepts only an inactive `failed`/`paused` identity with a persisted `quiescence: unknown` cleanup whose state and abort/dispose phases are settled, whose durable worker epoch exactly matches the requested generation, and which has no attached/provisional worker, pending factory, pending cleanup operation, active tool, run slot, or concurrent lifecycle action. Success atomically persists `lastCleanupRecovery = { workerGeneration, releasedAt, evidence, source: "operator-attested" }`, changes that exact epoch phase to `operator-released`, removes only that exact quarantine/run hold, and durably forces the identity to `failed`. It is not Pi-verified and does **not** use `verified-clean`. Reload never automatically restores/creates its worker or delivers its queued mail; only a later separate explicit `restart` may create one new generation and deliver, while `archive` remains separate. Recovery itself never starts a provider retry, cancels an obligation, or pumps deferred work. An exact retry is idempotent only while the same current epoch remains inactive `failed`/`operator-released` without cleanup/run holds; an old audit cannot release a later activated generation. For upgrade recovery only, the prior candidate's structurally exact same-generation `paused`/`operator-released`/no-hold crash shape is narrowly canonicalized to `failed` before that idempotent retry; no later epoch or other state is migrated. Persistence failure restores the in-memory quarantine.
 
@@ -63,7 +71,7 @@ stop completed for reviewer.audit@gpt-5.6-sol.com. State: stopped.
 Identity lease remains held; stop alone does not free maxAgents identity capacity. Identity capacity: 8/8 activation leases used · run concurrency: 0/4 slots used.
 ```
 
-Action-specific text reports that stop retains its lease, restart resumes the same persistent session/mail, archive released the lease, or clear-failure did not resolve obligations. `details` additively carries `address`, `action`, resulting `state`, current derived `capacity`, `holdsActivationLease`, and `archiveEligible`. Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true` — unknown address, unsupported action, invalid transition, capacity limit, bounded actionable archival blockers, cleanup deadline, or unknown quiescence. Use [`inspect_agent`](inspect-agent.md) for the same capacity/blocker view and cleanup diagnostic.
+Action-specific text reports that stop retains its lease, restart resumes the same persistent session/mail, archive released the lease, or clear-failure did not resolve obligations. For `recover_cleanup`, text reports confirmed/not-Pi-verified status and the separate next step; `details` contains only canonical address, action, failed state, exact generation, `recoveryStatus: "confirmed"`, offline status, and the offline next step when applicable—never the evidence body. Ordinary lifecycle `details` additively carries `address`, `action`, resulting `state`, current derived `capacity`, `holdsActivationLease`, and `archiveEligible`. Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true` — unknown address, unsupported action, invalid transition, capacity limit, bounded actionable archival blockers, cleanup deadline, or unknown quiescence. Use [`inspect_agent`](inspect-agent.md) for the same capacity/blocker view and cleanup diagnostic.
 
 ## Safe identity-capacity recovery
 
@@ -78,4 +86,4 @@ No step is automatic or bulk. Capacity pressure alone authorizes neither cancell
 
 ## Equivalents
 
-The ordinary model-callable actions are available interactively as `/agents stop|restart|archive|clear-failure <address>`, or through the dashboard (`/agents`, keys `k` / `r` / `a` / `x`). Exact cleanup recovery is human-command-only through `/agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>` so it remains available when broker initialization failed; it has no `manage_agent` equivalent. Effort changes are a separate surface: `/agents effort <address> <level>` or the dashboard `m` key, valid only while the agent is idle. Abandoned obligations use the separate exact-ID command `/agents cancel <request-id> <reason>`.
+The ordinary model-callable actions are available interactively as `/agents stop|restart|archive|clear-failure <address>`, or through the dashboard (`/agents`, keys `k` / `r` / `a` / `x`). Exact cleanup recovery has two entry points: the model-callable `manage_agent recover_cleanup` proposal, which always requires affirmative one-use Pi UI confirmation, and the direct human-command-only `/agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>` alternative, which remains available when broker initialization failed. Effort changes are a separate surface: `/agents effort <address> <level>` or the dashboard `m` key, valid only while the agent is idle. Abandoned obligations use the separate exact-ID command `/agents cancel <request-id> <reason>`.
