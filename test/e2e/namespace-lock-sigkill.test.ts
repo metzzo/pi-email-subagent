@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -31,6 +31,58 @@ function waitForReady(child: ReturnType<typeof spawn>, stderr: () => string): Pr
     child.once("close", onClose);
   });
 }
+
+it("never steals a live holder lock when exact owner fields are truthy but malformed", {
+  timeout: 30_000,
+  skip: process.platform !== "linux" ? "kernel owner fencing requires Linux /proc" : false,
+}, async () => {
+  const variants = [
+    { label: "boot ID", patch: { bootId: "truthy-not-a-uuid" } },
+    { label: "process start", patch: { processStartTime: "1e3" } },
+    { label: "token bound", patch: { token: "x".repeat(201) } },
+    { label: "timestamp bound", patch: { acquiredAt: `2026-09-01T00:00:00.000Z${"x".repeat(200)}` } },
+  ];
+  for (const variant of variants) {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-malformed-live-owner-"));
+    const namespace = join(root, "state");
+    const child = spawn(process.execPath, ["--import", "tsx", "test/e2e/helpers/namespace-lock-holder.ts", namespace], {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    const closed = new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", () => resolve());
+    });
+    let replacement: NamespaceLock | undefined;
+    try {
+      const holderPid = await waitForReady(child, () => stderr);
+      const ownerPath = join(namespace, ".broker-owner.json");
+      const owner = JSON.parse(await readFile(ownerPath, "utf8")) as Record<string, unknown>;
+      const malformedBytes = `${JSON.stringify({ ...owner, ...variant.patch }, null, 2)}\n`;
+      await writeFile(ownerPath, malformedBytes);
+      const lockBefore = await stat(`${namespace}.lock`);
+
+      let acquisitionError: unknown;
+      try {
+        replacement = await NamespaceLock.acquire(namespace, () => undefined);
+      } catch (error) {
+        acquisitionError = error;
+      }
+      assert.match(String(acquisitionError), /ambiguous|malformed|fails closed/i, variant.label);
+      assert.equal(await readFile(ownerPath, "utf8"), malformedBytes, `${variant.label} owner bytes`);
+      assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino, `${variant.label} live lock identity`);
+      assert.doesNotThrow(() => process.kill(holderPid, 0), `${variant.label} live holder remains alive`);
+    } finally {
+      await replacement?.release().catch(() => undefined);
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await closed.catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
 
 it("never steals a stale-mtime namespace lease from a live SIGSTOPed owner", {
   timeout: 30_000,

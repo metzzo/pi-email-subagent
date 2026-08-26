@@ -285,6 +285,8 @@ export class AgentBroker {
   private initPromise?: Promise<void>;
   private closePromise?: Promise<void>;
   private namespaceLock?: NamespaceLock;
+  /** Exact-dead takeover cannot be released cleanly until normalized registry state is durable. */
+  private abandonedNormalizationCommitted = true;
   private disposed = false;
   private mainRouting: { address: string; preferredProvider?: string };
 
@@ -323,6 +325,7 @@ export class AgentBroker {
         this.options.mainAdapter.notifyFailure(`Subagent namespace lock was compromised: ${errorMessage(error)}`);
         swallow(this.shutdown());
       });
+      this.abandonedNormalizationCommitted = !this.namespaceLock.abandonedOwner;
       this.checkpoint(generation);
       await this.mailStore.init();
       this.checkpoint(generation);
@@ -488,6 +491,10 @@ export class AgentBroker {
         }
       }
       await this.persistRegistry(true);
+      // This is the first commit containing every exact-dead-owner
+      // normalization. Only now may this process later release takeover as a
+      // clean namespace generation.
+      this.abandonedNormalizationCommitted = true;
       this.checkpoint(generation);
 
       const restorable = [...this.records.values()]
@@ -3071,8 +3078,11 @@ export class AgentBroker {
 
   private async releaseNamespaceLock(): Promise<void> {
     const current = this.namespaceLock;
-    this.namespaceLock = undefined;
+    if (current?.abandonedOwner && !this.abandonedNormalizationCommitted) {
+      throw new Error("Exact-dead-owner normalization was not durably committed; namespace ownership remains held until process death.");
+    }
     await current?.release();
+    if (this.namespaceLock === current) this.namespaceLock = undefined;
   }
 
   private async close(): Promise<void> {

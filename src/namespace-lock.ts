@@ -7,6 +7,11 @@ import { errorMessage, nowIso } from "./util.ts";
 const OWNER_FILE = ".broker-owner.json";
 export const NAMESPACE_LOCK_STALE_MS = 10_000;
 const UPDATE_MS = 2_000;
+const MAX_OWNER_TOKEN_BYTES = 200;
+const MAX_OWNER_NAMESPACE_BYTES = 4_096;
+const BOOT_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+const PROCESS_START_PATTERN = /^[1-9][0-9]{0,31}$/;
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface NamespaceLockHooks {
   afterFilesystemLockAcquired?: () => void | Promise<void>;
@@ -39,10 +44,12 @@ export async function kernelProcessIdentity(pid: number): Promise<KernelProcessI
   if (close < 0) throw new Error(`could not parse /proc/${pid}/stat`);
   const fieldsAfterCommand = processStat.slice(close + 1).trim().split(/\s+/);
   const processStartTime = fieldsAfterCommand[19]; // field 22; field 3 is index 0 here
-  if (!processStartTime || !/^\d+$/.test(processStartTime)) {
+  const canonicalBootId = bootId.trim();
+  if (!BOOT_ID_PATTERN.test(canonicalBootId)) throw new Error("could not parse Linux boot ID");
+  if (!processStartTime || !PROCESS_START_PATTERN.test(processStartTime)) {
     throw new Error(`could not parse process start time from /proc/${pid}/stat`);
   }
-  return { bootId: bootId.trim(), processStartTime };
+  return { bootId: canonicalBootId, processStartTime };
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -74,20 +81,35 @@ async function exactOwnerStillLive(owner: NamespaceOwner & Required<Pick<Namespa
   }
 }
 
-export function isNamespaceOwner(value: unknown): value is NamespaceOwner {
-  if (!value || typeof value !== "object") return false;
-  const owner = value as Partial<NamespaceOwner>;
-  return Number.isInteger(owner.pid)
-    && (owner.pid ?? 0) > 0
-    && typeof owner.token === "string"
-    && typeof owner.acquiredAt === "string"
-    && typeof owner.namespaceDir === "string";
+function isCanonicalIsoTimestamp(value: string): boolean {
+  if (!ISO_TIMESTAMP_PATTERN.test(value)) return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
 }
 
-async function readOwner(path: string): Promise<NamespaceOwner | undefined> {
+export function isNamespaceOwner(value: unknown, expectedNamespaceDir?: string): value is NamespaceOwner {
+  if (!value || typeof value !== "object") return false;
+  const owner = value as Partial<NamespaceOwner>;
+  if (!Number.isSafeInteger(owner.pid) || (owner.pid ?? 0) <= 0) return false;
+  if (typeof owner.token !== "string"
+    || !/^[\x21-\x7e]+$/.test(owner.token)
+    || Buffer.byteLength(owner.token, "utf8") > MAX_OWNER_TOKEN_BYTES) return false;
+  if (typeof owner.acquiredAt !== "string" || !isCanonicalIsoTimestamp(owner.acquiredAt)) return false;
+  if (typeof owner.namespaceDir !== "string"
+    || owner.namespaceDir.length === 0
+    || Buffer.byteLength(owner.namespaceDir, "utf8") > MAX_OWNER_NAMESPACE_BYTES
+    || /[\0\r\n]/.test(owner.namespaceDir)
+    || (expectedNamespaceDir !== undefined && owner.namespaceDir !== expectedNamespaceDir)) return false;
+  if (owner.bootId !== undefined && (typeof owner.bootId !== "string" || !BOOT_ID_PATTERN.test(owner.bootId))) return false;
+  if (owner.processStartTime !== undefined
+    && (typeof owner.processStartTime !== "string" || !PROCESS_START_PATTERN.test(owner.processStartTime))) return false;
+  return true;
+}
+
+async function readOwner(path: string, namespaceDir: string): Promise<NamespaceOwner | undefined> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
-    return isNamespaceOwner(parsed) ? parsed : undefined;
+    return isNamespaceOwner(parsed, namespaceDir) ? parsed : undefined;
   } catch {
     return undefined;
   }
@@ -152,13 +174,13 @@ export class NamespaceLock {
     const ownerPath = join(namespaceDir, OWNER_FILE);
     const token = randomUUID();
     const [priorOwner, priorOwnerPathExists, priorLockExists] = await Promise.all([
-      readOwner(ownerPath),
+      readOwner(ownerPath, namespaceDir),
       pathExists(ownerPath),
       pathExists(`${namespaceDir}.lock`),
     ]);
     let abandonedOwner = false;
     if (priorOwner) {
-      if (!priorOwner.bootId || !priorOwner.processStartTime || priorOwner.namespaceDir !== namespaceDir) {
+      if (!priorOwner.bootId || !priorOwner.processStartTime) {
         throw new Error(
           `Subagent namespace owner identity is incomplete or mismatched and recovery fails closed: ${namespaceDir}.`,
         );
@@ -195,7 +217,7 @@ export class NamespaceLock {
       if ((error as NodeJS.ErrnoException).code !== "ELOCKED") {
         throw new Error(`Could not lock subagent namespace ${namespaceDir}: ${errorMessage(error)}`, { cause: error });
       }
-      const owner = await readOwner(ownerPath);
+      const owner = await readOwner(ownerPath, namespaceDir);
       const diagnostic = owner
         ? `pid ${owner.pid}, acquired ${owner.acquiredAt}`
         : "owner metadata unavailable";
@@ -243,7 +265,7 @@ export class NamespaceLock {
     // prevents an old callback from deleting metadata for a newer lease.
     await this.releaseLock();
     await this.hooks.afterFilesystemLockReleased?.();
-    const current = await readOwner(this.ownerPath);
+    const current = await readOwner(this.ownerPath, this.namespaceDir);
     if (current?.token === this.owner.token) await unlink(this.ownerPath).catch(() => undefined);
     this.released = true;
   }

@@ -68,6 +68,51 @@ it("fails closed on malformed owner metadata even without a lock directory", asy
   assert.equal(await readFile(ownerPath, "utf8"), "{malformed\n");
 });
 
+it("rejects truthy malformed exact-owner identity fields without changing the owner or lock", {
+  skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
+}, async () => {
+  const malformedOwners = [
+    { label: "boot ID", bootId: "truthy-not-a-uuid" },
+    { label: "process start", processStartTime: "1e3" },
+    { label: "token bound", token: "x".repeat(201) },
+    { label: "timestamp bound", acquiredAt: `2026-09-01T00:00:00.000Z${"x".repeat(200)}` },
+  ];
+  for (const malformed of malformedOwners) {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-malformed-exact-owner-"));
+    const namespace = join(root, "state");
+    await mkdir(namespace, { recursive: true });
+    const ownerPath = join(namespace, ".broker-owner.json");
+    const owner = {
+      pid: 999_999_999,
+      token: "bounded-token",
+      acquiredAt: "2026-09-01T00:00:00.000Z",
+      namespaceDir: namespace,
+      bootId: "00000000-0000-0000-0000-000000000001",
+      processStartTime: "1",
+      ...malformed,
+    };
+    const bytes = `${JSON.stringify(owner, null, 2)}\n`;
+    await writeFile(ownerPath, bytes);
+    await mkdir(`${namespace}.lock`);
+    const lockBefore = await stat(`${namespace}.lock`);
+
+    let acquired: NamespaceLock | undefined;
+    let acquisitionError: unknown;
+    try {
+      acquired = await NamespaceLock.acquire(namespace, () => undefined);
+    } catch (error) {
+      acquisitionError = error;
+    }
+    try {
+      assert.match(String(acquisitionError), /incomplete|malformed|ambiguous|fails closed/i, malformed.label);
+      assert.equal(await readFile(ownerPath, "utf8"), bytes, `${malformed.label} owner bytes`);
+      assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino, `${malformed.label} lock identity`);
+    } finally {
+      await acquired?.release();
+    }
+  }
+});
+
 it("fails closed on an orphaned lock with no complete exact owner identity", {
   skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
 }, async () => {

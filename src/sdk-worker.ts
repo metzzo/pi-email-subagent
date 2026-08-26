@@ -188,6 +188,8 @@ export class SdkWorker implements WorkerTransport {
   private unsubscribeSession?: () => void;
   private disposed = false;
   private cleanupPromise?: Promise<WorkerCleanupReport>;
+  /** Preflight boundaries for every started AgentSession.prompt operation. */
+  private readonly promptAdmissions = new Set<Promise<void>>();
   private readonly activeToolCalls = new Map<string, string>();
   private startGeneration = 0;
   private startOperation?: Promise<void>;
@@ -481,20 +483,57 @@ export class SdkWorker implements WorkerTransport {
     const previousWork = clone(this.record!.work ??= emptyWorkState());
     const startsBatch = options.newBatch !== false;
     const batchId = startsBatch ? beginBatch(this.record!.work) : (this.record!.work.currentBatchId ?? beginBatch(this.record!.work));
+    let admissionFinished = false;
+    let finishAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      finishAdmission = () => {
+        if (admissionFinished) return;
+        admissionFinished = true;
+        this.promptAdmissions.delete(admission);
+        resolve();
+      };
+    });
+    this.promptAdmissions.add(admission);
+    const finishAfterPiLeavesCallback = (): void => { queueMicrotask(finishAdmission); };
     try {
       await awaitPromptAcceptance(
-        (preflightResult) => session.prompt(message, {
-          source: "extension",
-          expandPromptTemplates: false,
-          preflightResult: (success) => {
-            if (success && startsBatch) this.sessionManager?.appendCustomEntry("pi-email-subagent-work-batch", {
-              batchId,
-              startedAt: this.record!.work!.batchStartedAt,
-            });
-            preflightResult(success);
-          },
-        }),
+        (preflightResult) => {
+          const operation = session.prompt(message, {
+            source: "extension",
+            expandPromptTemplates: false,
+            preflightResult: (success) => {
+              try {
+                const vetoInvalidAdmission = (): void => {
+                  if (!this.disposed && this.session === session) return;
+                  preflightResult(false);
+                  // Pi 0.81.1 invokes this callback synchronously immediately
+                  // before _runAgentPrompt. Throwing is the admission veto that
+                  // prevents a late old-generation model run from starting.
+                  throw new Error("Worker prompt was cancelled by cleanup before Pi preflight admission.");
+                };
+                if (success) vetoInvalidAdmission();
+                if (success && startsBatch) this.sessionManager?.appendCustomEntry("pi-email-subagent-work-batch", {
+                  batchId,
+                  startedAt: this.record!.work!.batchStartedAt,
+                });
+                // Keep the actual Pi acceptance call as the final guarded
+                // action even if a synchronous session entry hook re-entered
+                // cleanup while the batch marker was appended.
+                if (success) vetoInvalidAdmission();
+                preflightResult(success);
+              } finally {
+                // For accepted prompts Pi starts _runAgentPrompt immediately
+                // after this callback returns. Settle on the following
+                // microtask so cleanup observes either that run or the veto.
+                finishAfterPiLeavesCallback();
+              }
+            },
+          });
+          operation.then(finishAdmission, finishAdmission);
+          return operation;
+        },
         (error) => {
+          if (this.disposed) return;
           const messageText = safeErrorSummary(error);
           this.activity("error", messageText);
           this.emit({ type: "failure", error: messageText });
@@ -529,16 +568,19 @@ export class SdkWorker implements WorkerTransport {
     this.startGeneration += 1;
     const session = this.session;
     const unsubscribe = this.unsubscribeSession;
-    const activeToolsAtStart = new Map(this.activeToolCalls);
     const startOperation = this.startOperation;
-    this.session = undefined;
-    this.sessionManager = undefined;
-    this.unsubscribeSession = undefined;
+    const promptAdmissions = [...this.promptAdmissions];
 
     const operation = (async (): Promise<WorkerCleanupReport> => {
-      // Factory/start ownership is part of this exact worker lease. A caller
-      // deadline never settles or cancels the underlying operation.
+      // Factory/start ownership and every already-started Pi prompt preflight
+      // are part of this exact worker lease. A caller deadline never settles
+      // or cancels either underlying operation.
       await startOperation?.catch(() => undefined);
+      await Promise.allSettled(promptAdmissions);
+      const activeToolsAtStart = new Map(this.activeToolCalls);
+      if (this.session === session) this.session = undefined;
+      this.sessionManager = undefined;
+      if (this.unsubscribeSession === unsubscribe) this.unsubscribeSession = undefined;
       let abort: WorkerCleanupReport["abort"] = "succeeded";
       let dispose: WorkerCleanupReport["dispose"] = "succeeded";
       const wasStreaming = Boolean(session?.isStreaming);
