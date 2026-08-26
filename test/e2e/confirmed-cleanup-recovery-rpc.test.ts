@@ -140,6 +140,27 @@ describe("Pi RPC cleanup recovery confirmation protocol", { concurrency: false }
       await client.waitForSettlement(mark, 30_000);
       assert.equal(await readFile(registryPath, "utf8"), beforeDenial);
 
+      const requestIds = new Set([deniedRequest.id]);
+      for (const [label, value] of [["string-false", "false"], ["number-one", 1], ["object", {}]] as const) {
+        const beforeUntrustedResponse = await readFile(registryPath, "utf8");
+        mark = client.mark();
+        await client.prompt("E2E RECOVER CLEANUP");
+        const untrustedRequest = await client.waitFor(
+          (line) => line.type === "extension_ui_request" && line.method === "confirm",
+          `${label} cleanup recovery confirmation request`,
+          30_000,
+          mark,
+        );
+        assert.equal(requestIds.has(untrustedRequest.id), false, `${label} retry receives a fresh request ID`);
+        requestIds.add(untrustedRequest.id);
+        client.send({ type: "extension_ui_response", id: untrustedRequest.id, confirmed: value });
+        const rejected = await client.waitFor(manageEnd, `${label} rejected manage_agent recovery`, 30_000, mark);
+        assert.equal(rejected.isError, true, `${label}: ${resultText(rejected)}`);
+        assert.match(resultText(rejected), /proposal rejected.*human confirmation.*denied/i, label);
+        await client.waitForSettlement(mark, 30_000);
+        assert.equal(await readFile(registryPath, "utf8"), beforeUntrustedResponse, `${label} commits no transition`);
+      }
+
       mark = client.mark();
       await client.prompt("E2E RECOVER CLEANUP");
       const approvedRequest = await client.waitFor(
@@ -148,7 +169,8 @@ describe("Pi RPC cleanup recovery confirmation protocol", { concurrency: false }
         30_000,
         mark,
       );
-      assert.notEqual(approvedRequest.id, deniedRequest.id);
+      assert.equal(requestIds.has(approvedRequest.id), false, "approval retry receives a fresh request ID");
+      requestIds.add(approvedRequest.id);
       client.send({ type: "extension_ui_response", id: approvedRequest.id, confirmed: true });
       const approved = await client.waitFor(manageEnd, "approved manage_agent recovery", 30_000, mark);
       assert.equal(approved.isError, false, resultText(approved));
@@ -175,7 +197,8 @@ describe("Pi RPC cleanup recovery confirmation protocol", { concurrency: false }
         30_000,
         mark,
       );
-      assert.notEqual(replayRequest.id, approvedRequest.id, "approval is not a reusable token");
+      assert.equal(requestIds.has(replayRequest.id), false, "approval is not a reusable token");
+      requestIds.add(replayRequest.id);
       client.send({ type: "extension_ui_response", id: replayRequest.id, confirmed: true });
       const replay = await client.waitFor(manageEnd, "confirmed idempotent replay", 30_000, mark);
       assert.equal(replay.isError, false, resultText(replay));

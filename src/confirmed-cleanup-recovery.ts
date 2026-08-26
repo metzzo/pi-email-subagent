@@ -105,7 +105,9 @@ export function createCleanupRecoveryProposalCapability(
       const capturedGeneration = before.generation;
       const capturedSessionId = sessionId(context);
 
-      let confirmed: boolean;
+      // Treat the public UI boundary as untrusted at runtime. RPC transports can
+      // forward schema-invalid values despite the TypeScript boolean contract.
+      let confirmed: unknown;
       try {
         confirmed = await context.ui.confirm(
           "Confirm cleanup recovery proposal",
@@ -115,7 +117,7 @@ export function createCleanupRecoveryProposalCapability(
       } catch {
         throw new Error("Cleanup recovery proposal rejected: the Pi confirmation UI failed closed, so recovery was not authorized.");
       }
-      if (!confirmed || signal?.aborted) {
+      if (confirmed !== true || signal?.aborted) {
         throw new Error(
           "Cleanup recovery proposal rejected: human confirmation was denied, cancelled, timed out, or aborted. No recovery was authorized.",
         );
