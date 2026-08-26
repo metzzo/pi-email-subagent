@@ -112,7 +112,7 @@ describe("initial delegation lifecycle", () => {
       const inspection = broker.inspectAgent("worker.spawn-timeout@gpt-5.4.com");
       assert.match(inspection.failure ?? "", /LIFECYCLE_SPAWN_TIMEOUT/);
       assert.equal(inspection.cleanup?.workerGeneration, 1);
-      await assert.rejects(broker.restart(inspection.address), /cleanup quiescence is unknown/i);
+      await assert.rejects(broker.restart(inspection.address), /Pi session\/tool cleanup settlement is unknown/i);
       assert.equal(factoryCalls, 1, "explicit restart cannot create generation 2 while generation 1 factory is pending");
 
       const late = new FakeWorker();
@@ -402,7 +402,7 @@ describe("initial delegation lifecycle", () => {
     }
   });
 
-  it("fails and quarantines an active tool at the absolute run deadline without a receipt", async () => {
+  it("keeps the run timeout terminal after fake cleanup reports session/tool settlement", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-lifecycle-run-"));
     const workers: FakeWorker[] = [];
     const broker = await brokerWith(root, () => {
@@ -426,10 +426,10 @@ describe("initial delegation lifecycle", () => {
         const inspection = broker.inspectAgent(sent.envelope.to);
         assert.equal(inspection.state, "failed");
         assert.match(inspection.failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
-        assert.equal(inspection.cleanup?.state, "unknown");
+        assert.equal(inspection.cleanup, undefined);
         assert.equal(workers[0]?.disposed, true);
       });
-      assert.equal((broker as any).active.has(sent.envelope.to), true, "active capacity remains held without proof");
+      assert.equal((broker as any).active.has(sent.envelope.to), false, "settled cleanup releases the exact run slot");
       assert.equal(broker.fetchUnanswered(sent.envelope.to).length, 1, "accepted request remains an open obligation");
     } finally {
       await broker.shutdown().catch(() => undefined);

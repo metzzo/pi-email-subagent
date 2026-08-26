@@ -41,7 +41,7 @@ it("blocks contenders on both controlled owner-publication and release gaps", as
     afterFilesystemLockAcquired: async () => { acquired.resolve(); await publish.promise; },
   });
   await acquired.promise;
-  await assert.rejects(NamespaceLock.acquire(namespace, () => undefined), /lock is orphaned.*fails closed/i);
+  await assert.rejects(NamespaceLock.acquire(namespace, () => undefined), /owner transition.*in progress.*fails closed/i);
   publish.resolve();
   const first = await acquiring;
 
@@ -58,7 +58,17 @@ it("blocks contenders on both controlled owner-publication and release gaps", as
   await next.release();
 });
 
-it("fails closed on an orphaned lock instead of stealing across an owner-publication gap", {
+it("fails closed on malformed owner metadata even without a lock directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-malformed-owner-"));
+  const namespace = join(root, "state");
+  await mkdir(namespace, { recursive: true });
+  const ownerPath = join(namespace, ".broker-owner.json");
+  await writeFile(ownerPath, "{malformed\n");
+  await assert.rejects(NamespaceLock.acquire(namespace, () => undefined), /ownership is ambiguous.*fails closed/i);
+  assert.equal(await readFile(ownerPath, "utf8"), "{malformed\n");
+});
+
+it("fails closed on an orphaned lock with no complete exact owner identity", {
   skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-stale-lock-"));
@@ -79,7 +89,7 @@ it("fails closed on an orphaned lock instead of stealing across an owner-publica
 
   await assert.rejects(
     NamespaceLock.acquire(namespace, () => undefined),
-    /orphaned.*fail.*closed|manual.*recovery/i,
+    /identity is incomplete|ownership is ambiguous.*fails closed/i,
   );
   const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { token: string };
   assert.equal(owner.token, "stale-token");

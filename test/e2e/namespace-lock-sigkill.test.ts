@@ -71,7 +71,7 @@ it("never steals a stale-mtime namespace lease from a live SIGSTOPed owner", {
   }
 });
 
-it("fails closed on the real orphaned namespace lease after SIGKILL", {
+it("automatically reclaims a real orphaned namespace lease after exact-owner SIGKILL", {
   timeout: 15_000,
   skip: process.platform !== "linux" ? "Linux fixture requires /proc owner identity" : false,
 }, async () => {
@@ -100,15 +100,13 @@ it("fails closed on the real orphaned namespace lease after SIGKILL", {
     const exit = await closed;
     assert.equal(exit.code, null);
     assert.equal(exit.signal, "SIGKILL");
-    await assert.rejects(NamespaceLock.acquire(namespace, () => undefined), /orphaned.*fails closed/i);
-    await new Promise((resolve) => setTimeout(resolve, NAMESPACE_LOCK_STALE_MS + 500));
-    await assert.rejects(
-      NamespaceLock.acquire(namespace, () => undefined),
-      /orphaned.*fails closed.*manual recovery/i,
-      "elapsed stale time never authorizes stealing an unbound generation",
-    );
-    const ownerAfter = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number };
-    assert.equal(ownerAfter.pid, holderPid);
+    const replacement = await NamespaceLock.acquire(namespace, () => undefined);
+    assert.equal(replacement.abandonedOwner, true);
+    const ownerAfter = JSON.parse(await readFile(join(namespace, ".broker-owner.json"), "utf8")) as { pid: number; bootId?: string; processStartTime?: string };
+    assert.equal(ownerAfter.pid, process.pid);
+    assert.ok(ownerAfter.bootId);
+    assert.ok(ownerAfter.processStartTime);
+    await replacement.release();
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await rm(root, { recursive: true, force: true });

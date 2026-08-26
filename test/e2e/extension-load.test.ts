@@ -20,7 +20,7 @@ it("loads the packaged extension with tools, command, and renderers and no confl
     "wait_for_replies",
   ]);
   assert.equal(extension.commands.has("agents"), true);
-  assert.match(extension.commands.get("agents")!.description ?? "", /offline recovery.*recover-cleanup/i);
+  assert.doesNotMatch(extension.commands.get("agents")!.description ?? "", /recover.cleanup|offline recovery/i);
   assert.equal(extension.shortcuts.size, 1);
   assert.equal(extension.messageRenderers.has("pi-email-subagent.email"), true);
   assert.equal(extension.messageRenderers.has("pi-email-subagent.alert"), true);
@@ -65,17 +65,13 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   assert.deepEqual(enumFromOptional(inspectProperties.effort), ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
   const manageDefinition = extension.tools.get("manage_agent")!.definition;
   const manageProperties = (manageDefinition.parameters as { properties: Record<string, unknown> }).properties;
-  assert.deepEqual(enumFromOptional(manageProperties.action), ["stop", "restart", "archive", "clear_failure", "recover_cleanup"]);
-  assert.deepEqual(Object.keys(manageProperties).sort(), ["action", "address", "operatorEvidence", "workerGeneration"]);
-  const privateEvidence = "PRIVATE OPERATOR EVIDENCE BODY";
+  assert.deepEqual(enumFromOptional(manageProperties.action), ["stop", "restart", "archive", "clear_failure"]);
+  assert.deepEqual(Object.keys(manageProperties).sort(), ["action", "address"]);
   const manageCall = manageDefinition.renderCall!({
-    address: "worker.recovery@gpt-5.6-sol.com",
-    action: "recover_cleanup",
-    workerGeneration: 9,
-    operatorEvidence: privateEvidence,
+    address: "worker.lifecycle@gpt-5.6-sol.com",
+    action: "restart",
   } as never, theme, {} as never).render(100).join("\n");
-  assert.match(manageCall, /recover_cleanup.*worker\.recovery@gpt-5\.6-sol\.com.*generation 9/i);
-  assert.doesNotMatch(manageCall, new RegExp(privateEvidence));
+  assert.match(manageCall, /restart.*worker\.lifecycle@gpt-5\.6-sol\.com/i);
 
   const callComponent = sendDefinition.renderCall!({
     to: "worker.history@gpt-5.4.com\x1b]0;recipient\x07",

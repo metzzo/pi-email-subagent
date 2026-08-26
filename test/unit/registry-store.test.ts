@@ -109,10 +109,16 @@ describe("registry schema", () => {
     const legacy = record();
     const legacyParsed = parseRegistry({ ...registry(), agents: [legacy] });
     assert.equal(legacyParsed.agents[0]?.workerEpoch, undefined);
+    const legacyVerified = parseRegistry({
+      ...registry(),
+      agents: [{ ...base, workerEpoch: { ...base.workerEpoch, phase: "verified-clean", runSlotHeld: false } }],
+    });
+    assert.equal(legacyVerified.agents[0]?.workerEpoch?.phase, "session-settled");
 
     for (const workerEpoch of [
       { ...base.workerEpoch, generation: 0 },
       { ...base.workerEpoch, phase: "unknown" },
+      { ...base.workerEpoch, phase: "session-settled", runSlotHeld: true },
       { ...base.workerEpoch, tools: ["x".repeat(101)] },
       { ...base.workerEpoch, tools: Array.from({ length: 129 }, (_, index) => `tool-${index}`) },
       { ...base.workerEpoch, mutationCapable: "yes" },
@@ -122,10 +128,10 @@ describe("registry schema", () => {
     }
   });
 
-  it("round-trips an operator-released epoch only with its exact durable non-Pi audit", () => {
-    const base = record();
+  it("safely canonicalizes legacy operator-release records without retaining an audit or proof claim", () => {
+    const base: any = record();
     const at = new Date().toISOString();
-    base.state = "failed";
+    base.state = "paused";
     base.workerEpoch = {
       generation: 9,
       phase: "operator-released",
@@ -136,21 +142,19 @@ describe("registry schema", () => {
     base.lastCleanupRecovery = {
       workerGeneration: 9,
       releasedAt: at,
-      evidence: "External check; Authorization: Bearer secret-value",
+      evidence: "External historical statement; Authorization: Bearer secret-value",
       source: "operator-attested",
     };
     const parsed = parseRegistry({ ...registry(), agents: [base] });
-    assert.equal(parsed.agents[0]?.workerEpoch?.phase, "operator-released");
-    assert.equal(parsed.agents[0]?.lastCleanupRecovery?.source, "operator-attested");
-    assert.match(parsed.agents[0]?.lastCleanupRecovery?.evidence ?? "", /Authorization: \[redacted\]/i);
-    assert.doesNotMatch(parsed.agents[0]?.lastCleanupRecovery?.evidence ?? "", /secret-value/);
+    assert.equal(parsed.agents[0]?.workerEpoch?.phase, "session-settled");
+    assert.equal(parsed.agents[0]?.state, "failed");
+    assert.equal(Object.hasOwn(parsed.agents[0]!, "lastCleanupRecovery"), false);
+    assert.match(parsed.agents[0]?.failure ?? "", /legacy operator cleanup release.*not Pi session settlement.*OS-process proof/i);
+    assert.doesNotMatch(JSON.stringify(parsed.agents[0]), /secret-value|operator-attested/i);
 
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: undefined }] }), /operator-released.*audit/i);
-    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, source: "Pi-verified" } }] }), /operator-attested/i);
-    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery!, workerGeneration: 8 } }] }), /operator-released.*exact/i);
-    const migrated = parseRegistry({ ...registry(), agents: [{ ...base, state: "paused" }] });
-    assert.equal(migrated.agents[0]?.state, "failed");
-    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, state: "stopped" }] }), /operator-released.*failed/i);
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery, source: "Pi-verified" } }] }), /operator-attested/i);
+    assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery, workerGeneration: 8 } }] }), /operator-released.*exact/i);
   });
 
   it("round-trips bounded cleanup quarantine and rejects malformed diagnostics", () => {
@@ -168,7 +172,7 @@ describe("registry schema", () => {
       mutationCapableAtStart: true,
       heldRunSlot: false,
       activeTools: [{ toolCallId: "call-1", toolName: "bash" }],
-      detail: "Pi 0.81.1 exposes no process-quiescence receipt.",
+      detail: "Pi session/tool cleanup did not settle before the caller deadline.",
     };
     const parsed = parseRegistry({ ...registry(), agents: [base] });
     assert.deepEqual((parsed.agents[0] as any).cleanup, (base as any).cleanup);

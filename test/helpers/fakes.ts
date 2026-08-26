@@ -8,7 +8,6 @@ import type {
   MainDelivery,
   SendEmailInput,
   SendEmailResult,
-  WorkerCleanupOptions,
   WorkerCleanupReport,
   WorkerEvent,
   WorkerSnapshot,
@@ -99,7 +98,7 @@ export class FakeWorker implements WorkerTransport {
 
   async dispose(): Promise<void> { this.disposed = true; this.listeners.clear(); }
 
-  cleanup(_options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
+  cleanup(): Promise<WorkerCleanupReport> {
     if (this.cleanupPromise) return this.cleanupPromise;
     this.cleanupPromise = (async () => {
       let abort: WorkerCleanupReport["abort"] = "succeeded";
@@ -110,7 +109,7 @@ export class FakeWorker implements WorkerTransport {
       const quiescence = abort === "succeeded" && dispose === "succeeded" ? "verified" as const : "unknown" as const;
       return {
         sessionDisposed: dispose === "succeeded",
-        providerQuiescent: abort === "succeeded",
+        sessionIdle: abort === "succeeded",
         tools: [],
         quiescence,
         source: "fake-worker-cleanup-receipt",

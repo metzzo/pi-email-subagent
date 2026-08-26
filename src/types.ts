@@ -168,21 +168,11 @@ export interface CleanupToolRef {
 /** Persisted fail-closed summary; an in-memory cleanup Promise is never persisted. */
 export interface WorkerCapabilityEpoch {
   generation: number;
-  phase: "spawning" | "activated" | "verified-clean" | "operator-released";
+  phase: "spawning" | "activated" | "session-settled";
   tools: string[];
   mutationCapable: boolean;
   runSlotHeld: boolean;
 }
-
-/** Durable exact-generation audit for a human-authorized quarantine release. */
-export interface OperatorCleanupRecovery {
-  workerGeneration: number;
-  releasedAt: string;
-  evidence: string;
-  source: "operator-attested";
-}
-
-export type OperatorCleanupRecoverySummary = Omit<OperatorCleanupRecovery, "evidence">;
 
 export interface CleanupDiagnostic {
   state: "pending" | "unknown";
@@ -192,6 +182,7 @@ export interface CleanupDiagnostic {
   updatedAt: string;
   abort: CleanupPhaseState;
   dispose: CleanupPhaseState;
+  /** Compatibility field: Pi session/tool settlement is not yet known. */
   quiescence: "unknown";
   /** Capability of the exact worker generation, independent of later config changes. */
   mutationCapableAtStart: boolean;
@@ -224,8 +215,6 @@ export interface AgentRecord {
   currentActivity?: string;
   failure?: string;
   cleanup?: CleanupDiagnostic;
-  /** Last explicit operator release; this is not Pi verification. */
-  lastCleanupRecovery?: OperatorCleanupRecovery;
   enforcementAttempts: number;
   lifecycle: LifecyclePolicy;
   usage: UsageSnapshot;
@@ -323,7 +312,6 @@ export interface AgentInspection {
   usage: UsageSnapshot;
   failure?: string;
   cleanup?: CleanupDiagnostic;
-  lastCleanupRecovery?: OperatorCleanupRecoverySummary;
   providerReady: "available" | "unavailable" | "unknown";
   lifecycle: LifecyclePolicy;
 }
@@ -379,23 +367,21 @@ export interface WorkerSnapshot {
 }
 
 export interface WorkerCleanupToolReport extends CleanupToolRef {
-  quiescence: "verified" | "not-applicable" | "unknown";
+  quiescence: "verified" | "unknown";
   detailCode?: string;
 }
 
 export interface WorkerCleanupReport {
   sessionDisposed: boolean;
-  providerQuiescent: boolean;
+  /** Whether the Pi AgentSession reached its idle boundary; never an OS descendant claim. */
+  sessionIdle: boolean;
   tools: WorkerCleanupToolReport[];
+  /** Compatibility field meaning only Pi session/tool settlement. */
   quiescence: "verified" | "unknown";
   source: string;
   abort: CleanupPhaseState;
   dispose: CleanupPhaseState;
   detail?: string;
-}
-
-export interface WorkerCleanupOptions {
-  abortTimeoutMs: number;
 }
 
 export interface WorkerStartConfig {
@@ -417,7 +403,7 @@ export interface WorkerTransport {
   followUp(message: string): Promise<void>;
   abort(): Promise<void>;
   dispose(): Promise<void>;
-  cleanup(options: WorkerCleanupOptions): Promise<WorkerCleanupReport>;
+  cleanup(): Promise<WorkerCleanupReport>;
   setEffort(level: ThinkingLevel): void;
   getSnapshot(): WorkerSnapshot;
   getSessionFile(): string | undefined;

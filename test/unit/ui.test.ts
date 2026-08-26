@@ -171,19 +171,6 @@ describe("dashboard rendering", () => {
     const unavailableProfile = component.render(120).join("\n");
     assert.match(unavailableProfile, /binding: persisted openai-codex\/gpt-5\.4.*unavailable.*no provider substitution/i);
     assert.doesNotMatch(unavailableProfile, /PRIVATE SUBJECT|PRIVATE BODY|worker\.unrelated/i);
-    agent.workerEpoch = {
-      generation: 9, phase: "operator-released", tools: ["bash"], mutationCapable: true, runSlotHeld: false,
-    };
-    agent.lastCleanupRecovery = {
-      workerGeneration: 9,
-      releasedAt: "2026-08-23T00:00:00.000Z",
-      evidence: "PRIVATE OPERATOR EVIDENCE",
-      source: "operator-attested",
-    };
-    (inspection as any).lastCleanupRecovery = agent.lastCleanupRecovery;
-    const releasedProfile = component.render(120).join("\n");
-    assert.match(releasedProfile, /generation 9.*operator-released.*not Pi-verified.*restart\/archive/i);
-    assert.doesNotMatch(releasedProfile, /PRIVATE OPERATOR EVIDENCE/);
     component.handleInput("i");
     const inbox = component.render(120).join("\n");
     assert.match(inbox, /PRIVATE SUBJECT/);

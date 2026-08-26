@@ -3,7 +3,6 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import * as TypeBox from "typebox";
 import type { AgentBroker } from "./broker.ts";
-import type { CleanupRecoveryProposalCapability } from "./confirmed-cleanup-recovery.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { textResult } from "./tool-result.ts";
 import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
@@ -34,15 +33,11 @@ export interface CancelRequestToolDetails {
 
 export interface ManageAgentToolDetails {
   address?: string;
-  action?: "stop" | "restart" | "archive" | "clear_failure" | "recover_cleanup";
+  action?: "stop" | "restart" | "archive" | "clear_failure";
   state?: string;
   capacity?: AgentCapacitySnapshot;
   holdsActivationLease?: boolean;
   archiveEligible?: boolean;
-  workerGeneration?: number;
-  recoveryStatus?: "confirmed";
-  offline?: boolean;
-  nextStep?: string;
 }
 
 function compactEnvelopeDetails(envelope: EmailEnvelope | undefined): EmailEnvelope | undefined {
@@ -61,8 +56,7 @@ function inspectionRecovery(inspection: AgentInspection): string {
     + inspection.archiveBlockers.incomingUnanswered.count
     + inspection.archiveBlockers.outgoingUnanswered.count
     + inspection.archiveBlockers.pendingReplies.count;
-  if (inspection.cleanup) return "Cleanup quiescence is unknown. manage_agent recover_cleanup may propose release only after the human explicitly said they externally verified this exact generation's quiescence; the live Pi UI always asks the human for exact confirmation before any recovery access. Capacity pressure alone is never authorization. The human-command-only literal /agents recover-cleanup form remains a direct alternative. Restart/archive remain separate explicit actions.";
-  if (inspection.lastCleanupRecovery && (inspection.state === "failed" || inspection.state === "paused")) return `Cleanup generation ${inspection.lastCleanupRecovery.workerGeneration} was operator-released, not Pi-verified. Explicitly restart or archive as appropriate; queued obligations remain authoritative.`;
+  if (inspection.cleanup) return "Pi session/tool cleanup settlement is unknown for this exact address. Wait for its live cleanup operation to settle; restart/archive remain blocked only for this identity and queued mail is preserved.";
   if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity or ask main to resolve real obligations and archive a clean identity before retrying.";
   if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity or archive another clean identity first.";
   if (inspection.state === "paused" && !inspection.holdsActivationLease) return "This overflow identity needs free identity capacity before restart; retain or resolve its obligations through main.";
@@ -89,7 +83,6 @@ function compactWaitDetails(result: WaitForRepliesResult): WaitForRepliesResult 
 
 export function createMainCoordinationTools(
   getBroker: () => AgentBroker | undefined,
-  cleanupRecovery?: CleanupRecoveryProposalCapability,
 ) {
   const EffortSchema = PiAi.StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
   const inspect = PiCodingAgent.defineTool({
@@ -129,7 +122,7 @@ export function createMainCoordinationTools(
         ];
         const blockerDetails = [
           inspection.archiveBlockers.active ? "active worker" : undefined,
-          inspection.archiveBlockers.cleanupQuarantine ? "cleanup quiescence unknown" : undefined,
+          inspection.archiveBlockers.cleanupQuarantine ? "Pi session/tool cleanup unsettled" : undefined,
           formatBlocker("queued", inspection.archiveBlockers.queued),
           formatBlocker("incoming unanswered", inspection.archiveBlockers.incomingUnanswered),
           formatBlocker("outgoing unanswered", inspection.archiveBlockers.outgoingUnanswered),
@@ -138,11 +131,8 @@ export function createMainCoordinationTools(
         if (blockerDetails.length) lines.push(`Archive blockers: ${blockerDetails.join(" · ")}`);
         lines.push(`Recovery: ${inspectionRecovery(inspection)}`);
         if (inspection.cleanup) {
-          lines.push(`Cleanup: ${inspection.cleanup.state} · quiescence unknown · activation held · restart/archive blocked · queued mail preserved`);
+          lines.push(`Cleanup: ${inspection.cleanup.state} · Pi session/tool settlement unknown · exact address held · restart/archive blocked · queued mail preserved`);
           lines.push(`Cleanup phases: abort ${inspection.cleanup.abort} · dispose ${inspection.cleanup.dispose} · generation ${inspection.cleanup.workerGeneration} · mutation-capable at start ${inspection.cleanup.mutationCapableAtStart ? "yes" : "no"} · run slot held ${inspection.cleanup.heldRunSlot ? "yes" : "no"}`);
-        }
-        if (inspection.lastCleanupRecovery) {
-          lines.push(`Last cleanup operator release: generation ${inspection.lastCleanupRecovery.workerGeneration} · ${inspection.lastCleanupRecovery.source} · ${inspection.lastCleanupRecovery.releasedAt} · not Pi-verified · evidence retained in the durable audit`);
         }
         if (inspection.failure) {
           lines.push(`Last failure: ${inspection.failure}`);
@@ -265,79 +255,29 @@ export function createMainCoordinationTools(
     name: "manage_agent",
     label: "Manage agent",
     description:
-      "Control an existing email agent without assigning work. Main-thread only. Stop retains the identity lease; restart resumes the same persistent work; only verified clean archive releases identity capacity. recover_cleanup is only a proposal for an exact quarantined generation: it requires the human's bounded external-quiescence statement and always opens a live Pi UI confirmation before any online/offline recovery access. Model text alone has no authority. Cancellation of explicitly abandoned exact requests is separate.",
-    promptSnippet: "Stop, restart, archive, clear a failure, or propose exact-generation cleanup recovery for human confirmation.",
+      "Control an existing email agent without assigning work. Main-thread only. Stop retains the identity lease; restart resumes the same persistent work; archive releases identity capacity only after Pi session/tool cleanup settles. Cancellation of explicitly abandoned exact requests is separate.",
+    promptSnippet: "Stop, restart, archive, or clear a failure.",
     promptGuidelines: [
       "Stop only to make work inactive; it does not free maxAgents identity capacity.",
       "Cancel only explicitly abandoned exact requests after the recipient is inactive, then archive only when all blockers are clear.",
       "Before restarting a failed agent, inspect its current-batch Work and native Conversation; explicitly restart the same identity only after accounting for possible effects.",
-      "Use manage_agent recover_cleanup only when the user explicitly said they externally verified the exact worker generation's quiescence; quote or summarize that statement in operatorEvidence.",
-      "manage_agent recover_cleanup always asks the human to confirm through the live Pi UI; model-generated evidence without affirmative UI confirmation has zero authority, and capacity pressure is never authorization.",
-      "A model must not invoke the literal /agents recover-cleanup command or claim approval; report only whether the proposal was confirmed or rejected and the separate /reload, restart, or archive next step.",
     ],
     executionMode: "sequential" as const,
     parameters: Type.Object({
       address: Type.String({ description: "Exact existing subagent address" }),
-      action: PiAi.StringEnum(["stop", "restart", "archive", "clear_failure", "recover_cleanup"] as const),
-      workerGeneration: Type.Optional(Type.Integer({
-        minimum: 1,
-        maximum: Number.MAX_SAFE_INTEGER,
-        description: "Required only for recover_cleanup: exact positive quarantined worker generation",
-      })),
-      operatorEvidence: Type.Optional(Type.String({
-        minLength: 8,
-        maxLength: 1_024,
-        description: "Required only for recover_cleanup: bounded quote or summary of what the human said they externally verified",
-      })),
+      action: PiAi.StringEnum(["stop", "restart", "archive", "clear_failure"] as const),
     }, { additionalProperties: false }),
     renderCall(args, theme) {
       const action = errorMessage(String(args.action ?? ""));
       const address = errorMessage(String(args.address ?? ""));
-      const generation = args.action === "recover_cleanup" && args.workerGeneration !== undefined
-        ? ` generation ${args.workerGeneration}`
-        : "";
       return new Text(
-        `${theme.fg("toolTitle", theme.bold("manage_agent "))}${theme.fg("accent", action)} ${theme.fg("muted", address)}${theme.fg("warning", generation)}`,
+        `${theme.fg("toolTitle", theme.bold("manage_agent "))}${theme.fg("accent", action)} ${theme.fg("muted", address)}`,
         0,
         0,
       );
     },
-    async execute(id, params, signal) {
+    async execute(_id, params) {
       try {
-        const hasWorkerGeneration = params.workerGeneration !== undefined;
-        const hasOperatorEvidence = params.operatorEvidence !== undefined;
-        if (params.action !== "recover_cleanup" && (hasWorkerGeneration || hasOperatorEvidence)) {
-          throw new Error("workerGeneration and operatorEvidence are recovery-only fields allowed only with recover_cleanup.");
-        }
-        if (params.action === "recover_cleanup") {
-          if (!hasWorkerGeneration || !hasOperatorEvidence) {
-            throw new Error("recover_cleanup requires exact workerGeneration and operatorEvidence.");
-          }
-          if (!cleanupRecovery) {
-            throw new Error("Cleanup recovery confirmation capability is unavailable; model text was not authorized.");
-          }
-          const result = await cleanupRecovery.propose(id, {
-            address: params.address,
-            workerGeneration: params.workerGeneration!,
-            operatorEvidence: params.operatorEvidence!,
-          }, signal);
-          const nextStep = result.offline
-            ? result.nextStep
-            : "Explicitly restart or archive the same identity next.";
-          return textResult(
-            `recover_cleanup confirmed for ${result.address}, generation ${result.audit.workerGeneration}. The operator-attested release is not Pi-verified. State: failed.\n${nextStep}`,
-            {
-              address: result.address,
-              action: "recover_cleanup",
-              state: "failed",
-              workerGeneration: result.audit.workerGeneration,
-              recoveryStatus: "confirmed",
-              offline: result.offline,
-              ...(result.nextStep ? { nextStep: result.nextStep } : {}),
-            } satisfies ManageAgentToolDetails,
-          );
-        }
-
         const broker = getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
         if (params.action === "stop") await broker.stop(params.address);

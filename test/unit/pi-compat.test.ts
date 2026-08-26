@@ -10,7 +10,6 @@ import {
   assertSupportedPiRuntime,
   collectedReplyPresentationCapability,
   directMutationAliasSerializationCapability,
-  processQuiescenceReceiptCapability,
   sessionPresentationReceiptCapability,
 } from "../../src/pi-compat.ts";
 
@@ -33,15 +32,7 @@ it("characterizes every general Pi presentation kill point as unacknowledged", (
   assert.match(capability.requiredCoreContract, /stable envelope.*post-append.*recoverable.*crash/i);
 });
 
-it("keeps process cleanup and mutation-alias integrations disabled without released authoritative contracts", () => {
-  const processReceipt = processQuiescenceReceiptCapability();
-  assert.equal(processReceipt.supported, false);
-  assert.equal(processReceipt.detailCode, "PI_0_81_1_PROCESS_QUIESCENCE_RECEIPT_UNAVAILABLE");
-  assert.match(processReceipt.reason, /Pi 0\.81\.1.*session.*generation.*process.*receipt/i);
-  for (const requirement of [/provider/i, /callbacks/i, /active tool/i, /completed process group/i, /idempotent/i]) {
-    assert.match(processReceipt.requiredCoreContract, requirement);
-  }
-
+it("keeps mutation-alias integration disabled without a released authoritative contract", () => {
   const mutationAliases = directMutationAliasSerializationCapability();
   assert.equal(mutationAliases.supported, false);
   assert.equal(mutationAliases.detailCode, "PI_0_81_1_MUTATION_ALIAS_IDENTITY_UNAVAILABLE");

@@ -70,8 +70,8 @@ async function killExact(pid: number | undefined, expectedStartTime: string | un
   } catch { /* the exact recorded process identity is already absent */ }
 }
 
-describe("real worker cleanup containment", { concurrency: false }, () => {
-  it("records one same-group parent+descendant termination but stays quarantined without a Pi receipt", {
+describe("real worker Pi session/tool cleanup", { concurrency: false }, () => {
+  it("waits for an active foreground Bash tool to abort and then stops cleanly", {
     timeout: 120_000,
     skip: process.platform !== "linux" ? "representative exact-PID proof currently targets Linux process groups" : false,
   }, async () => {
@@ -124,16 +124,14 @@ describe("real worker cleanup containment", { concurrency: false }, () => {
       const registry = await eventually(async () => {
         const candidate = await readJson(join(agentDir, "subagents", sessionId, "registry.json"));
         const agent = candidate.agents?.find((item: any) => item.address === WORKER_ADDRESS);
-        return agent?.cleanup?.state === "unknown" ? candidate : undefined;
-      }, "persisted cleanup quarantine");
+        return agent?.state === "stopped" && !agent.cleanup ? candidate : undefined;
+      }, "clean stopped Pi session");
       const agent = registry.agents.find((item: any) => item.address === WORKER_ADDRESS);
-      assert.equal(managed.isError, true, "stop cannot claim success without an authoritative process receipt");
-      assert.equal(agent.state, "failed");
-      assert.equal(agent.cleanup.quiescence, "unknown");
-      assert.equal(agent.cleanup.mutationCapableAtStart, true);
-      assert.equal(agent.cleanup.heldRunSlot, true);
-      assert.equal(agent.cleanup.activeTools.map((tool: any) => [tool.toolCallId, tool.toolName]).length, 1);
-      assert.doesNotMatch(JSON.stringify(agent.cleanup), /--import|descendant-process|heartbeat|stdout|command/i);
+      assert.equal(managed.isError, false, "stop succeeds after AgentSession abort/tool settlement and disposal");
+      assert.equal(agent.state, "stopped");
+      assert.equal(agent.cleanup, undefined);
+      assert.equal(agent.workerEpoch.phase, "session-settled");
+      assert.equal(agent.workerEpoch.runSlotHeld, false);
     } finally {
       // Red and green paths both clean only the exact PIDs recorded by this test.
       if (!readiness) {
@@ -146,7 +144,57 @@ describe("real worker cleanup containment", { concurrency: false }, () => {
     }
   });
 
-  it("keeps a completed Bash generation quarantined while its redirected background heartbeat survives", {
+  it("allows stop, restart, and archive after ordinary completed foreground Bash", { timeout: 120_000 }, async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), "pi-email-foreground-cleanup-e2e-agent-"));
+    const client = PiRpcClient.launch({
+      cwd: process.cwd(),
+      agentDir,
+      model: "mock-e2e/mock-e2e",
+      extensions: [MOCK_EXTENSION, EXTENSION],
+    });
+    try {
+      const state = await client.getState();
+      assert.equal(state.success, true, client.stderr);
+      const sessionId = (state.data as { sessionId?: string } | undefined)?.sessionId;
+      assert.ok(sessionId);
+      const registryPath = join(agentDir, "subagents", sessionId, "registry.json");
+
+      let mark = client.mark();
+      await client.prompt("E2E CLEANUP FOREGROUND START");
+      await client.waitFor(toolEnd("send_email"), "foreground Bash delegation", 60_000, mark);
+      await eventually(async () => {
+        const registry = await readJson(registryPath);
+        const agent = registry.agents?.find((item: any) => item.address === WORKER_ADDRESS);
+        return agent?.state === "idle" ? agent : undefined;
+      }, "foreground Bash worker settlement");
+
+      mark = client.mark();
+      await client.prompt("E2E CLEANUP STOP");
+      const stopped = await client.waitFor(toolEnd("manage_agent"), "foreground Bash stop", 60_000, mark);
+      assert.equal(stopped.isError, false);
+
+      mark = client.mark();
+      await client.prompt("E2E CLEANUP RESTART");
+      const restarted = await client.waitFor(toolEnd("manage_agent"), "foreground Bash restart", 60_000, mark);
+      assert.equal(restarted.isError, false);
+
+      mark = client.mark();
+      await client.prompt("E2E CLEANUP ARCHIVE");
+      const archived = await client.waitFor(toolEnd("manage_agent"), "foreground Bash archive", 60_000, mark);
+      assert.equal(archived.isError, false);
+      const archivedRecord = await eventually(async () => {
+        const registry = await readJson(registryPath);
+        const agent = registry.agents?.find((item: any) => item.address === WORKER_ADDRESS);
+        return agent?.state === "archived" && !agent.cleanup ? agent : undefined;
+      }, "foreground Bash archived record");
+      assert.equal(archivedRecord.workerEpoch.phase, "session-settled");
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows stop, restart, and archive after completed Bash while an explicit detached background process survives", {
     timeout: 120_000,
     skip: process.platform !== "linux" ? "exact process-identity heartbeat regression requires Linux /proc" : false,
   }, async () => {
@@ -188,30 +236,40 @@ describe("real worker cleanup containment", { concurrency: false }, () => {
 
       mark = client.mark();
       await client.prompt("E2E CLEANUP STOP");
-      const stopped = await client.waitFor(toolEnd("manage_agent"), "completed-Bash stop quarantine", 60_000, mark);
-      assert.equal(stopped.isError, true);
-      const quarantined = await eventually(async () => {
+      const stopped = await client.waitFor(toolEnd("manage_agent"), "completed-Bash stop", 60_000, mark);
+      assert.equal(stopped.isError, false);
+      const stoppedRecord = await eventually(async () => {
         const candidate = await readJson(join(agentDir, "subagents", sessionId, "registry.json"));
         const agent = candidate.agents?.find((item: any) => item.address === WORKER_ADDRESS);
-        return agent?.cleanup?.state === "unknown" ? agent : undefined;
-      }, "completed-Bash cleanup quarantine");
-      assert.equal(quarantined.cleanup.mutationCapableAtStart, true);
-      assert.equal(quarantined.cleanup.heldRunSlot, false, "idle cleanup does not invent a run-slot hold");
-      assert.deepEqual(quarantined.cleanup.activeTools, [], "the Bash call completed before cleanup");
-      assert.equal(quarantined.sessionFile, originalSessionFile);
+        return agent?.state === "stopped" && !agent.cleanup ? agent : undefined;
+      }, "completed-Bash stopped record");
+      assert.equal(stoppedRecord.workerEpoch.phase, "session-settled");
+      assert.equal(stoppedRecord.sessionFile, originalSessionFile);
 
       mark = client.mark();
       await client.prompt("E2E CLEANUP RESTART");
-      const restarted = await client.waitFor(toolEnd("manage_agent"), "restart blocked by completed-Bash quarantine", 60_000, mark);
-      assert.equal(restarted.isError, true);
+      const restarted = await client.waitFor(toolEnd("manage_agent"), "restart after completed Bash", 60_000, mark);
+      assert.equal(restarted.isError, false);
+
+      mark = client.mark();
+      await client.prompt("E2E CLEANUP ARCHIVE");
+      const archived = await client.waitFor(toolEnd("manage_agent"), "archive after completed Bash", 60_000, mark);
+      assert.equal(archived.isError, false);
+      const archivedRecord = await eventually(async () => {
+        const candidate = await readJson(join(agentDir, "subagents", sessionId, "registry.json"));
+        const agent = candidate.agents?.find((item: any) => item.address === WORKER_ADDRESS);
+        return agent?.state === "archived" && !agent.cleanup ? agent : undefined;
+      }, "archived completed-Bash record");
+      assert.equal(archivedRecord.workerEpoch.phase, "session-settled");
+
       const after = await eventually(async () => {
         const heartbeat = await readJson(heartbeatPath) as { pid: number; processStartTime: string; sequence: number };
         return heartbeat.pid === readiness!.pid
           && heartbeat.processStartTime === readiness!.processStartTime
           && heartbeat.sequence > before.sequence ? heartbeat : undefined;
-      }, "same background heartbeat after blocked stop and restart");
+      }, "same explicitly detached background heartbeat after stop/restart/archive");
       assert.equal(after.pid, readiness.pid);
-      assert.equal((await readJson(readinessPath) as BackgroundReadiness).pid, readiness.pid, "no overlapping replacement background process starts");
+      assert.equal((await readJson(readinessPath) as BackgroundReadiness).pid, readiness.pid);
     } finally {
       if (!readiness) {
         try { readiness = await readJson(readinessPath) as BackgroundReadiness; } catch { /* background never reached readiness */ }

@@ -33,9 +33,8 @@ Archive eligible: no
 Archive blockers: incoming unanswered 1 (mail_…) · outgoing unanswered 1 (mail_…)
 Recovery: restart this inactive identity to finish real obligations; cancel only an explicitly abandoned exact request; archive only after blockers are clear.
 Lifecycle: {"spawnTimeoutMs":30000,...}
-Cleanup: unknown · quiescence unknown · activation held · restart/archive blocked · queued mail preserved
-Cleanup phases: abort succeeded · dispose succeeded · generation 7 · mutation-capable at start yes · run slot held no
-Last cleanup operator release: generation 7 · operator-attested · 2026-… · not Pi-verified · evidence retained in the durable audit
+Cleanup: unknown · Pi session/tool settlement unknown · exact address held · restart/archive blocked · queued mail preserved
+Cleanup phases: abort pending · dispose pending · generation 7 · mutation-capable at start yes · run slot held no
 Last failure: …            (only when present)
 Terminal worker run failure · openai/gpt-5.6-sol · provider/network cause may be external or unclear.
 1 delivered request remains unanswered. Current batch includes mutation/shell/custom work; effects may exist.
@@ -62,8 +61,7 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `archiveBlockers` | Bounded counts and up to five real request/mail IDs per queued, incoming, outgoing, and pending-reply category; includes omitted counts and no subjects/bodies/counterparties |
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
-| `cleanup` | Optional persisted cleanup quarantine: pending/unknown state, worker generation, abort/dispose phases, unknown quiescence, exact `mutationCapableAtStart` and `heldRunSlot` facts, bounded active tool IDs/names, and non-sensitive detail |
-| `lastCleanupRecovery` | Optional operator-release summary: exact generation, release timestamp, and literal source `operator-attested`; inspect omits the durable evidence body and never calls the event Pi-verified |
+| `cleanup` | Optional exact-address cleanup diagnostic: pending/unknown state, worker generation, abort/dispose phases, Pi session/tool settlement unknown, exact `mutationCapableAtStart` and `heldRunSlot` facts, bounded active tool IDs/names, and non-sensitive detail |
 | `providerReady` | `available` for a live worker, `unavailable` when an existing exact binding is absent, otherwise `unknown` |
 | `lifecycle` | Exact persisted policy for an existing identity, or currently resolved configured defaults for a prospective one |
 
@@ -74,7 +72,7 @@ Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true
 - Call before delegating when recipient capability is uncertain — in particular before authorizing repository changes, to confirm the address is actually writable. The main prompt's 8 KiB / 64-line capability block is only a bounded configured-intent display and may omit complete entries; this tool returns the exact bounded live/prospective profile.
 - Also useful before spawning to distinguish identity lease use from run concurrency, check whether this address already holds a lease, and inspect exact bounded blockers.
 - Follow the rendered recovery hint. Reuse a relevant leased identity first; restart real stopped/failed work; stop only to become inactive; cancel only a user-abandoned exact request after final validation; archive only when clean; then retry.
-- When `cleanup` is present, do not interpret a detached worker or elapsed deadline as safety. Restart, archive, and clear-failure remain blocked. `manage_agent recover_cleanup` may propose release only after the user explicitly says they externally verified quiescence for this exact generation. It always opens a one-use live Pi UI human confirmation bound to the canonical address/generation and sanitized bounded evidence; model text alone has zero authority. Denial, cancellation, timeout, no UI, stale context, or changed generation rejects without recovery mutation. The literal `/agents recover-cleanup` form remains the direct human-command-only alternative. Capacity pressure alone is never authorization. Its durable source is `operator-attested`, not Pi-verified; it remains failed, never automatically restores/creates a worker, and performs no restart, archive, cancellation, or mail delivery.
+- When `cleanup` is present, only that exact address is blocked while its live factory/start/AgentSession/tool/disposal operation remains unsettled. A caller deadline does not cancel the operation; late success releases it. Unrelated agents remain schedulable. The field claims no OS descendant containment.
 - Live retry activity is Pi-managed and non-terminal; wait for settlement rather than restarting. After terminal failure, inspect Work and Conversation, correct configuration/provider availability as needed, and explicitly restart the same identity only when possible effects have been accounted for. Never resend the accepted envelope merely because a provider attempt failed.
 
 See [Provider retry visibility and recovery](provider-retry-recovery.md) for event ordering, settings parity, attribution boundaries, and safe escalation artifacts.

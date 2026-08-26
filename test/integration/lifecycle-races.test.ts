@@ -424,7 +424,8 @@ describe("broker lifecycle races", () => {
       releaseAbort.resolve();
       await expiring;
       assert.match(broker.inspectAgent(request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
-      assert.equal(broker.inspectAgent(request.envelope.to).cleanup?.state, "unknown");
+      assert.equal(broker.inspectAgent(request.envelope.to).cleanup, undefined, "tool end plus abort/dispose settlement releases cleanup");
+      assert.equal((broker as any).active.has(request.envelope.to), false);
       assert.equal((broker as any).watchdogs.has(request.envelope.to), false);
     } finally {
       releaseAbort.resolve();

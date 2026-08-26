@@ -12,7 +12,6 @@ import {
 } from "./address.ts";
 import { transitionAbandonedOwnerRecovery } from "./abandoned-owner-recovery.ts";
 import { isConfiguredWritable, isConservativeCleanupCapable } from "./capability.ts";
-import { transitionCleanupRecovery } from "./cleanup-recovery.ts";
 import {
   isSafeConfigSemanticText,
   isThinkingLevel,
@@ -57,7 +56,6 @@ import type {
   WorkerTransport,
   WorkItem,
   AgentWorkState,
-  OperatorCleanupRecovery,
 } from "./types.ts";
 import { byteLength, clone, nowIso, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
@@ -212,7 +210,6 @@ interface WorkerCleanupLease {
 interface PendingFactoryLease {
   address: string;
   workerGeneration: number;
-  mutationCapable: boolean;
   factory: Promise<WorkerTransport>;
 }
 
@@ -273,7 +270,6 @@ export class AgentBroker {
   private readonly pendingAdmissions = new Set<string>();
   private readonly scheduling = new Set<string>();
   private readonly settlements = new Map<WorkerTransport, SettlementLease>();
-  private mutationAdmissionEpoch = 0;
   private readonly globalRateLimiter: SlidingWindowRateLimiter;
   private readonly senderRateLimiters = new Map<string, SlidingWindowRateLimiter>();
   private readonly changeListeners = new Set<() => void>();
@@ -354,7 +350,7 @@ export class AgentBroker {
         let record = clone(loaded);
         sanitizePersistedRecordErrors(record);
         record.address = shape.address;
-        if (this.namespaceLock.abandonedOwner || record.cleanup) {
+        if (this.namespaceLock.abandonedOwner) {
           record = transitionAbandonedOwnerRecovery(record).record;
         }
         record.name = shape.name;
@@ -397,7 +393,7 @@ export class AgentBroker {
           record.updatedAt = nowIso();
           if (priorState !== "archived") startupFailures.push(`${record.address}: ${record.failure}`);
         }
-        if (record.cleanup) startupFailures.push(`${record.address}: cleanup quiescence unknown; capacity held and restoration blocked.`);
+        if (record.cleanup) startupFailures.push(`${record.address}: Pi session/tool cleanup settlement unknown; exact-address restoration blocked.`);
         this.records.set(record.address, record);
       }
 
@@ -469,9 +465,9 @@ export class AgentBroker {
 
       const registered = [...this.records.values()].filter((record) =>
         record.state !== "archived" && this.routableRecords.has(record.address));
-      // Reconstruct inherited safety leases before admitting any ordinary
-      // identity. Quarantine overcommit is preserved explicitly even when the
-      // current limits are lower; ordinary work never fills capacity over it.
+      // Reconstruct exact-address cleanup leases before admitting ordinary
+      // identities. Only genuinely unresolved cleanup can retain a run slot;
+      // an exact dead-owner normalization clears dead in-process slot claims.
       for (const record of this.records.values()) {
         if (!record.cleanup || record.state === "archived") continue;
         this.activationLeases.add(record.address);
@@ -496,7 +492,6 @@ export class AgentBroker {
 
       const restorable = [...this.records.values()]
         .filter((record) => this.activationLeases.has(record.address)
-          && record.workerEpoch?.phase !== "operator-released"
           && !["stopped", "failed", "archived"].includes(record.state));
       const restored = await Promise.allSettled(restorable.map(async (record) => {
         try {
@@ -577,37 +572,9 @@ export class AgentBroker {
     return isConservativeCleanupCapable(tools);
   }
 
-  private isMutationCapable(record: AgentRecord): boolean {
-    const worker = this.workers.get(record.address);
-    const generation = worker ? this.workerGenerations.get(worker) : undefined;
-    if (record.workerEpoch
-      && (record.workerEpoch.phase === "spawning" || record.workerEpoch.phase === "activated")
-      && ((worker && generation === record.workerEpoch.generation) || record.state === "spawning")) {
-      return record.workerEpoch.mutationCapable;
-    }
-    return this.isToolSetMutationCapable(record.tools);
-  }
-
-  private mutationSchedulingQuarantined(record: AgentRecord): boolean {
-    if (!this.isMutationCapable(record)) return false;
-    if ([...this.cleanupQuarantines.values()].some((lease) => lease.mutationCapable)) return true;
-    return [...this.records.values()].some((candidate) => candidate.cleanup?.mutationCapableAtStart);
-  }
-
-  private mutationAdmission(record: AgentRecord): number | undefined {
-    if (!this.isMutationCapable(record)) return undefined;
-    if (this.mutationSchedulingQuarantined(record)) throw this.cleanupError("mutable scheduling");
-    return this.mutationAdmissionEpoch;
-  }
-
-  private mutationAdmissionCurrent(record: AgentRecord, epoch: number | undefined): boolean {
-    return epoch === undefined
-      || (epoch === this.mutationAdmissionEpoch && !this.mutationSchedulingQuarantined(record));
-  }
-
   private cleanupError(address: string): CleanupQuarantineError {
     return new CleanupQuarantineError(
-      `${address} cleanup quiescence is unknown; cleanup quarantine holds capacity and blocks restart/archive and new mutable scheduling while queued mail is preserved.`,
+      `${address} Pi session/tool cleanup settlement is unknown; the exact address remains quarantined and queued mail is preserved. Unrelated addresses are not blocked.`,
     );
   }
 
@@ -615,6 +582,15 @@ export class AgentBroker {
     if (this.pendingFactories.has(address)
       || this.cleanupQuarantines.has(address)
       || this.records.get(address)?.cleanup) throw this.cleanupError(address);
+  }
+
+  private exactWorkerAdmissionCurrent(address: string, record: AgentRecord, worker: WorkerTransport): boolean {
+    return !this.disposed
+      && this.records.get(address) === record
+      && this.workers.get(address) === worker
+      && !record.cleanup
+      && !this.cleanupQuarantines.has(address)
+      && !this.pendingFactories.has(address);
   }
 
   private workerGeneration(worker: WorkerTransport, address: string, assignedGeneration?: number): number {
@@ -684,7 +660,6 @@ export class AgentBroker {
       settled: undefined as never,
     };
 
-    if (lease.mutationCapable) this.mutationAdmissionEpoch += 1;
     this.invalidateSettlement(worker);
     this.clearWatchdog(address);
     this.clearToolLifecycle(address, worker);
@@ -701,19 +676,13 @@ export class AgentBroker {
       record.updatedAt = nowIso();
     }
 
-    const operation = Promise.resolve().then(() => worker.cleanup({
-      abortTimeoutMs: record?.lifecycle.abortTimeoutMs ?? this.options.config.lifecycle.abortTimeoutMs,
-    }));
+    const operation = Promise.resolve().then(() => worker.cleanup());
     lease.operation = operation;
     this.cleanupLeases.set(worker, lease);
     this.cleanupQuarantines.set(address, lease);
     lease.settled = operation.then(
       async (report) => {
-        const activeToolsVerified = lease.activeToolsAtStart.every((active) => report.tools.some((tool) =>
-          tool.toolCallId === active.toolCallId
-          && tool.toolName === active.toolName
-          && (tool.quiescence === "verified" || tool.quiescence === "not-applicable")));
-        if (report.quiescence === "verified" && activeToolsVerified) await this.releaseCleanupLease(lease, report);
+        if (report.quiescence === "verified") await this.releaseCleanupLease(lease, report);
         else {
           const toolCodes = [...new Set(report.tools.map((tool) => tool.detailCode).filter(Boolean))].slice(0, 8);
           await this.markCleanupUnknown(
@@ -761,7 +730,7 @@ export class AgentBroker {
       detail: safeDetail,
     };
     record.state = "failed";
-    const cleanupFailure = `Cleanup quarantine: quiescence unknown for worker generation ${lease.workerGeneration}; capacity held; ${safeDetail}`;
+    const cleanupFailure = `Cleanup quarantine: Pi session/tool settlement unknown for worker generation ${lease.workerGeneration}; exact address held; ${safeDetail}`;
     if (!record.failure) record.failure = cleanupFailure;
     else if (!record.failure.includes("Cleanup quarantine:")) record.failure = truncateText(`${record.failure}; ${cleanupFailure}`, 1_500);
     record.currentActivity = cleanupFailure;
@@ -783,18 +752,18 @@ export class AgentBroker {
     const previous = clone(record);
     delete record.cleanup;
     if (record.workerEpoch?.generation === lease.workerGeneration) {
-      record.workerEpoch = { ...record.workerEpoch, phase: "verified-clean", runSlotHeld: false };
+      record.workerEpoch = { ...record.workerEpoch, phase: "session-settled", runSlotHeld: false };
     }
     if (lease.targetState === "stopped") {
       record.state = "stopped";
-      record.currentActivity = "Stopped after verified cleanup";
+      record.currentActivity = "Stopped after Pi session/tool cleanup settled";
       if (record.failure?.startsWith("Cleanup quarantine:")) delete record.failure;
     } else if (lease.targetState === "archived") {
       record.state = "archived";
-      record.currentActivity = "Archived after verified cleanup";
+      record.currentActivity = "Archived after Pi session/tool cleanup settled";
     } else if (lease.targetState === "paused" && !["stopped", "archived"].includes(record.state)) {
       record.state = "paused";
-      record.currentActivity = "Cleanup verified; worker paused";
+      record.currentActivity = "Pi session/tool cleanup settled; worker paused";
     }
     if (lease.targetState !== "failed" && record.failure?.startsWith("Cleanup quarantine:")) delete record.failure;
     record.updatedAt = nowIso();
@@ -814,7 +783,6 @@ export class AgentBroker {
       const pendingIndex = this.pendingStarts.indexOf(lease.address);
       if (pendingIndex >= 0) this.pendingStarts.splice(pendingIndex, 1);
     }
-    if (lease.mutationCapable) this.mutationAdmissionEpoch += 1;
     this.publish();
     if (!this.disposed) this.pump();
   }
@@ -1012,7 +980,7 @@ export class AgentBroker {
     };
     const categories = [
       blockers.active ? "active worker" : undefined,
-      blockers.cleanupQuarantine ? "cleanup quiescence unknown" : undefined,
+      blockers.cleanupQuarantine ? "Pi session/tool cleanup unsettled" : undefined,
       render("queued mail", blockers.queued),
       render("incoming unanswered requests", blockers.incomingUnanswered),
       render("outgoing unanswered requests", blockers.outgoingUnanswered),
@@ -1445,8 +1413,7 @@ export class AgentBroker {
           }
           const steersImmediately = !toMain
             && input.priority === "high"
-            && Boolean(currentWorker?.getSnapshot().isStreaming)
-            && !(currentRecord && this.mutationSchedulingQuarantined(currentRecord));
+            && Boolean(currentWorker?.getSnapshot().isStreaming);
           if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
           // This is the final synchronous pre-append linearization check. Once
           // accept/reserveReply is invoked, journal ownership continues even if
@@ -1553,20 +1520,12 @@ export class AgentBroker {
       }
       parsed ??= record ? this.resolveExistingRecord(record) : undefined;
       if (!parsed) throw new Error(`Recipient ${address} has no model binding.`);
-      const prospectiveTools = record?.tools ?? resolveAgentProfile(this.options.config, parsed.address, parsed.name).tools;
-      const mutationQuarantined = record
-        ? this.mutationSchedulingQuarantined(record)
-        : this.isToolSetMutationCapable(prospectiveTools)
-          && ([...this.cleanupQuarantines.values()].some((lease) => lease.mutationCapable)
-            || [...this.records.values()].some((candidate) => candidate.cleanup?.mutationCapableAtStart));
-      if (this.cleanupQuarantines.has(parsed.address)
-        || record?.cleanup
-        || mutationQuarantined) {
+      if (this.cleanupQuarantines.has(parsed.address) || record?.cleanup) {
         const spawned = !record;
         if (!record) {
           record = this.makeRecord(parsed, envelope.lifecycleIntent, envelope.effortIntent);
           record.state = "queued";
-          record.currentActivity = "Accepted mail deferred by cleanup quarantine";
+          record.currentActivity = "Accepted mail deferred by exact-address cleanup settlement";
           this.records.set(record.address, record);
           this.routableRecords.add(record.address);
         }
@@ -1705,11 +1664,9 @@ export class AgentBroker {
         const pending: PendingFactoryLease = {
           address: record.address,
           workerGeneration: assignedWorkerGeneration,
-          mutationCapable: record.workerEpoch?.mutationCapable ?? true,
           factory: factoryPromise,
         };
         this.pendingFactories.set(record.address, pending);
-        if (pending.mutationCapable) this.mutationAdmissionEpoch += 1;
         const at = nowIso();
         record.cleanup = {
           state: "pending",
@@ -1720,7 +1677,7 @@ export class AgentBroker {
           abort: "pending",
           dispose: "pending",
           quiescence: "unknown",
-          mutationCapableAtStart: pending.mutationCapable,
+          mutationCapableAtStart: record.workerEpoch?.mutationCapable ?? true,
           heldRunSlot: false,
           activeTools: [],
           detail: "Worker factory deadline elapsed; exact generation settlement and cleanup are still pending.",
@@ -1747,12 +1704,11 @@ export class AgentBroker {
           if (current?.cleanup?.workerGeneration === assignedWorkerGeneration) {
             delete current.cleanup;
             if (current.workerEpoch?.generation === assignedWorkerGeneration) {
-              current.workerEpoch = { ...current.workerEpoch, phase: "verified-clean", runSlotHeld: false };
+              current.workerEpoch = { ...current.workerEpoch, phase: "session-settled", runSlotHeld: false };
             }
             current.updatedAt = nowIso();
           }
           this.pendingFactories.delete(record.address);
-          if (pending.mutationCapable) this.mutationAdmissionEpoch += 1;
           if (this.lifecycle !== "closed") await this.persistRegistry(this.lifecycle === "closing");
           this.publish();
         });
@@ -2266,12 +2222,6 @@ export class AgentBroker {
 
   private async routeToWorker(envelope: EmailEnvelope, worker: WorkerTransport): Promise<void> {
     const record = this.records.get(envelope.to);
-    if (record && this.mutationSchedulingQuarantined(record)) {
-      this.enqueueStart(envelope.to);
-      await this.persistRegistry();
-      return;
-    }
-    const admissionEpoch = record ? this.mutationAdmission(record) : undefined;
     const snapshot = worker.getSnapshot();
     if (snapshot.record.state === "stopped") return;
     const dependencyResult = envelope.kind === "reply"
@@ -2287,19 +2237,9 @@ export class AgentBroker {
         // fetch_emails sees them immediately; replies commit their answer only
         // after steer acceptance so a rejection still releases the reservation.
         if (envelope.kind === "request") await this.mailStore.markDelivered([envelope.id]);
-        const record = this.records.get(envelope.to);
-        if (record && !this.mutationAdmissionCurrent(record, admissionEpoch)) {
-          this.enqueueStart(envelope.to);
-          await this.persistRegistry();
-          return;
-        }
+        if (record && !this.exactWorkerAdmissionCurrent(envelope.to, record, worker)) return;
         try {
-          // No await may be inserted between the epoch check and the sync
-          // steer invocation: it is the exact mutation-admission boundary.
-          if (record && !this.mutationAdmissionCurrent(record, admissionEpoch)) {
-            this.enqueueStart(envelope.to);
-            return;
-          }
+          if (record && !this.exactWorkerAdmissionCurrent(envelope.to, record, worker)) return;
           await bounded(worker.steer(formatEmail(envelope)), record?.lifecycle.promptAcceptanceTimeoutMs ?? this.options.config.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
           this.touchWatchdog(envelope.to);
         } catch (error) {
@@ -2320,16 +2260,6 @@ export class AgentBroker {
     if (!this.pendingStarts.includes(address)) this.pendingStarts.push(address);
     const record = this.records.get(address);
     if (record && !["stopped", "failed", "archived"].includes(record.state)) record.state = "queued";
-  }
-
-  private async deferMutationAdmission(address: string, record: AgentRecord): Promise<void> {
-    this.active.delete(address);
-    this.setEpochRunSlot(record, false);
-    this.enqueueStart(address);
-    record.currentActivity = "Deferred by cleanup quarantine";
-    record.updatedAt = nowIso();
-    await this.persistRegistry();
-    this.publish();
   }
 
   private selectBatch(
@@ -2373,10 +2303,6 @@ export class AgentBroker {
     if (this.pendingStarts.length === 0) return undefined;
     const ranked = this.pendingStarts
       .map((address, index) => ({ address, index, rank: this.pendingRank(address) }))
-      .filter(({ address }) => {
-        const record = this.records.get(address);
-        return !record || !this.mutationSchedulingQuarantined(record);
-      })
       .sort((left, right) => left.rank[0] - right.rank[0]
         || left.rank[1].localeCompare(right.rank[1])
         || left.rank[2].localeCompare(right.rank[2]))[0];
@@ -2390,13 +2316,6 @@ export class AgentBroker {
     const worker = this.workers.get(address);
     const record = this.records.get(address);
     if (!worker || !record || ["stopped", "failed"].includes(record.state)) return;
-    if (this.mutationSchedulingQuarantined(record)) {
-      this.enqueueStart(address);
-      await this.persistRegistry();
-      this.publish();
-      return;
-    }
-    const admissionEpoch = this.mutationAdmission(record);
     const dependencies = this.outgoingDependencies(address);
     const dependencyReplies = this.queuedDependencyReplies(address);
     if (dependencies.length > 0 && dependencyReplies.length === 0) {
@@ -2454,15 +2373,7 @@ export class AgentBroker {
       // be admitted. The prompt acceptance deadline does not move this boundary.
       await this.persistRegistry();
       if (requestIds.length > 0) await this.mailStore.markDelivered(requestIds);
-      if (!this.mutationAdmissionCurrent(record, admissionEpoch)) {
-        await this.deferMutationAdmission(address, record);
-        return;
-      }
-      // Exact synchronous prompt-admission boundary for this epoch.
-      if (!this.mutationAdmissionCurrent(record, admissionEpoch)) {
-        await this.deferMutationAdmission(address, record);
-        return;
-      }
+      if (!this.exactWorkerAdmissionCurrent(address, record, worker)) return;
       await bounded(worker.prompt(formatEmailBatch(queued)), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
       if (this.disposed || this.workers.get(address) !== worker) return;
       this.startWatchdog(address);
@@ -2519,13 +2430,6 @@ export class AgentBroker {
       await this.parkWorker(address, record);
       return;
     }
-    if (this.mutationSchedulingQuarantined(record)) {
-      this.enqueueStart(address);
-      await this.persistRegistry();
-      this.publish();
-      return;
-    }
-    const admissionEpoch = this.mutationAdmission(record);
     if (this.active.size >= this.options.config.maxConcurrent) {
       this.enqueueStart(address);
       return;
@@ -2536,11 +2440,7 @@ export class AgentBroker {
     record.enforcementAttempts += 1;
     try {
       await this.persistRegistry();
-      // No await between the epoch check and synchronous prompt invocation.
-      if (!this.mutationAdmissionCurrent(record, admissionEpoch)) {
-        await this.deferMutationAdmission(address, record);
-        return;
-      }
+      if (!this.exactWorkerAdmissionCurrent(address, record, worker)) return;
       await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1), { newBatch: false }), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
       if (this.disposed || this.workers.get(address) !== worker) return;
       this.startWatchdog(address);
@@ -2596,23 +2496,12 @@ export class AgentBroker {
       if (outstanding.length > 0) {
         record = this.records.get(address);
         if (!record || !this.settlementCurrent(settlement)) return;
-        if (this.mutationSchedulingQuarantined(record)) {
-          await this.deferMutationAdmission(address, record);
-          return;
-        }
-        const admissionEpoch = this.mutationAdmission(record);
         if (record.enforcementAttempts < this.options.config.responseReminderLimit) {
           if (!this.settlementCurrent(settlement)) return;
           record.enforcementAttempts += 1;
           record.state = "running";
           record.currentActivity = `Answering ${outstanding.length} required email${outstanding.length === 1 ? "" : "s"}`;
-          if (!this.settlementCurrent(settlement)
-            || !this.mutationAdmissionCurrent(record, admissionEpoch)) {
-            if (this.settlementCurrent(settlement)) await this.deferMutationAdmission(address, record);
-            return;
-          }
-          // Exact worker+generation and quarantine epoch are checked at the
-          // synchronous prompt-admission boundary.
+          if (!this.settlementCurrent(settlement)) return;
           await bounded(worker.prompt(enforcementPrompt(outstanding.length, record.enforcementAttempts > 1), { newBatch: false }), record.lifecycle.promptAcceptanceTimeoutMs, "LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT");
           if (!this.settlementCurrent(settlement)) return;
           this.startWatchdog(address);
@@ -2683,10 +2572,6 @@ export class AgentBroker {
     const operation = this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record || ["stopped", "failed", "archived"].includes(record.state)) return;
-      if (this.mutationSchedulingQuarantined(record)) {
-        this.enqueueStart(address);
-        return;
-      }
       let worker = this.workers.get(address);
       if (!worker) {
         worker = await this.createWorker(this.resolveExistingRecord(record), record, this.lifecycleGeneration);
@@ -2867,58 +2752,6 @@ export class AgentBroker {
     });
   }
 
-  async recoverCleanup(addressInput: string, workerGeneration: number, evidence: string): Promise<OperatorCleanupRecovery> {
-    const address = parseSubagentAddressShape(addressInput).address;
-    // Recovery must fail rather than wait behind a lifecycle action: the human
-    // authorization applies to the exact state observed for this generation.
-    if (this.addressTails.has(address)) {
-      throw new Error(`A concurrent lifecycle operation is already in progress for ${address}.`);
-    }
-    return this.withAddressOperation(address, async () => {
-      const record = this.records.get(address);
-      if (!record) throw new Error(`Unknown agent ${address}.`);
-      const quarantine = this.cleanupQuarantines.get(address);
-      if (quarantine && quarantine.workerGeneration !== workerGeneration) {
-        throw new Error(`Cleanup generation mismatch: live quarantine is ${quarantine.workerGeneration}, request is ${workerGeneration}.`);
-      }
-      const provisionalWorker = [...this.provisionalWorkers].some((worker) => this.workerAddresses.get(worker) === address);
-      const transition = transitionCleanupRecovery(record, { address, workerGeneration, evidence }, {
-        attachedWorker: this.workers.has(address),
-        provisionalWorker,
-        pendingFactory: this.pendingFactories.has(address),
-        cleanupOperationPending: Boolean(quarantine && !quarantine.operationSettled),
-        activeTool: Boolean(this.toolLifecycles.get(address)?.calls.size),
-        activeRunSlot: this.active.has(address),
-      });
-      if (transition.idempotent) return transition.audit;
-
-      const previous = clone(record);
-      this.records.set(address, transition.record);
-      try {
-        await this.persistRegistry();
-      } catch (error) {
-        this.records.set(address, previous);
-        this.requiredRegistry().agents = [...this.records.values()].map(clone);
-        throw new Error(`Cleanup recovery persistence failed; quarantine remains unchanged: ${errorMessage(error)}`, { cause: error });
-      }
-
-      if (quarantine) {
-        this.cleanupQuarantines.delete(address);
-        this.cleanupLeases.delete(quarantine.worker);
-        this.provisionalWorkers.delete(quarantine.worker);
-        if (quarantine.mutationCapable) this.mutationAdmissionEpoch += 1;
-      }
-      this.active.delete(address);
-      for (let index = this.pendingStarts.length - 1; index >= 0; index -= 1) {
-        if (this.pendingStarts[index] === address) this.pendingStarts.splice(index, 1);
-      }
-      this.publish();
-      // Deliberately do not pump, create a worker, deliver mail, restart, or
-      // archive. A separate explicit lifecycle action is required.
-      return transition.audit;
-    });
-  }
-
   async clearFailure(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
     await this.withAddressOperation(address, async () => {
@@ -2979,10 +2812,6 @@ export class AgentBroker {
       wouldSpawn: !record,
       capacityAvailable: (!record || holdsActivationLease || this.routableRecords.has(address))
         && !cleanup
-        && !(record
-          ? this.mutationSchedulingQuarantined(record)
-          : this.isToolSetMutationCapable(tools)
-            && [...this.records.values()].some((candidate) => candidate.cleanup?.mutationCapableAtStart))
         && (holdsActivationLease || this.activeIdentityCount() < this.options.config.maxAgents),
       capacity: this.capacitySnapshot(),
       holdsActivationLease,
@@ -3006,11 +2835,6 @@ export class AgentBroker {
       usage: clone(record?.usage ?? emptyUsage()),
       ...(record?.failure ? { failure: record.failure } : {}),
       ...(cleanup ? { cleanup: clone(cleanup) } : {}),
-      ...(record?.lastCleanupRecovery ? { lastCleanupRecovery: {
-        workerGeneration: record.lastCleanupRecovery.workerGeneration,
-        releasedAt: record.lastCleanupRecovery.releasedAt,
-        source: record.lastCleanupRecovery.source,
-      } } : {}),
       providerReady: this.workers.has(address)
         ? "available"
         : (record && !this.routableRecords.has(address) ? "unavailable" : "unknown"),
@@ -3265,7 +3089,7 @@ export class AgentBroker {
 
     const failures: unknown[] = [];
     const persistedCleanup = [...this.records.values()].find((record) => record.cleanup && !this.cleanupQuarantines.has(record.address));
-    let quiescenceKnown = !persistedCleanup;
+    let sessionCleanupSettled = !persistedCleanup;
     if (persistedCleanup) failures.push(this.cleanupError(persistedCleanup.address));
     const shutdownMs = this.options.config.lifecycle.brokerShutdownTimeoutMs;
     const deadline = Date.now() + shutdownMs;
@@ -3279,7 +3103,7 @@ export class AgentBroker {
       const available = workRemaining();
       if (available <= 0) {
         failures.push(new LifecycleTimeoutError(code, shutdownMs));
-        quiescenceKnown = false;
+        sessionCleanupSettled = false;
         return;
       }
       try {
@@ -3292,14 +3116,14 @@ export class AgentBroker {
           if (!(error instanceof LifecycleTimeoutError && error.code === code)) {
             failures.push(new LifecycleTimeoutError(code, Math.max(1, available), detail));
           }
-          quiescenceKnown = false;
+          sessionCleanupSettled = false;
         }
-        if (containsCleanupQuarantine(error)) quiescenceKnown = false;
+        if (containsCleanupQuarantine(error)) sessionCleanupSettled = false;
       }
     };
 
     // Do not short-circuit: every phase is attempted or explicitly marked
-    // non-quiescent under the one global deadline.
+    // unsettled under the one global deadline.
     await runPhase("LIFECYCLE_BROKER_SHUTDOWN_DISPOSE_TIMEOUT", () => this.disposeOwnedWorkers(Math.max(1, workRemaining())));
     if (this.initPromise) {
       // Initialization reports its own failure to its caller; shutdown only
@@ -3334,7 +3158,7 @@ export class AgentBroker {
 
     // Namespace ownership is a safety lease, not merely cleanup. A timed-out
     // mutator may still write later, so retain ownership until process death.
-    if (quiescenceKnown) {
+    if (sessionCleanupSettled) {
       const releaseMs = Math.max(1, deadline - Date.now());
       try {
         await bounded(this.releaseNamespaceLock(), releaseMs, "LIFECYCLE_BROKER_SHUTDOWN_LOCK_TIMEOUT");

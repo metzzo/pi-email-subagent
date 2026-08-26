@@ -7,62 +7,39 @@ Control an existing agent's lifecycle without assigning work. Main-thread only. 
 | Parameter | Type | Required | Description |
 |-----------|------|:--------:|-------------|
 | `address` | string | ✓ | Exact existing subagent address |
-| `action` | `"stop" \| "restart" \| "archive" \| "clear_failure" \| "recover_cleanup"` | ✓ | Lifecycle action or recovery proposal |
-| `workerGeneration` | positive safe integer | recovery only | Exact quarantined generation; rejected on other actions |
-| `operatorEvidence` | bounded string | recovery only | Quote/summary of what the human said they externally verified; rejected on other actions |
+| `action` | `"stop" \| "restart" \| "archive" \| "clear_failure"` | ✓ | Lifecycle action |
 
-The four ordinary lifecycle calls remain compatible with only `address` and `action`. Recovery-only fields are required together for `recover_cleanup` and rejected on every other action.
+No cleanup-recovery action or evidence/generation fields exist.
 
 ## Actions
 
 ### `stop`
 
-Detaches routing immediately and joins the worker's one cleanup lease. State becomes `stopped` only after a structured verified cleanup report; the record, session file, mailbox, and activation lease are retained. If cleanup misses its caller deadline, rejects, or cannot prove process quiescence for a generation that ran Bash or still has an active tool, state is failed with a sticky cleanup quarantine instead. Identity capacity remains held, queued inbound mail stays queued, and later sends remain durable but do not run. **Stop makes an identity inactive; it does not free `maxAgents` capacity.** Errors when the address is unknown or the agent is `archived`.
+Detaches routing immediately and joins the exact worker-generation cleanup lease. Cleanup waits for factory/start settlement, the real Pi 0.81.1 `AgentSession.abort()` idle boundary when streaming, active tool promises/listeners, and disposal. State becomes `stopped` only after those Pi session/tool facts settle successfully. The record, session file, mailbox, and activation lease are retained, so stop does not free `maxAgents` capacity.
+
+A caller timeout does not cancel cleanup. It leaves only that exact address failed/quarantined while the operation remains observed; queued mail stays durable and a late success releases the hold. Unrelated agents remain schedulable. A completed ordinary Bash command does not poison the generation.
 
 ### `restart`
 
-Joins verified cleanup of any old worker before creating a fresh one bound to the same persisted exact provider/model, session file, and mailbox. Current main-provider preference is not consulted; restart rechecks extension-start API/long-cache metadata and supported non-secret credential-source equivalence. If the exact tuple or readiness contract is absent, restart fails with correction/reload guidance rather than substituting a same-ID model. No replacement is created while cleanup is pending or unknown. If cleanup verifies only after the caller-visible restart deadline, the record becomes paused/recoverable and no hidden replacement is created; a new explicit restart is always required. The replacement resumes enforcement for unanswered mail or scheduling for queued mail and clears `failure` and the reminder counter. Requires free capacity under `maxAgents` when the agent no longer holds an activation lease.
+Joins cleanup of the prior exact worker before creating a fresh generation bound to the same provider/model, session file, mailbox, effort, and lifecycle. No generation G+1 is created while G's factory/start/abort/tool/dispose operation is pending. A caller-visible timeout never creates a hidden late replacement; after late settlement, another explicit restart is required.
 
-A live Pi-managed retry is not a reason to restart: Pi owns that automatic continuation. Before restarting a terminally failed worker, inspect `/agents` Work and Conversation. Current-batch edit/write/shell/custom attempts mean effects may exist; absence of a recorded item does not prove pre-tool safety. Restart is explicit same-identity recovery that preserves the existing session, provider binding, mailbox, lifecycle, effort, and stable accepted mail ID. It does not resend the envelope and does not promise that replaying later model decisions is side-effect-free. Never redelegate the same possible-effect scope while its original obligation remains open.
+A live Pi-managed retry is not a reason to restart. Before restarting a terminal worker, inspect `/agents` Work and Conversation. Effects may exist even when the bounded ledger is empty. Possible-effect recovery uses the same identity/session/provider and never resends the accepted envelope or redelegates the same open scope.
 
 ### `archive`
 
-Frees the agent's activation lease (capacity) while keeping its record, session, and mail. Guard rails:
+Frees the activation lease while keeping the record, session, and mail. The identity must have no live worker, unsettled exact-address cleanup, queued mail, incoming/outgoing unanswered request, or reply delivery pending. Refusal reports bounded blocker counts/IDs without mail bodies. Use [`cancel_request`](cancel-request.md) only for an explicitly abandoned exact obligation after its recipient is inactive.
 
-- Running, spawning, or streaming agents must be stopped and settled first. The error names the active category and reminds you that stop alone retains the lease.
-- The agent must have no queued mail and no open obligations in either direction — no unanswered requests addressed to it, and no requests it sent that are still unanswered or have a reply pending delivery. Refusal reports bounded category counts, up to five real request/mail IDs per category, and omitted counts, without subjects, bodies, or counterparty addresses. Completed identities should answer all mail. If the user intentionally abandons a request to an inactive recipient, close that exact obligation first with [`cancel_request`](cancel-request.md); cancellation is audited and is not a fabricated answer.
-
-The activation lease is released only after any live worker reports verified cleanup. Pending/unknown cleanup blocks archive and retains capacity. Already-archived agents are a no-op. Sending new mail to an archived address restores it (disposition `restored`) only through its persisted exact provider/model; a later main switch cannot rebind it. Archive clean completed identities instead of creating unlimited replacement addresses.
+A live worker is cleaned through the same Pi session/tool settlement boundary before archival. Already archived is a no-op. Sending mail to an archived address restores only its persisted exact provider/model binding.
 
 ### `clear_failure`
 
-Deletes the stored `failure` diagnostic. Only valid while the agent is `idle`, `stopped`, or `archived`, and never while cleanup is quarantined: clearing text cannot establish quiescence or release held capacity. A failure on a live obligation path must be resolved by `restart` or by answering the mail, not by clearing the message.
+Deletes a stored failure only while `idle`, `stopped`, or `archived`. It cannot clear an unsettled cleanup diagnostic or resolve an obligation.
 
-### `recover_cleanup`
+## Scope of cleanup
 
-This action is a **proposal**, not model authorization. The agent may call it only after the user explicitly says they externally verified quiescence for the exact address and worker generation. `operatorEvidence` quotes or summarizes what that human said; a plausible model-generated statement has zero authority by itself. Capacity pressure, elapsed time, abort/dispose success, a detached worker, or a dead namespace owner is never authorization.
+The cleanup boundary is the trusted Pi `AgentSession`, active model/tool work, listeners, and disposal—not arbitrary OS process trees. The compatibility field `quiescence` means only Pi session/tool settlement. Do not start background or detached processes unless the task explicitly requires one. If required, report how it is stopped. A process deliberately detached by a completed command is outside stop semantics because pi-subagent is not an OS sandbox.
 
-Before any online/offline recovery read, write, or release, the tool synchronously opens Pi's supported `ctx.ui.confirm` dialog. The dialog shows the canonical address, exact generation, bounded/control-sanitized/redacted evidence, and a warning that Pi did not prove process quiescence and surviving effects may overlap. It has a finite timeout. Only an affirmative response authorizes one immediate execution for that exact tool call and session generation. Denial, cancellation, timeout, no UI (`json`/`print`), stale context, session replacement, or generation/state change rejects without using the recovery transition. RPC mode uses Pi's `extension_ui_request`/`extension_ui_response` `confirm` protocol; the client must return `confirmed: true`. No reusable token is created, and a replay prompts again.
-
-After confirmation, the capability rechecks the exact tuple/session and calls the shared online/offline transition, which rechecks all current cleanup facts immediately before release. A generation change while the dialog is open rejects and needs a new confirmation. Success remains `failed`/`operator-released`; the tool result reports confirmed status and the separate `/reload`/restart/archive next step without returning the evidence body. A rejected call is a native tool error that says the proposal was rejected.
-
-A model must never invoke or claim approval for the literal command below. It remains a direct human-command-only alternative while the online broker is active and when startup is blocked by the orphan namespace lease:
-
-```text
-/agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>
-```
-
-This `/agents recover-cleanup` form is the direct human-command-only alternative; the agent may not invoke it.
-
-The online broker accepts only an inactive `failed`/`paused` identity with a persisted `quiescence: unknown` cleanup whose state and abort/dispose phases are settled, whose durable worker epoch exactly matches the requested generation, and which has no attached/provisional worker, pending factory, pending cleanup operation, active tool, run slot, or concurrent lifecycle action. Success atomically persists `lastCleanupRecovery = { workerGeneration, releasedAt, evidence, source: "operator-attested" }`, changes that exact epoch phase to `operator-released`, removes only that exact quarantine/run hold, and durably forces the identity to `failed`. It is not Pi-verified and does **not** use `verified-clean`. Reload never automatically restores/creates its worker or delivers its queued mail; only a later separate explicit `restart` may create one new generation and deliver, while `archive` remains separate. Recovery itself never starts a provider retry, cancels an obligation, or pumps deferred work. An exact retry is idempotent only while the same current epoch remains inactive `failed`/`operator-released` without cleanup/run holds; an old audit cannot release a later activated generation. For upgrade recovery only, the prior candidate's structurally exact same-generation `paused`/`operator-released`/no-hold crash shape is narrowly canonicalized to `failed` before that idempotent retry; no later epoch or other state is migrated. Persistence failure restores the in-memory quarantine.
-
-The evidence is bounded, terminal/control sanitized, and common credential forms are redacted before persistence. Broad prompt, dashboard, inspect, and management text displays only audit source/generation/time, not the statement body. Do not put credentials in evidence; redaction is risk reduction, not a universal secret detector.
-
-The offline path is Linux-only and fail-closed. It acquires a fixed exclusive recovery-operation guard; requires complete owner boot ID plus `/proc/<pid>/stat` start identity; rejects the exact live or `SIGSTOP`ed owner; rechecks owner, generation, cleanup, epoch, registry, and active facts; writes a restrictive unique backup; atomically rewrites `registry.json`; removes the exact orphan lock directory before its still-recorded owner sidecar; and prints the bounded `/reload` next step. Before namespace-wide orphan artifacts are removed, the shared abandoned-owner transition conservatively quarantines every other non-archived mutation-capable spawning/activated epoch and legacy writable record unless that exact current epoch is verified-clean or exact operator-released. Other cleanup diagnostics, mail, and sessions remain durable; only the requested exact target generation is released.
-
-A pre-existing `.cleanup-recovery.guard` is never automatically inspected, reclaimed, or replaced, even when its recorded process appears dead. Recovery fails closed. Inspect that guard's exact PID, Linux boot ID, and `/proc/<pid>/stat` start identity and inspect `registry.json` plus cleanup-recovery backups to identify the crash stage. Only after proving the guard owner dead, deliberately remove that one `.cleanup-recovery.guard` and retry. A live recovery removes only its own exact-token guard. Missing/malformed owner identity, non-Linux ownership, or any owner/registry race aborts without guessing. Owner absence proves only that the old namespace writer is absent; human evidence, not process death, authorizes release.
-
-When startup reports a live namespace owner, do not attempt recovery until that owning process exits. Resume the same parent session and follow the checked-out version's documented recovery flow. A clone has a fresh mailbox and cannot recover obligations from the original parent session.
+If the exact prior broker owner dies, startup automatically reclaims its namespace only after Linux boot-ID/PID/start-time identity proves that exact process absent. It preserves mail/session/obligations, marks formerly active identities failed/inactive, and requires explicit same-identity restart. Live or `SIGSTOP`ed owners and incomplete/malformed ownership remain fail-closed. See [lifecycle.md](lifecycle.md).
 
 ## Result
 
@@ -71,19 +48,19 @@ stop completed for reviewer.audit@gpt-5.6-sol.com. State: stopped.
 Identity lease remains held; stop alone does not free maxAgents identity capacity. Identity capacity: 8/8 activation leases used · run concurrency: 0/4 slots used.
 ```
 
-Action-specific text reports that stop retains its lease, restart resumes the same persistent session/mail, archive released the lease, or clear-failure did not resolve obligations. For `recover_cleanup`, text reports confirmed/not-Pi-verified status and the separate next step; `details` contains only canonical address, action, failed state, exact generation, `recoveryStatus: "confirmed"`, offline status, and the offline next step when applicable—never the evidence body. Ordinary lifecycle `details` additively carries `address`, `action`, resulting `state`, current derived `capacity`, `holdsActivationLease`, and `archiveEligible`. Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true` — unknown address, unsupported action, invalid transition, capacity limit, bounded actionable archival blockers, cleanup deadline, or unknown quiescence. Use [`inspect_agent`](inspect-agent.md) for the same capacity/blocker view and cleanup diagnostic.
+`details` contains `address`, `action`, resulting `state`, current derived `capacity`, `holdsActivationLease`, and `archiveEligible`. Failures throw `Could not manage agent: <reason>`, so Pi records `isError: true`.
 
 ## Safe identity-capacity recovery
 
-1. Reuse a relevant existing identity when that is semantically appropriate.
-2. Restart stopped/failed real assigned work instead of abandoning it.
-3. Stop only to make active work inactive; the lease stays held.
-4. Cancel only an exact request the user explicitly abandoned, after its recipient is inactive and final validation succeeds.
-5. Archive only after queued mail and open obligations are clear.
-6. Retry the new/restored identity after archive releases the lease.
+1. Reuse a relevant existing identity where appropriate.
+2. Restart stopped/failed assigned work instead of abandoning it.
+3. Stop only to make active work inactive; its identity lease remains held.
+4. Cancel only an exact request the user explicitly abandoned, after its recipient is inactive.
+5. Archive only after cleanup, queued mail, and open obligations settle.
+6. Retry a new/restored identity after archive releases capacity.
 
-No step is automatic or bulk. Capacity pressure alone authorizes neither cancellation, archive, nor cleanup recovery. Provider failure also authorizes no automatic restart, resend, provider switch, or cancellation; follow [provider retry visibility and recovery](provider-retry-recovery.md). Removed or duplicate model bindings follow [provider-aware durable model routing](provider-aware-model-routing.md).
+No step is automatic or bulk. Provider failure authorizes no automatic restart, resend, provider switch, archive, or cancellation.
 
 ## Equivalents
 
-The ordinary model-callable actions are available interactively as `/agents stop|restart|archive|clear-failure <address>`, or through the dashboard (`/agents`, keys `k` / `r` / `a` / `x`). Exact cleanup recovery has two entry points: the model-callable `manage_agent recover_cleanup` proposal, which always requires affirmative one-use Pi UI confirmation, and the direct human-command-only `/agents recover-cleanup <exact-address> <worker-generation> --confirm <operator evidence>` alternative, which remains available when broker initialization failed. Effort changes are a separate surface: `/agents effort <address> <level>` or the dashboard `m` key, valid only while the agent is idle. Abandoned obligations use the separate exact-ID command `/agents cancel <request-id> <reason>`.
+The actions are available as `/agents stop|restart|archive|clear-failure <address>` or through the dashboard (`k` / `r` / `a` / `x`). Effort changes use `/agents effort <address> <level>` or `m`. Abandoned obligations use `/agents cancel <request-id> <reason>`.
