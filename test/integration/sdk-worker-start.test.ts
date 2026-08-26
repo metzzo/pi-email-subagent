@@ -281,9 +281,9 @@ it("bounds cleanup during real Pi retry backoff and suppresses every stale sessi
     await worker.prompt("enter retry backoff");
     await retryStarted;
     const beforeCleanup = worker.getSnapshot().record;
-    const report = await worker.cleanup({ abortTimeoutMs: 1_000 });
+    const report = await worker.cleanup();
     assert.equal(report.sessionDisposed, true);
-    assert.equal(report.providerQuiescent, true);
+    assert.equal(report.sessionIdle, true);
     assert.equal(report.quiescence, "verified");
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.deepEqual(worker.getSnapshot().record, beforeCleanup, "aborted retry settlement cannot update the disposed worker");

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { lock } from "proper-lockfile";
 import { errorMessage, nowIso } from "./util.ts";
@@ -60,24 +60,17 @@ async function restrictMode(path: string, mode: number): Promise<void> {
   }
 }
 
-async function ownerStillLive(owner: NamespaceOwner): Promise<boolean> {
-  if (owner.bootId && owner.processStartTime) {
-    try {
-      const current = await kernelProcessIdentity(owner.pid);
-      return current.bootId === owner.bootId && current.processStartTime === owner.processStartTime;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      // An existing PID whose kernel identity cannot be read is not safe to
-      // steal from. A missing PID was handled above.
-      try { process.kill(owner.pid, 0); return true; } catch (killError) {
-        return (killError as NodeJS.ErrnoException).code !== "ESRCH";
-      }
+async function exactOwnerStillLive(owner: NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>): Promise<boolean> {
+  try {
+    const current = await kernelProcessIdentity(owner.pid);
+    return current.bootId === owner.bootId && current.processStartTime === owner.processStartTime;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    // An existing PID whose kernel identity cannot be read is not safe to
+    // steal from. A missing PID was handled above.
+    try { process.kill(owner.pid, 0); return true; } catch (killError) {
+      return (killError as NodeJS.ErrnoException).code !== "ESRCH";
     }
-  }
-  // Legacy metadata has no PID-reuse proof. Absence is enough to identify an
-  // abandoned lease, but any live/reused PID fails closed.
-  try { process.kill(owner.pid, 0); return true; } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -132,32 +125,63 @@ export class NamespaceLock {
   ): Promise<NamespaceLock> {
     await mkdir(namespaceDir, { recursive: true, mode: 0o700 });
     await restrictMode(namespaceDir, 0o700);
+    // Serialize owner inspection, dead-owner lock removal, filesystem lock
+    // acquisition, and new owner publication. A crashed transition guard is
+    // deliberately fail-closed because its lock-generation binding is unknown.
+    const transitionGuard = join(namespaceDir, ".broker-owner-transition");
+    try {
+      await mkdir(transitionGuard, { mode: 0o700 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`Subagent namespace owner transition is already in progress or abandoned; recovery fails closed: ${namespaceDir}.`);
+      }
+      throw error;
+    }
+    try {
+      return await NamespaceLock.acquireUnderTransitionGuard(namespaceDir, onCompromised, hooks);
+    } finally {
+      await rm(transitionGuard, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private static async acquireUnderTransitionGuard(
+    namespaceDir: string,
+    onCompromised: (error: Error) => void,
+    hooks: NamespaceLockHooks,
+  ): Promise<NamespaceLock> {
     const ownerPath = join(namespaceDir, OWNER_FILE);
     const token = randomUUID();
-    const [priorOwner, priorLockExists] = await Promise.all([
+    const [priorOwner, priorOwnerPathExists, priorLockExists] = await Promise.all([
       readOwner(ownerPath),
+      pathExists(ownerPath),
       pathExists(`${namespaceDir}.lock`),
     ]);
+    let abandonedOwner = false;
     if (priorOwner) {
-      const live = await ownerStillLive(priorOwner);
+      if (!priorOwner.bootId || !priorOwner.processStartTime || priorOwner.namespaceDir !== namespaceDir) {
+        throw new Error(
+          `Subagent namespace owner identity is incomplete or mismatched and recovery fails closed: ${namespaceDir}.`,
+        );
+      }
+      const live = await exactOwnerStillLive(priorOwner as NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>);
       if (live) {
         throw new Error(
           `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
           + "The kernel still identifies that exact owner process; close or resume it before retrying.",
         );
       }
+      // Exact Linux boot/PID/start identity proves this owner generation dead.
+      // Its in-process AgentSessions/callbacks are gone, so the stale
+      // proper-lockfile directory can be removed under the transition guard.
+      abandonedOwner = true;
+      await rm(`${namespaceDir}.lock`, { recursive: true, force: true });
+    } else if (priorOwnerPathExists || priorLockExists) {
       throw new Error(
-        `Subagent namespace ownership is orphaned and recovery fails closed: ${namespaceDir}. `
-        + "A stale sidecar cannot be proven to belong to the current lock generation; perform explicit manual recovery only after verifying local-host and PID-namespace quiescence.",
+        `Subagent namespace ownership is ambiguous and recovery fails closed: ${namespaceDir}. `
+        + "An owner sidecar or lock exists without one complete exact owner identity.",
       );
     }
-    if (priorLockExists) {
-      throw new Error(
-        `Subagent namespace lock is orphaned and recovery fails closed: ${namespaceDir}. `
-        + "A lock without its generation sidecar may still belong to a live publisher; perform explicit manual recovery only after verifying local-host and PID-namespace quiescence.",
-      );
-    }
-    const abandonedOwner = false;
+
     let releaseLock: (() => Promise<void>) | undefined;
     try {
       releaseLock = await lock(namespaceDir, {
@@ -176,8 +200,7 @@ export class NamespaceLock {
         ? `pid ${owner.pid}, acquired ${owner.acquiredAt}`
         : "owner metadata unavailable";
       throw new Error(
-        `Subagent namespace is already owned (${diagnostic}): ${namespaceDir}. `
-        + `Close the other Pi process or wait ${Math.ceil(NAMESPACE_LOCK_STALE_MS / 1_000)} seconds after an abrupt exit before retrying.`,
+        `Subagent namespace is already owned (${diagnostic}): ${namespaceDir}. Close the other Pi process before retrying.`,
         { cause: error },
       );
     }
@@ -192,8 +215,6 @@ export class NamespaceLock {
     try {
       identity = await kernelProcessIdentity(process.pid);
     } catch (error) {
-      // A clean first owner can still use proper-lockfile on other platforms,
-      // but an abandoned takeover cannot be fenced there and must fail closed.
       if (process.platform === "linux" || abandonedOwner) {
         await releaseLock().catch(() => undefined);
         throw new Error(`Could not establish safe subagent namespace owner fencing: ${errorMessage(error)}`, { cause: error });

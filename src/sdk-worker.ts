@@ -12,24 +12,20 @@ import type {
   EmailEnvelope,
   SendEmailInput,
   SendEmailResult,
-  WorkerCleanupOptions,
   WorkerCleanupReport,
   WorkerEvent,
   WorkerSnapshot,
   WorkerStartConfig,
   WorkerTransport,
 } from "./types.ts";
-import { processQuiescenceReceiptCapability } from "./pi-compat.ts";
 import { formatUnanswered } from "./prompts.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
-import { runtimeSafeDelay } from "./runtime-timers.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
 import { clone, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem, unknownWorkItem } from "./work-ledger.ts";
 
 const { Type } = TypeBox;
-const PROCESS_QUIESCENCE_RECEIPT = processQuiescenceReceiptCapability();
 
 export interface SendToolDetails {
   result?: SendEmailResult;
@@ -89,7 +85,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         ];
         if (result.recipientDisposition === "failed") {
           lines.push(result.recipientCleanup
-            ? "Recipient recovery: mail is accepted and queued, but cleanup quiescence is unknown. Restart/archive are blocked and capacity remains held; external exact-generation quiescence review is required. Do not resend or redelegate the original scope."
+            ? "Recipient recovery: mail is accepted and queued, but Pi session/tool cleanup settlement is unknown. Restart/archive are blocked only for this exact address until the live cleanup settles. Do not resend or redelegate the original scope."
             : "Recipient recovery: mail is accepted and queued; the recipient remains failed and no worker was spawned. Review Work and Conversation, then use explicit manage_agent restart for the same identity and provider binding only after effect review. Do not redelegate the same scope while the original obligation remains open.");
         }
         if (result.recipientProvider && result.recipientModel) {
@@ -101,7 +97,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientTools) lines.push(`Recipient tools: ${result.recipientTools.join(", ")}`);
         if (result.recipientState) lines.push(`Recipient state: ${result.recipientState}`);
         if (result.recipientLifecycle) lines.push(`Recipient lifecycle: ${JSON.stringify(result.recipientLifecycle)}`);
-        if (result.recipientCleanup) lines.push(`Recipient cleanup: ${result.recipientCleanup.state} · generation ${result.recipientCleanup.workerGeneration} · quiescence unknown`);
+        if (result.recipientCleanup) lines.push(`Recipient cleanup: ${result.recipientCleanup.state} · generation ${result.recipientCleanup.workerGeneration} · Pi session/tool settlement unknown`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
         const message = safeErrorSummary(error);
@@ -193,7 +189,6 @@ export class SdkWorker implements WorkerTransport {
   private disposed = false;
   private cleanupPromise?: Promise<WorkerCleanupReport>;
   private readonly activeToolCalls = new Map<string, string>();
-  private processCapableRisk = false;
   private startGeneration = 0;
   private startOperation?: Promise<void>;
   private runFailure?: string;
@@ -245,7 +240,6 @@ export class SdkWorker implements WorkerTransport {
     if (this.session) return;
     if (this.disposed) throw new Error("Disposed workers cannot be restarted.");
     const generation = ++this.startGeneration;
-    this.processCapableRisk = false;
     this.record = clone(config.record);
     this.record.work ??= emptyWorkState();
     this.cwd = config.cwd;
@@ -327,7 +321,15 @@ export class SdkWorker implements WorkerTransport {
   }
 
   private onSessionEvent(event: AgentSessionEvent): void {
-    if (this.disposed || !this.record) return;
+    if (!this.record) return;
+    // After routing detaches, retain only content-free tool settlement facts
+    // until AgentSession.abort() reaches its idle boundary. No stale session
+    // event may otherwise mutate or publish worker state during cleanup.
+    if (this.disposed) {
+      if (event.type === "tool_execution_start") this.activeToolCalls.set(event.toolCallId, event.toolName);
+      else if (event.type === "tool_execution_end") this.activeToolCalls.delete(event.toolCallId);
+      return;
+    }
     switch (event.type) {
       case "agent_start":
         this.runFailure = undefined;
@@ -336,10 +338,6 @@ export class SdkWorker implements WorkerTransport {
         this.activity("status", "Agent run started");
         break;
       case "tool_execution_start": {
-        // Pi 0.81.1 has no released receipt proving that descendants of a
-        // completed built-in Bash call are absent. This risk belongs to the
-        // whole worker generation, not only the active-call map.
-        if (event.toolName.toLowerCase() === "bash") this.processCapableRisk = true;
         this.activeToolCalls.set(event.toolCallId, event.toolName);
         this.emit({
           type: "tool_lifecycle",
@@ -366,7 +364,6 @@ export class SdkWorker implements WorkerTransport {
       case "tool_execution_update":
         break;
       case "tool_execution_end": {
-        if (event.toolName.toLowerCase() === "bash") this.processCapableRisk = true;
         this.activeToolCalls.delete(event.toolCallId);
         this.emit({
           type: "tool_lifecycle",
@@ -526,90 +523,82 @@ export class SdkWorker implements WorkerTransport {
     }
   }
 
-  cleanup(options: WorkerCleanupOptions): Promise<WorkerCleanupReport> {
+  cleanup(): Promise<WorkerCleanupReport> {
     if (this.cleanupPromise) return this.cleanupPromise;
     this.disposed = true;
     this.startGeneration += 1;
     const session = this.session;
     const unsubscribe = this.unsubscribeSession;
-    const activeTools = [...this.activeToolCalls].map(([toolCallId, toolName]) => ({ toolCallId, toolName }));
-    const processCapableRisk = this.processCapableRisk;
+    const activeToolsAtStart = new Map(this.activeToolCalls);
     const startOperation = this.startOperation;
     this.session = undefined;
     this.sessionManager = undefined;
     this.unsubscribeSession = undefined;
-    this.activeToolCalls.clear();
-    unsubscribe?.();
 
     const operation = (async (): Promise<WorkerCleanupReport> => {
-      // A spawn timeout progresses cleanup but cannot certify cleanliness while
-      // the exact resource/session start operation is still pending.
+      // Factory/start ownership is part of this exact worker lease. A caller
+      // deadline never settles or cancels the underlying operation.
       await startOperation?.catch(() => undefined);
       let abort: WorkerCleanupReport["abort"] = "succeeded";
       let dispose: WorkerCleanupReport["dispose"] = "succeeded";
       const wasStreaming = Boolean(session?.isStreaming);
-      let providerQuiescent = !wasStreaming;
+      let sessionIdle = !session || session.isIdle !== false;
       const details: string[] = [];
-      let disposeStarted = false;
-      const disposeOnce = (): void => {
-        if (disposeStarted) return;
-        disposeStarted = true;
-        try {
-          session?.dispose();
-        } catch (error) {
-          dispose = "failed";
-          details.push(safeErrorSummary(error));
-        } finally {
-          this.listeners.clear();
-        }
-      };
 
       if (wasStreaming) {
-        // Transform Pi's abort into an always-observed outcome. The response
-        // deadline progresses disposal but never cancels or settles this one
-        // authoritative cleanup operation.
-        const abortOutcome = Promise.resolve().then(() => session!.abort()).then(
+        const outcome = await Promise.resolve().then(() => session!.abort()).then(
           () => ({ state: "succeeded" as const }),
           (error: unknown) => ({ state: "failed" as const, detail: safeErrorSummary(error) }),
         );
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const deadlineMs = runtimeSafeDelay(options.abortTimeoutMs);
-        await Promise.race([
-          abortOutcome.then(() => "abort" as const),
-          new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), deadlineMs); }),
-        ]);
-        if (timer) clearTimeout(timer);
-        // Exactly one disposal attempt follows the first abort-settlement or
-        // deadline boundary, even while a late abort remains observed.
-        disposeOnce();
-        const outcome = await abortOutcome;
         abort = outcome.state;
-        providerQuiescent = outcome.state === "succeeded";
+        sessionIdle = outcome.state === "succeeded" && session!.isIdle !== false;
         if (outcome.state === "failed") details.push(outcome.detail);
-      } else disposeOnce();
+      }
 
-      const detail = details.length > 0 ? safeErrorSummary(details.join("; ")) : undefined;
-      const tools = activeTools.map((tool) => ({
-        ...tool,
-        quiescence: "unknown" as const,
-        detailCode: "PI_TOOL_QUIESCENCE_RECEIPT_UNAVAILABLE",
-      }));
-      const quiescence = providerQuiescent
+      // Disposal follows, and never bypasses, the real abort/idle boundary.
+      try {
+        session?.dispose();
+      } catch (error) {
+        dispose = "failed";
+        details.push(safeErrorSummary(error));
+      } finally {
+        unsubscribe?.();
+        this.listeners.clear();
+      }
+
+      const tools = [...activeToolsAtStart].map(([toolCallId, toolName]) => {
+        const settled = !this.activeToolCalls.has(toolCallId);
+        return {
+          toolCallId,
+          toolName,
+          quiescence: settled ? "verified" as const : "unknown" as const,
+          ...(settled ? {} : { detailCode: "PI_TOOL_STILL_ACTIVE_AFTER_SESSION_ABORT" }),
+        };
+      });
+      for (const [toolCallId, toolName] of this.activeToolCalls) {
+        if (activeToolsAtStart.has(toolCallId)) continue;
+        tools.push({
+          toolCallId,
+          toolName,
+          quiescence: "unknown",
+          detailCode: "PI_TOOL_STILL_ACTIVE_AFTER_SESSION_ABORT",
+        });
+      }
+      this.activeToolCalls.clear();
+      const quiescence = sessionIdle
         && dispose === "succeeded"
-        && tools.length === 0
-        && !processCapableRisk
+        && tools.every((tool) => tool.quiescence === "verified")
         ? "verified" as const
         : "unknown" as const;
+      const detail = details.length > 0 ? safeErrorSummary(details.join("; ")) : undefined;
       return {
         sessionDisposed: dispose === "succeeded",
-        providerQuiescent,
+        sessionIdle,
         tools,
         quiescence,
         source: quiescence === "verified"
-          ? "pi-agent-session-idle-with-no-process-capable-tool-risk"
-          : processCapableRisk
-            ? PROCESS_QUIESCENCE_RECEIPT.detailCode
-            : "pi-0.81.1-no-tool-process-quiescence-receipt",
+          ? "pi-agent-session-and-tools-settled"
+          : "pi-agent-session-or-tools-unsettled",
         abort,
         dispose,
         ...(detail ? { detail } : {}),
@@ -620,7 +609,7 @@ export class SdkWorker implements WorkerTransport {
   }
 
   async dispose(): Promise<void> {
-    const report = await this.cleanup({ abortTimeoutMs: MAX_TIMER_DELAY_MS });
+    const report = await this.cleanup();
     if (report.abort === "failed" || report.dispose === "failed") {
       throw new Error(report.detail ?? "Worker cleanup failed.");
     }

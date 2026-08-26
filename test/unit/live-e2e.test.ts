@@ -139,7 +139,7 @@ function registry(overrides: { provider?: string; modelId?: string; cleanup?: un
       work: { nextBatchId: 1, active: [], recent: [], inspection: { reads: 0, searches: 0, listings: 0 } },
       workerEpoch: {
         generation: 1,
-        phase: "verified-clean",
+        phase: "session-settled",
         tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
         mutationCapable: false,
         runSlotHeld: overrides.runSlotHeld ?? false,

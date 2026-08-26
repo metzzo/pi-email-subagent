@@ -1,16 +1,16 @@
 # Cluster 4 — Crash Recovery and OS Containment
 
-Status: remediation complete; exact process-tree quiescence receipt and mutation-alias identity remain upstream gates
+Status: remediation complete; mutation-alias identity remains an upstream gate
 Implementation commits: historical cluster commits through `16f54eb`, remediation `018f25b` and `1465343`
 Priority: P1 extension defect plus P1 external guarantee
 Depends on: Cluster 3 activated-tool and unknown-effect contracts
-Blocks: writable abandoned-owner recovery and generic cleanup claims
+Blocks: none; the historical OS-containment objective was removed from the product contract
 
-Historical implementation record: issue evidence and work packages below describe the pre-remediation baseline. Automatic abandoned-owner takeover is now superseded by sticky fail-closed orphan/manual recovery; only the process-tree and mutation-alias capabilities remain open.
+Historical implementation record: issue evidence and work packages below describe the pre-remediation baseline and are superseded by active Pi session/tool settlement. Current startup automatically reclaims only a complete exact dead owner, while live/`SIGSTOP`ed or ambiguous ownership stays fail-closed. Deliberately detached completed-command effects are outside stop semantics; no OS process-tree certification gate remains.
 
-## Cluster objective
+## Historical cluster objective
 
-After broker loss, restore only facts durable state can prove. Quarantine mutation-capable generations whose cleanup is unknown, and do not substitute PID checks, `abort()`, `dispose()`, or current active-tool maps for process-tree quiescence.
+The prior objective attempted to infer OS process-tree safety. It is retained below only as history and is not the current product contract.
 
 ## Existing safety mechanisms
 

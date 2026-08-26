@@ -70,7 +70,7 @@ If the current batch contains any mutation, shell, or custom work item—running
 
 When configuration or provider availability is corrected and recovery is safe, explicitly restart the **same identity** with `manage_agent restart` or `/agents restart`. That reuses its persistent session, provider binding, mailbox, lifecycle, effort, and original mail obligation. Failed recipients keep newly accepted mail queued until that explicit restart. Do not resend the accepted envelope. Never redelegate the same possible-effect scope while its original obligation remains open. If the user abandons the request, stop the recipient and cancel that exact request with a substantive audited reason before assigning any distinct replacement scope.
 
-A live Pi-managed retry may settle, but process-capable cleanup quarantine is different: Pi 0.81.1 has no automatic receipt or release for an unknown quarantine. Waiting or an elapsed deadline cannot manufacture quiescence; follow the external process review in [Agent lifecycle deadlines](lifecycle.md).
+A live Pi-managed retry may settle. Cleanup is separate: it waits for the exact Pi AgentSession/model/tool/disposal boundary, and a caller deadline never cancels the underlying operation. Only that exact address is blocked while cleanup is genuinely pending; see [Agent lifecycle deadlines](lifecycle.md).
 
 ## Attribution and escalation
 

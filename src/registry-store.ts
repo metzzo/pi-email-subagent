@@ -2,7 +2,6 @@ import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { transitionAbandonedOwnerRecovery } from "./abandoned-owner-recovery.ts";
 import {
   DEFAULT_LIFECYCLE,
   isSafeConfigSemanticText,
@@ -12,9 +11,8 @@ import {
   MAX_CONFIG_TOOL_NAME_BYTES,
   MAX_TIMER_DELAY_MS,
 } from "./config.ts";
-import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, OperatorCleanupRecovery, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
+import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
-import { safeErrorSummary } from "./safe-summary.ts";
 import { clone, nowIso } from "./util.ts";
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -29,9 +27,10 @@ const CLEANUP_STATES = new Set<CleanupDiagnostic["state"]>(["pending", "unknown"
 const CLEANUP_PHASES = new Set<CleanupDiagnostic["abort"]>(["pending", "succeeded", "failed", "timed-out"]);
 const MAX_CLEANUP_DETAIL_CHARS = 2_000;
 const MAX_CLEANUP_TOOLS = 64;
-const WORKER_EPOCH_PHASES = new Set<WorkerCapabilityEpoch["phase"]>(["spawning", "activated", "verified-clean", "operator-released"]);
+const WORKER_EPOCH_PHASES = new Set<WorkerCapabilityEpoch["phase"]>(["spawning", "activated", "session-settled"]);
+const LEGACY_WORKER_EPOCH_PHASES = new Set(["verified-clean", "operator-released"] as const);
 const MAX_WORKER_EPOCH_TOOLS = 128;
-export const MAX_OPERATOR_CLEANUP_EVIDENCE_BYTES = 1_024;
+const MAX_LEGACY_CLEANUP_EVIDENCE_BYTES = 1_024;
 export const MAX_REGISTRY_ACTIVITY_ITEMS = 40;
 export const MAX_REGISTRY_ACTIVITY_SUMMARY_BYTES = 2_000;
 export const MAX_REGISTRY_DIAGNOSTIC_BYTES = 2_048;
@@ -226,14 +225,23 @@ function parseWork(value: unknown, label: string): AgentWorkState {
   return work;
 }
 
-function parseWorkerEpoch(value: unknown, label: string): WorkerCapabilityEpoch | undefined {
+function parseWorkerEpoch(value: unknown, label: string): {
+  epoch: WorkerCapabilityEpoch;
+  legacyPhase?: "verified-clean" | "operator-released";
+} | undefined {
   if (value === undefined) return undefined;
   const raw = object(value, label);
   if (!Number.isSafeInteger(raw.generation) || (raw.generation as number) < 1) {
     throw new Error(`${label}.generation must be a positive safe integer.`);
   }
-  const phase = string(raw.phase, `${label}.phase`) as WorkerCapabilityEpoch["phase"];
-  if (!WORKER_EPOCH_PHASES.has(phase)) throw new Error(`${label}.phase is invalid.`);
+  const rawPhase = string(raw.phase, `${label}.phase`);
+  const currentPhase = WORKER_EPOCH_PHASES.has(rawPhase as WorkerCapabilityEpoch["phase"])
+    ? rawPhase as WorkerCapabilityEpoch["phase"]
+    : undefined;
+  const legacyPhase = LEGACY_WORKER_EPOCH_PHASES.has(rawPhase as "verified-clean" | "operator-released")
+    ? rawPhase as "verified-clean" | "operator-released"
+    : undefined;
+  if (!currentPhase && !legacyPhase) throw new Error(`${label}.phase is invalid.`);
   const tools = stringArray(raw.tools, `${label}.tools`);
   if (tools.length > MAX_WORKER_EPOCH_TOOLS || new Set(tools).size !== tools.length
     || tools.some((tool) => !tool
@@ -243,30 +251,36 @@ function parseWorkerEpoch(value: unknown, label: string): WorkerCapabilityEpoch 
   }
   if (typeof raw.mutationCapable !== "boolean") throw new Error(`${label}.mutationCapable must be a boolean.`);
   if (typeof raw.runSlotHeld !== "boolean") throw new Error(`${label}.runSlotHeld must be a boolean.`);
+  if ((currentPhase === "session-settled" || legacyPhase) && raw.runSlotHeld) {
+    throw new Error(`${label}.runSlotHeld must be false for a settled or legacy released phase.`);
+  }
   return {
-    generation: raw.generation as number,
-    phase,
-    tools,
-    mutationCapable: raw.mutationCapable,
-    runSlotHeld: raw.runSlotHeld,
+    epoch: {
+      generation: raw.generation as number,
+      phase: currentPhase ?? "session-settled",
+      tools,
+      mutationCapable: raw.mutationCapable,
+      runSlotHeld: raw.runSlotHeld,
+    },
+    ...(legacyPhase ? { legacyPhase } : {}),
   };
 }
 
-function parseOperatorCleanupRecovery(value: unknown, label: string): OperatorCleanupRecovery | undefined {
+interface LegacyCleanupAudit {
+  workerGeneration: number;
+}
+
+function parseLegacyCleanupAudit(value: unknown, label: string): LegacyCleanupAudit | undefined {
   if (value === undefined) return undefined;
   const raw = object(value, label);
   if (!Number.isSafeInteger(raw.workerGeneration) || (raw.workerGeneration as number) < 1) {
     throw new Error(`${label}.workerGeneration must be a positive safe integer.`);
   }
   if (raw.source !== "operator-attested") throw new Error(`${label}.source must be operator-attested.`);
-  const evidence = boundedString(raw.evidence, `${label}.evidence`, MAX_OPERATOR_CLEANUP_EVIDENCE_BYTES);
+  const evidence = boundedString(raw.evidence, `${label}.evidence`, MAX_LEGACY_CLEANUP_EVIDENCE_BYTES);
   if (evidence.trim().length < 8) throw new Error(`${label}.evidence must contain at least 8 characters.`);
-  return {
-    workerGeneration: raw.workerGeneration as number,
-    releasedAt: timestamp(raw.releasedAt, `${label}.releasedAt`),
-    evidence: safeErrorSummary(evidence),
-    source: "operator-attested",
-  };
+  timestamp(raw.releasedAt, `${label}.releasedAt`);
+  return { workerGeneration: raw.workerGeneration as number };
 }
 
 function parseCleanup(value: unknown, label: string, fallbackTools: readonly string[]): CleanupDiagnostic | undefined {
@@ -337,7 +351,7 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   if (raw.canSpawn !== undefined && typeof raw.canSpawn !== "boolean") {
     throw new Error(`${label}.canSpawn must be a boolean.`);
   }
-  let record: AgentRecord = {
+  const record: AgentRecord = {
     address: string(raw.address, `${label}.address`).toLowerCase(),
     name: string(raw.name, `${label}.name`),
     taskSlug: string(raw.taskSlug, `${label}.taskSlug`),
@@ -357,23 +371,17 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     activity: parseActivity(raw.activity, `${label}.activity`),
     work: parseWork(raw.work, `${label}.work`),
   };
-  const workerEpoch = parseWorkerEpoch(raw.workerEpoch, `${label}.workerEpoch`);
-  if (workerEpoch) record.workerEpoch = workerEpoch;
+  const parsedWorkerEpoch = parseWorkerEpoch(raw.workerEpoch, `${label}.workerEpoch`);
+  if (parsedWorkerEpoch) record.workerEpoch = parsedWorkerEpoch.epoch;
   const cleanup = parseCleanup(raw.cleanup, `${label}.cleanup`, record.workerEpoch?.tools ?? record.tools);
   if (cleanup) record.cleanup = cleanup;
-  const lastCleanupRecovery = parseOperatorCleanupRecovery(raw.lastCleanupRecovery, `${label}.lastCleanupRecovery`);
-  if (lastCleanupRecovery) record.lastCleanupRecovery = lastCleanupRecovery;
-  if (record.workerEpoch?.phase === "operator-released") {
-    if (!lastCleanupRecovery
-      || lastCleanupRecovery.workerGeneration !== record.workerEpoch.generation
-      || record.workerEpoch.runSlotHeld
-      || cleanup) {
-      throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit, inactive failed state, and no cleanup quarantine.`);
-    }
-    record = transitionAbandonedOwnerRecovery(record).record;
-    if (record.state !== "failed") {
-      throw new Error(`${label}.workerEpoch operator-released phase requires its exact durable recovery audit, inactive failed state, and no cleanup quarantine.`);
-    }
+  const legacyCleanupAudit = parseLegacyCleanupAudit(raw.lastCleanupRecovery, `${label}.lastCleanupRecovery`);
+  if (parsedWorkerEpoch?.legacyPhase === "operator-released"
+    && (!legacyCleanupAudit
+      || legacyCleanupAudit.workerGeneration !== parsedWorkerEpoch.epoch.generation
+      || parsedWorkerEpoch.epoch.runSlotHeld
+      || cleanup)) {
+    throw new Error(`${label}.workerEpoch legacy operator-released phase requires its exact durable audit, no run-slot hold, and no cleanup diagnostic.`);
   }
   const instructions = raw.instructions === undefined
     ? undefined
@@ -394,6 +402,15 @@ function parseRecord(value: unknown, index: number): AgentRecord {
       : boundedString(raw[key], `${label}.${key}`, MAX_REGISTRY_DIAGNOSTIC_BYTES);
     if (key === "currentActivity" && parsed && /^(?:edit|write)\s+\{/i.test(parsed)) parsed = `${parsed.split(/\s/, 1)[0]} (legacy mutation arguments hidden)`;
     if (parsed !== undefined) record[key] = parsed;
+  }
+  if (parsedWorkerEpoch?.legacyPhase === "operator-released") {
+    const warning = "Legacy operator cleanup release was canonicalized as inactive history; it is not Pi session settlement or OS-process proof. Explicit same-identity restart is required.";
+    record.state = "failed";
+    record.failure = warning;
+    record.currentActivity = warning;
+    record.activity.push({ at: nowIso(), kind: "status", summary: warning });
+    record.activity = record.activity.slice(-MAX_REGISTRY_ACTIVITY_ITEMS);
+    record.updatedAt = nowIso();
   }
   return record;
 }

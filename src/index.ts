@@ -5,8 +5,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import * as PiTui from "@earendil-works/pi-tui";
 import { makeMainAddress } from "./address.ts";
 import { AgentBroker } from "./broker.ts";
-import { executeCleanupRecoveryCommand } from "./cleanup-recovery.ts";
-import { createCleanupRecoveryProposalCapability } from "./confirmed-cleanup-recovery.ts";
 import { isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
@@ -139,13 +137,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const cleanupRecovery = createCleanupRecoveryProposalCapability({
-    getState: () => ({ context: currentContext, generation, broker }),
-    namespaceDir: (sessionId) => join(getAgentDir(), "subagents", sessionId),
-  });
   const [inspectAgentTool, waitForRepliesTool, cancelRequestTool, manageAgentTool] = createMainCoordinationTools(
     () => broker,
-    cleanupRecovery,
   );
 
   pi.registerTool({
@@ -214,20 +207,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const action = parts[0];
     try {
-      if (action === "recover-cleanup") {
-        const namespaceDir = join(getAgentDir(), "subagents", ctx.sessionManager.getSessionId());
-        const result = await executeCleanupRecoveryCommand(args, broker, namespaceDir);
-        const next = result.offline
-          ? result.nextStep
-          : "Explicitly restart or archive next.";
-        ctx.ui.notify(
-          `Cleanup generation ${result.audit.workerGeneration} operator-released${result.offline ? " offline" : ""} (not Pi-verified). ${next}`,
-          "warning",
-        );
-        return;
-      }
       if (!broker) {
-        ctx.ui.notify("Email subagent broker is not ready. Only the human-command-only /agents recover-cleanup path remains available for an explicitly authorized exact generation.", "warning");
+        ctx.ui.notify("Email subagent broker is not ready.", "warning");
         return;
       }
       if (action === "stop" && parts[1]) {
@@ -259,7 +240,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   }
 
   pi.registerCommand("agents", {
-    description: "Inspect/control subagents, including human-only offline recovery: /agents [address|stop|restart|archive|cancel|clear-failure|recover-cleanup|effort]",
+    description: "Inspect/control subagents: /agents [address|stop|restart|archive|cancel|clear-failure|effort]",
     handler: showAgents,
   });
 
@@ -282,7 +263,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       } catch (error) {
         broker = undefined;
         if (generation === myGeneration) {
-          ctx.ui.notify(`Email subagent handoff blocked: prior broker cleanup is not quiescent: ${errorMessage(error)}`, "error");
+          ctx.ui.notify(`Email subagent handoff blocked: prior broker Pi session/tool cleanup is unsettled: ${errorMessage(error)}`, "error");
         }
         return;
       }

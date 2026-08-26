@@ -715,7 +715,7 @@ describe("broker hardening", () => {
       await broker.stop(preview.address);
       assert.equal(broker.inspectAgent(preview.address).activeTools, undefined);
       const cleaned = JSON.parse(await readFile(registryPath, "utf8")) as any;
-      assert.equal(cleaned.agents[0].workerEpoch.phase, "verified-clean");
+      assert.equal(cleaned.agents[0].workerEpoch.phase, "session-settled");
       assert.equal(cleaned.agents[0].workerEpoch.runSlotHeld, false);
     } finally {
       await broker.shutdown();

@@ -7,7 +7,7 @@ Explicit release evidence base: `4a494e06a1258a26898ec4bba8c9f8123b6613c2`
 Remediation commits: `018f25b` (presentation/lock/redaction), `1465343` (runtime/admission/start quarantine), `e434a57`/`710da99` (release truth and disabled unsafe legacy branches), plus the final re-review commit recorded by release metadata
 Release posture: extension-owned P1 findings are closed; generic Pi process receipt, durable session-presentation receipt, and mutation-alias identity remain external gates
 
-Historical implementation record: the detailed issue inventories and execution waves below describe the pre-remediation evidence and decisions, not open implementation work. Current extension-owned remediation is complete. Only the durable native-session presentation receipt, exact process-tree quiescence receipt, and authoritative mutation-alias identity remain upstream gates.
+Historical implementation record: the detailed issue inventories and execution waves below describe the pre-remediation evidence and decisions, not open implementation work. Current extension-owned remediation is complete. Only the durable native-session presentation receipt and authoritative mutation-alias identity remain upstream gates. Cleanup is now intentionally scoped to active Pi session/tool settlement rather than OS process-tree certification.
 
 ## Purpose
 
@@ -171,7 +171,7 @@ Release remains blocked until:
 8. Provider/session errors outside native worker sessions are bounded and sanitized.
 9. Live tool capability and orphan mutation outcomes cannot understate possible effects.
 10. Failed writable records cannot auto-restore after abandoned-owner takeover.
-11. Collected-reply and generic process-quiescence claims are narrowed unless Pi supplies the required receipts.
+11. Collected-reply claims remain narrowed unless Pi supplies the required receipt; cleanup makes no generic OS-process certification claim.
 12. The supported Pi package smoke, deterministic suite, package policy, license policy, and secret scan pass from preserved artifacts.
 13. Independent reviewers find no S0/S1 defect in the enabled-by-default surface.
 14. `HEAD == origin/main` and the worktree is clean.

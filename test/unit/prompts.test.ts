@@ -68,7 +68,10 @@ describe("mail prompts", () => {
     assert.match(prompt, /Never redelegate the same possible-effect scope while the original obligation remains open/i);
     assert.doesNotMatch(prompt, /unless the user.*(chooses|accepts).*duplicate-effect risk/is);
     assert.match(prompt, /Failed recipients queue mail.*explicit restart/i);
-    assert.match(prompt, /cleanup quarantine.*no automatic release.*Pi 0\.81\.1/i);
+    assert.match(prompt, /live cleanup blocks replacement only for its exact address.*AgentSession.*tool settlement.*disposal/is);
+    assert.match(prompt, /do not start background or detached processes unless the task explicitly requires/i);
+    assert.match(prompt, /if one is required, report how it is stopped/i);
+    assert.match(prompt, /deliberately detached.*completed command.*outside subagent stop semantics.*not an OS sandbox/is);
     assert.match(prompt, /address domain is a model ID, not a provider ID/i);
     assert.match(prompt, /unknown address.*globally unique.*duplicate ID.*current main provider.*exactly one candidate/is);
     assert.match(prompt, /first accepted mail persists.*provider\/model binding/i);
@@ -149,12 +152,8 @@ describe("mail prompts", () => {
     assert.match(prompt, /at most one justified recovery attempt/i);
     assert.match(prompt, /then report the failure or blocker/i);
     assert.match(prompt, /main-only coordination tools.*inspect_agent.*wait_for_replies.*cancel_request.*manage_agent/is);
-    assert.match(prompt, /manage_agent recover_cleanup.*proposal.*only when the user.*externally verified.*exact.*generation.*quiescence/is);
-    assert.match(prompt, /always asks.*human.*Pi UI.*confirmation/is);
-    assert.match(prompt, /model-generated.*evidence.*zero authority.*without.*affirmative.*UI confirmation/is);
-    assert.match(prompt, /model must never invoke.*literal.*\/agents recover-cleanup.*or claim approval/i);
-    assert.match(prompt, /capacity pressure alone is never authorization/i);
-    assert.match(prompt, /never restarts, archives, delivers queued mail, or cancels obligations/i);
+    assert.match(prompt, /live cleanup blocks replacement only for that exact address.*AgentSession.*tool settlement.*disposal.*unrelated agents remain schedulable/is);
+    assert.doesNotMatch(prompt, /recover_cleanup|recover-cleanup|operatorEvidence|operator-attested/i);
     assert.match(prompt, /cancel_request.*only when the user explicitly abandons.*substantive reason/is);
     assert.match(prompt, /never use cancellation merely to hide an unanswered count/i);
     assert.match(prompt, /capability is uncertain.*inspect_agent/i);
@@ -179,7 +178,7 @@ describe("mail prompts", () => {
     assert.match(prompt, /explicitly restart.*same identity.*preserve.*session.*provider.*mail ID/is);
     assert.match(prompt, /never re-send.*accepted envelope.*provider error/i);
     assert.match(prompt, /failed recipient.*accepted.*queued.*explicit restart/is);
-    assert.match(prompt, /cleanup quarantine.*no automatic release.*Pi 0\.81\.1/is);
+    assert.match(prompt, /unrelated agents remain schedulable/i);
     assert.match(prompt, /every response-required email returned by `fetch_emails\(\)`/i);
     assert.doesNotMatch(prompt, /outstanding requests relevant to the task/i);
     assert.doesNotMatch(prompt, /retry the relevant agent|delegate recovery of the same scope/i);

@@ -580,10 +580,8 @@ export class DashboardComponent {
         const modelId = sanitizeConversationLabel(agent.modelId);
         lines.push(this.theme.fg(color, `${prefix} ${statusIcon(agent.state)} ${address}`));
         const quarantine = agent.cleanup
-          ? " · cleanup unknown · capacity held"
-          : agent.lastCleanupRecovery && agent.workerEpoch?.phase === "operator-released"
-            ? ` · cleanup gen ${agent.lastCleanupRecovery.workerGeneration} operator-released (not Pi-verified)`
-            : "";
+          ? " · Pi session/tool cleanup unsettled · exact address held"
+          : "";
         lines.push(this.theme.fg("dim", `    ${displayStatus(agent.state)} · ${modelId} · effort ${agent.effort} · ${usage}${quarantine}`));
         const work = agent.work;
         const active = [...(work?.active ?? [])].sort((a, b) => (a.attribution === "explicit" ? -1 : 1) - (b.attribution === "explicit" ? -1 : 1));
@@ -613,10 +611,7 @@ export class DashboardComponent {
         // Keep deadline disclosure visible in every detail tab; Profile adds tools/failure context.
         lines.push(this.theme.fg("dim", `lifecycle: spawn ${agent.lifecycle.spawnTimeoutMs}ms · prompt ${agent.lifecycle.promptAcceptanceTimeoutMs}ms · run ${agent.lifecycle.runTimeoutMs}ms · idle ${agent.lifecycle.idleTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
         if (agent.cleanup) {
-          lines.push(this.theme.fg("error", `cleanup ${agent.cleanup.state}: quiescence unknown · capacity held · restart/archive blocked`));
-        } else if (agent.lastCleanupRecovery) {
-          const next = agent.workerEpoch?.phase === "operator-released" ? " · explicit restart/archive required" : "";
-          lines.push(this.theme.fg("warning", `last cleanup generation ${agent.lastCleanupRecovery.workerGeneration}: operator-released at ${agent.lastCleanupRecovery.releasedAt} · not Pi-verified${next}`));
+          lines.push(this.theme.fg("error", `cleanup ${agent.cleanup.state}: Pi session/tool settlement unknown · exact address held · restart/archive blocked`));
         }
         lines.push("");
         if (this.tab === "work") {
@@ -686,10 +681,8 @@ export class DashboardComponent {
               + inspection.archiveBlockers.outgoingUnanswered.count
               + inspection.archiveBlockers.pendingReplies.count;
             const recovery = inspection.cleanup
-              ? "recover only after human authorization for this exact generation and external quiescence evidence; capacity pressure is never authorization"
-              : inspection.lastCleanupRecovery && agent.workerEpoch?.phase === "operator-released"
-                ? `generation ${inspection.lastCleanupRecovery.workerGeneration} operator-released, not Pi-verified; explicitly restart/archive next`
-                : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
+              ? "wait for this exact address's live Pi session/tool cleanup to settle; unrelated agents remain schedulable"
+              : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
                 ? "restart real obligations; cancel only an explicitly abandoned exact request; then archive when clean"
                 : inspection.archiveEligible && inspection.holdsActivationLease
                   ? "reuse if relevant, or archive this clean identity; stop alone does not free its lease"

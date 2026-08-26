@@ -375,12 +375,12 @@ async function inspectNamespace(
           }
           if (agent.state !== "paused") addReason(reasons, "registry worker is not paused after clean child shutdown");
           if (agent.cleanup) addReason(reasons, "registry contains a cleanup quarantine or unknown cleanup diagnostic");
-          if (!agent.workerEpoch || agent.workerEpoch.phase !== "verified-clean") {
-            addReason(reasons, "registry worker epoch is not verified-clean");
+          if (!agent.workerEpoch || agent.workerEpoch.phase !== "session-settled") {
+            addReason(reasons, "registry worker epoch is not Pi session/tool settled");
           }
           if (agent.workerEpoch?.runSlotHeld !== false) addReason(reasons, "registry worker epoch still holds or omits its run-slot release");
         }
-        if (registry.agents.some((agent) => agent.cleanup)) addReason(reasons, "at least one registry identity has cleanup quiescence unknown");
+        if (registry.agents.some((agent) => agent.cleanup)) addReason(reasons, "at least one registry identity has Pi session/tool cleanup settlement unknown");
         if (registry.agents.some((agent) => agent.workerEpoch?.runSlotHeld !== false)) {
           addReason(reasons, "at least one registry identity has a held or unverified run slot");
         }

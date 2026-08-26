@@ -42,20 +42,6 @@ export function sessionPresentationReceiptCapability(): UnavailablePiCoreCapabil
 }
 
 /**
- * No released Pi API can prove process-tree absence for one exact worker
- * generation. This gate stays false even if an untested host happens to expose
- * a similarly named method; integration requires a deliberate version upgrade.
- */
-export function processQuiescenceReceiptCapability(): UnavailablePiCoreCapability {
-  return {
-    supported: false,
-    detailCode: "PI_0_81_1_PROCESS_QUIESCENCE_RECEIPT_UNAVAILABLE",
-    reason: `Pi ${SUPPORTED_PI_VERSION} exposes no authoritative session/generation-scoped process-tree cleanup receipt.`,
-    requiredCoreContract: "An idempotent exact session/generation receipt covering provider quiescence, settled callbacks, active tool receipts, completed process group/tree receipts, platform/source detail, and verified-or-unknown confidence.",
-  };
-}
-
-/**
  * Pi's public mutation queue is useful only for its documented per-key scope.
  * The extension has no supported interception point from which to strengthen
  * that identity across every built-in/custom mutation session.

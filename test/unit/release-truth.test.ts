@@ -7,11 +7,12 @@ async function text(path: string): Promise<string> {
 }
 
 describe("release contract truth", () => {
-  it("states disabled nested delegation and manual fail-closed orphan recovery without obsolete release claims", async () => {
+  it("states disabled nested delegation and exact-dead-owner automatic reclaim without obsolete release claims", async () => {
     const changelog = await text("CHANGELOG.md");
     const unreleased = changelog.split("## [0.1.0]", 1)[0]!;
     assert.match(unreleased, /nested response-required delegation.*fail-closed disabled/i);
-    assert.match(unreleased, /orphan[\s\S]*manual recovery/i);
+    assert.match(unreleased, /automatically reclaim.*exact dead.*owner|exact dead.*owner.*automatically reclaim/is);
+    assert.match(unreleased, /live.*SIGSTOP.*fail-closed/is);
     assert.doesNotMatch(unreleased, /explicitly opted-in child requests|opt-in parent parking|canSpawn` now means subagent delegation permission/i);
     assert.doesNotMatch(unreleased, /unless the user explicitly accepts|late replies arrive automatically/i);
   });
@@ -24,30 +25,31 @@ describe("release contract truth", () => {
     assert.match(config, /available-model.*6 KiB.*52 lines.*48 entries.*partial/i);
   });
 
-  it("directs orphan-lock operators to manual recovery rather than waiting", async () => {
-    for (const path of ["README.md", "docs/README.md", "docs/lifecycle.md"]) {
-      const value = await text(path);
-      assert.match(value, /orphan[\s\S]{0,300}manual recovery/i, path);
-      assert.doesNotMatch(value, /orphan[\s\S]{0,200}(wait for|waiting period)/i, path);
-    }
-  });
-
-  it("documents exact operator-attested cleanup recovery and the startup-blocked session sequence", async () => {
+  it("documents exact-dead-owner automatic reclaim and removes cleanup recovery surfaces", async () => {
     for (const path of ["README.md", "docs/README.md", "docs/lifecycle.md", "docs/manage-agent.md", "docs/inspect-agent.md"]) {
       const value = await text(path);
-      assert.match(value, /recover.cleanup|recover_cleanup/i, path);
-      assert.match(value, /operator-attested|operator attestation/i, path);
-      assert.match(value, /not Pi-verified|Pi did not verify/i, path);
-      assert.match(value, /capacity pressure.*never authorization/i, path);
-      assert.match(value, /manage_agent[\s\S]{0,300}recover_cleanup[\s\S]{0,500}(?:Pi UI|human confirmation)|recover_cleanup[\s\S]{0,500}(?:Pi UI|human confirmation)/i, path);
-      assert.match(value, /\/agents recover-cleanup[\s\S]{0,300}(?:direct human|human-command-only|human-only|literal command)/i, path);
-      assert.match(value, /never (?:automatically |auto-?)?(?:restore|restart|create).*worker|no automatic (?:restore|restart)/i, path);
+      assert.doesNotMatch(value, /manage_agent recover_cleanup|\/agents recover-cleanup|operatorEvidence|cleanup-recovery\.guard/i, path);
     }
-    for (const path of ["README.md", "docs/lifecycle.md", "docs/manage-agent.md"]) {
+    for (const path of ["README.md", "docs/lifecycle.md"]) {
       const value = await text(path);
-      assert.match(value, /exit the live owner[\s\S]*resume the same session[\s\S]*startup(?:\s|\*)+fails[\s\S]*recover-cleanup[\s\S]*\/reload[\s\S]*(restart|archive)/i, path);
-      assert.match(value, /clone.*fresh mailbox.*(?:does not|cannot).*recover.*old obligations/i, path);
-      assert.match(value, /cleanup-recovery\.guard[\s\S]*(?:manually|deliberately) remove|(?:manually|deliberately) remove[\s\S]*cleanup-recovery\.guard/i, path);
+      assert.match(value, /exact.*owner.*dead[\s\S]{0,100}startup automatically reclaim|automatically reclaim.*exact.*dead.*owner/is, path);
+      assert.match(value, /live.*SIGSTOP.*fail-closed|live or `SIGSTOP`ed.*reject/is, path);
+      assert.match(value, /generation 9[\s\S]*explicit.*restart[\s\S]{0,150}preserv.*(?:session|mail)|generation 9[\s\S]*preserv.*(?:session|mail)[\s\S]*explicit.*restart/is, path);
+      assert.match(value, /clone.*fresh mailbox.*cannot recover.*old obligations/i, path);
+    }
+    const manage = await text("src/main-tools.ts");
+    assert.doesNotMatch(manage, /recover_cleanup|operatorEvidence|recoveryStatus/);
+    await assert.rejects(text("src/cleanup-recovery.ts"), /ENOENT/);
+    await assert.rejects(text("src/confirmed-cleanup-recovery.ts"), /ENOENT/);
+  });
+
+  it("documents session/tool cleanup and detached-process scope", async () => {
+    for (const path of ["README.md", "SECURITY.md", "docs/lifecycle.md", "docs/manage-agent.md"]) {
+      const value = await text(path);
+      assert.match(value, /AgentSession|Pi session\/tool/i, path);
+      assert.match(value, /not an OS sandbox|outside.*stop semantics/i, path);
+      assert.match(value, /do not start background or detached processes unless.*explicitly requires/i, path);
+      assert.match(value, /report how it is stopped/i, path);
     }
   });
 
@@ -58,12 +60,12 @@ describe("release contract truth", () => {
     assert.match(script, /productionAudit/);
   });
 
-  it("marks remediation plans complete and retains exactly the three upstream capability gates", async () => {
+  it("marks remediation plans complete and retains only the two current upstream capability gates", async () => {
     const overview = await text("plans/remaining-open-problems.md");
     assert.match(overview, /Status: remediation complete/i);
     assert.doesNotMatch(overview, /regeneration in progress|implementation not started/i);
     assert.match(overview, /durable session-presentation receipt/i);
-    assert.match(overview, /process-tree quiescence receipt/i);
+    assert.doesNotMatch(overview.split("## 1\. Executive summary", 1)[0]!, /process-tree quiescence receipt/i);
     assert.match(overview, /mutation-alias identity/i);
     for (const path of [
       "plans/remaining-open-problems/01-mail-obligations.md",

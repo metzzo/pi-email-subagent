@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { awaitPromptAcceptance, effectiveWorkerModel, SdkWorker, terminalAgentError } from "../../src/sdk-worker.ts";
-import { processQuiescenceReceiptCapability } from "../../src/pi-compat.ts";
 import { SAFE_SUMMARY_MAX_BYTES } from "../../src/safe-summary.ts";
 import { emptyWorkState } from "../../src/work-ledger.ts";
 
@@ -137,14 +136,20 @@ describe("SDK worker failures", () => {
     assert.equal(effectiveWorkerModel(parent), parent);
   });
 
-  it("reuses one cleanup operation and reports active tool quiescence as unknown without a Pi receipt", async () => {
+  it("reuses one cleanup operation and settles active tools at the real AgentSession abort boundary", async () => {
     const worker = new SdkWorker({} as never);
     let aborts = 0;
     let disposals = 0;
     let unsubscribes = 0;
     const session = {
       isStreaming: true,
-      abort: async () => { aborts += 1; },
+      isIdle: false,
+      abort: async () => {
+        aborts += 1;
+        internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "bash-active", toolName: "bash", result: {}, isError: false });
+        session.isStreaming = false;
+        session.isIdle = true;
+      },
       dispose: () => { disposals += 1; },
     };
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
@@ -168,21 +173,20 @@ describe("SDK worker failures", () => {
       args: { command: "PRIVATE CLEANUP COMMAND" },
     });
 
-    const first = (worker as any).cleanup({ abortTimeoutMs: 500 });
-    const second = (worker as any).cleanup({ abortTimeoutMs: 500 });
+    const first = worker.cleanup();
+    const second = worker.cleanup();
     assert.equal(first, second, "repeated cleanup joins the exact same promise");
     const report = await first;
     assert.equal(aborts, 1);
     assert.equal(disposals, 1);
     assert.equal(unsubscribes, 1);
     assert.equal(report.sessionDisposed, true);
-    assert.equal(report.providerQuiescent, true);
-    assert.equal(report.quiescence, "unknown");
+    assert.equal(report.sessionIdle, true);
+    assert.equal(report.quiescence, "verified");
     assert.deepEqual(report.tools, [{
       toolCallId: "bash-active",
       toolName: "bash",
-      quiescence: "unknown",
-      detailCode: "PI_TOOL_QUIESCENCE_RECEIPT_UNAVAILABLE",
+      quiescence: "verified",
     }]);
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE|command|args|output/i);
     const before = observed.length;
@@ -192,13 +196,55 @@ describe("SDK worker failures", () => {
     assert.deepEqual(record, recordBefore, "cleanup also suppresses stale session mutation");
   });
 
+  it("keeps cleanup pending through delayed provider and tool-listener settlement", async () => {
+    const worker = new SdkWorker({} as never);
+    let releaseProvider!: () => void;
+    let releaseListener!: () => void;
+    const provider = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    const listener = new Promise<void>((resolve) => { releaseListener = resolve; });
+    let disposals = 0;
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { session: any; record: typeof record; cwd: string; onSessionEvent(event: unknown): void };
+    const session = {
+      isStreaming: true,
+      isIdle: false,
+      abort: async () => {
+        await provider;
+        internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "delayed-tool", toolName: "bash", result: {}, isError: false });
+        await listener;
+        session.isStreaming = false;
+        session.isIdle = true;
+      },
+      dispose: () => { disposals += 1; },
+    };
+    internal.session = session;
+    internal.record = record;
+    internal.cwd = "/work";
+    internal.onSessionEvent({ type: "tool_execution_start", toolCallId: "delayed-tool", toolName: "bash", args: {} });
+
+    let settled = false;
+    const cleanup = worker.cleanup().then((report) => { settled = true; return report; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false);
+    assert.equal(disposals, 0);
+    releaseProvider();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false, "tool-listener settlement still owns the cleanup boundary");
+    assert.equal(disposals, 0);
+    releaseListener();
+    const report = await cleanup;
+    assert.equal(report.quiescence, "verified");
+    assert.deepEqual(report.tools, [{ toolCallId: "delayed-tool", toolName: "bash", quiescence: "verified" }]);
+    assert.equal(disposals, 1);
+  });
+
   it("does not declare cleanup verified while the exact worker start operation is pending", async () => {
     const worker = new SdkWorker({} as never);
     let finishStart!: () => void;
     const startOperation = new Promise<void>((resolve) => { finishStart = resolve; });
     (worker as unknown as { startOperation: Promise<void> }).startOperation = startOperation;
     let settled = false;
-    const cleanup = worker.cleanup({ abortTimeoutMs: 10 }).then((report) => {
+    const cleanup = worker.cleanup().then((report) => {
       settled = true;
       return report;
     });
@@ -209,27 +255,28 @@ describe("SDK worker failures", () => {
     assert.equal(report.quiescence, "verified");
   });
 
-  it("attempts disposal at the abort deadline while keeping cleanup pending through a late successful abort", async () => {
+  it("waits for a late successful abort before disposal and settlement", async () => {
     const worker = new SdkWorker({} as never);
     let releaseAbort!: () => void;
     const abortSettled = new Promise<void>((resolve) => { releaseAbort = resolve; });
     let disposed = false;
     const session = {
       isStreaming: true,
-      abort: async () => { await abortSettled; },
+      isIdle: false,
+      abort: async () => { await abortSettled; session.isStreaming = false; session.isIdle = true; },
       dispose: () => { disposed = true; },
     };
     const internal = worker as unknown as { session: typeof session };
     internal.session = session;
 
     let settled = false;
-    const cleanup = worker.cleanup({ abortTimeoutMs: 10 }).then((report) => {
+    const cleanup = worker.cleanup().then((report) => {
       settled = true;
       return report;
     });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(settled, false, "the authoritative cleanup operation remains pending after the broker deadline");
-    assert.equal(disposed, true, "disposal progresses once at the abort response deadline");
+    assert.equal(disposed, false, "disposal waits for the authoritative AgentSession abort/idle boundary");
 
     releaseAbort();
     const report = await cleanup;
@@ -249,18 +296,18 @@ describe("SDK worker failures", () => {
       dispose: () => { disposals += 1; },
     };
     (worker as unknown as { session: typeof session }).session = session;
-    const first = worker.cleanup({ abortTimeoutMs: 15 });
-    const second = worker.cleanup({ abortTimeoutMs: 1 });
+    const first = worker.cleanup();
+    const second = worker.cleanup();
     assert.equal(first, second);
     let settled = false;
     void first.then(() => { settled = true; });
     await new Promise((resolve) => setTimeout(resolve, 40));
     assert.equal(aborts, 1);
-    assert.equal(disposals, 1);
+    assert.equal(disposals, 0, "an unresolved abort cannot be bypassed by early disposal");
     assert.equal(settled, false);
   });
 
-  it("retains late abort rejection and dispose failure after deadline progression", async () => {
+  it("retains abort rejection and the following dispose failure", async () => {
     const worker = new SdkWorker({} as never);
     let rejectAbort!: (error: Error) => void;
     const abort = new Promise<void>((_resolve, reject) => { rejectAbort = reject; });
@@ -271,14 +318,15 @@ describe("SDK worker failures", () => {
       dispose: () => { disposals += 1; throw new Error("dispose failed first"); },
     };
     (worker as unknown as { session: typeof session }).session = session;
-    const cleanup = worker.cleanup({ abortTimeoutMs: 10 });
+    const cleanup = worker.cleanup();
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(disposals, 1);
+    assert.equal(disposals, 0, "disposal cannot precede abort settlement");
     rejectAbort(new Error("late abort failed"));
     const report = await cleanup;
+    assert.equal(disposals, 1);
     assert.equal(report.abort, "failed");
     assert.equal(report.dispose, "failed");
-    assert.equal(report.providerQuiescent, false);
+    assert.equal(report.sessionIdle, false);
     assert.equal(report.quiescence, "unknown");
     assert.match(report.detail ?? "", /abort failed|dispose failed/);
     assert.equal(disposals, 1);
@@ -294,16 +342,16 @@ describe("SDK worker failures", () => {
       dispose: () => { disposals += 1; },
     };
     (worker as unknown as { session: typeof session }).session = session;
-    const report = await worker.cleanup({ abortTimeoutMs: 50 });
+    const report = await worker.cleanup();
     assert.equal(aborts, 1);
     assert.equal(disposals, 1);
     assert.equal(report.abort, "succeeded");
     assert.equal(report.dispose, "succeeded");
   });
 
-  it("retains generation-level Bash process risk after the tool reports success", async () => {
+  it("treats a completed foreground Bash call as settled session work", async () => {
     const worker = new SdkWorker({} as never);
-    const session = { isStreaming: false, abort: async () => undefined, dispose: () => undefined };
+    const session = { isStreaming: false, isIdle: true, abort: async () => undefined, dispose: () => undefined };
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "idle" } as any;
     const internal = worker as unknown as { session: typeof session; record: typeof record; cwd: string; onSessionEvent(event: unknown): void };
     internal.session = session;
@@ -312,11 +360,10 @@ describe("SDK worker failures", () => {
     internal.onSessionEvent({ type: "tool_execution_start", toolCallId: "completed-bash", toolName: "bash", args: { command: "PRIVATE" } });
     internal.onSessionEvent({ type: "tool_execution_end", toolCallId: "completed-bash", toolName: "bash", result: {}, isError: false });
 
-    const report = await worker.cleanup({ abortTimeoutMs: 10 });
+    const report = await worker.cleanup();
     assert.deepEqual(report.tools, [], "completed tools are not mislabeled as active");
-    assert.equal(report.quiescence, "unknown");
-    assert.equal(report.source, processQuiescenceReceiptCapability().detailCode,
-      "process-risk cleanup is tied to the explicit unsupported Pi capability gate");
+    assert.equal(report.quiescence, "verified");
+    assert.equal(report.source, "pi-agent-session-and-tools-settled");
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE/);
   });
 
