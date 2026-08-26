@@ -17,12 +17,13 @@ Pi-managed retry/backoff remains within the accepted run and never resets its ab
 
 pi-subagent controls a trusted Pi 0.81.1 `AgentSession` and its currently active model/tool work. It is not an OS sandbox.
 
-One exact worker-generation cleanup lease owns factory/start settlement, `AgentSession.abort()`, active tool promises/listeners, and disposal. Routing detaches immediately. If the session is streaming, cleanup waits for the real `abort()` result and Pi's idle boundary; it does not dispose at the abort caller deadline. Active tool IDs/names remain pending diagnostics until that boundary. Cleanup releases only when:
+One exact worker-generation cleanup lease owns factory/start settlement, every already-started `AgentSession.prompt` preflight, `AgentSession.abort()`, active tool promises/listeners, and disposal. Routing detaches immediately. Cleanup invalidates prompt admission first, joins each preflight, and rejects late acceptance at Pi 0.81.1's synchronous `preflightResult(true)` boundary before `_runAgentPrompt` can start. If the session is streaming, cleanup waits for the real `abort()` result and Pi's idle boundary; it does not dispose at the abort caller deadline. Active tool IDs/names remain pending diagnostics until that boundary. Cleanup releases only when:
 
 1. the exact factory/start operation settled;
-2. streaming abort resolved successfully and the session reached idle (or the session was already idle);
-3. active tool calls/listeners settled; and
-4. session disposal succeeded.
+2. every started prompt preflight settled or was vetoed;
+3. streaming abort resolved successfully and the session reached idle (or the session was already idle);
+4. active tool calls/listeners settled; and
+5. session disposal succeeded.
 
 The persisted compatibility field `quiescence` means only **Pi session/tool settlement**. It never claims that all OS descendants are absent. A completed ordinary Bash command such as `pwd`, `git status`, or a test suite is settled and does not permanently poison its worker generation.
 
@@ -36,7 +37,9 @@ Restart never creates generation G+1 while generation G's factory/start/cleanup 
 
 The namespace lock is a cooperative per-parent state lease on one local host/PID namespace, not a workspace, distributed-filesystem, container, or security fence. Linux owner metadata includes namespace path, boot ID, PID, and `/proc/<pid>/stat` start time.
 
-Acquisition serializes owner inspection, stale-lock removal, filesystem locking, and new-owner publication with an owner-transition guard. An exact live or `SIGSTOP`ed owner always rejects, regardless of lock mtime. When the complete exact recorded owner identity matches and that owner process is dead, startup automatically reclaims the stale proper-lockfile directory, acquires the namespace, and records `abandonedOwner: true`. Missing/incomplete/malformed identity, a lock without its sidecar, an owner-publication gap, a mismatched namespace, non-Linux exact-dead takeover, or an abandoned transition guard remains fail-closed.
+Acquisition serializes owner inspection, stale-lock removal, filesystem locking, and new-owner publication with an owner-transition guard. Before any liveness comparison or removal, it requires the exact namespace, a canonical Linux boot-ID UUID, a positive canonical decimal start time, a positive safe PID, a nonempty bounded token, and a bounded canonical ISO timestamp. An exact live or `SIGSTOP`ed owner always rejects, regardless of lock mtime. When the complete exact recorded owner identity matches and that owner process is dead, startup automatically reclaims the stale proper-lockfile directory, acquires the namespace, and records `abandonedOwner: true`. Missing/incomplete/malformed identity, a lock without its sidecar, an owner-publication gap, a mismatched namespace, non-Linux exact-dead takeover, or an abandoned transition guard remains fail-closed without changing owner/lock bytes.
+
+The new owner keeps an abandoned-normalization obligation until the first registry commit containing every normalized record succeeds. An initialization failure before or reported at that commit does not release ownership as clean. The retained exact owner remains fail-closed until its process dies; the next exact-dead takeover repeats normalization before it can restore or prompt any worker.
 
 After exact-owner death, that process's in-process `AgentSession` objects and callbacks are gone. Startup preserves registry records, mail, session paths, obligations, and provider/model bindings; clears coherent dead in-process run-slot/cleanup holds; marks formerly active identities `failed`; and requires explicit same-identity restart. It does not claim OS-process containment or auto-deliver queued work.
 

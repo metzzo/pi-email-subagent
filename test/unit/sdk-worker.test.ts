@@ -196,6 +196,53 @@ describe("SDK worker failures", () => {
     assert.deepEqual(record, recordBefore, "cleanup also suppresses stale session mutation");
   });
 
+  it("invalidates and joins a prompt still inside Pi preflight before cleanup can settle", async () => {
+    const worker = new SdkWorker({} as never);
+    let releasePreflight!: () => void;
+    const preflight = new Promise<void>((resolve) => { releasePreflight = resolve; });
+    let providerCalls = 0;
+    let disposals = 0;
+    const session = {
+      isStreaming: false,
+      isIdle: true,
+      prompt: async (_message: string, options: { preflightResult(success: boolean): void }) => {
+        await preflight;
+        // Pi 0.81.1 calls this immediately before _runAgentPrompt. Throwing
+        // here is the last synchronous point that can prevent the old run.
+        options.preflightResult(true);
+        providerCalls += 1;
+      },
+      abort: async () => undefined,
+      dispose: () => { disposals += 1; },
+    };
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "idle" } as any;
+    const internal = worker as unknown as {
+      session: typeof session;
+      sessionManager: { appendCustomEntry(): void };
+      record: typeof record;
+    };
+    internal.session = session;
+    internal.sessionManager = { appendCustomEntry: () => undefined };
+    internal.record = record;
+
+    const promptOutcome = worker.prompt("late preflight").then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    let cleanupSettled = false;
+    const cleanup = worker.cleanup().then((report) => { cleanupSettled = true; return report; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const settledBeforePreflight = cleanupSettled;
+    releasePreflight();
+
+    const [outcome, report] = await Promise.all([promptOutcome, cleanup]);
+    assert.equal(settledBeforePreflight, false, "cleanup owns every already-started Pi prompt preflight");
+    assert.equal(outcome, "rejected", "late preflight acceptance is cancelled at the Pi callback boundary");
+    assert.equal(providerCalls, 0, "_runAgentPrompt cannot start after cleanup invalidates admission");
+    assert.equal(disposals, 1);
+    assert.equal(report.quiescence, "verified");
+  });
+
   it("keeps cleanup pending through delayed provider and tool-listener settlement", async () => {
     const worker = new SdkWorker({} as never);
     let releaseProvider!: () => void;
