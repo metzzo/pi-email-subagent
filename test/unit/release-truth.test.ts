@@ -39,7 +39,8 @@ describe("release contract truth", () => {
       assert.match(value, /operator-attested|operator attestation/i, path);
       assert.match(value, /not Pi-verified|Pi did not verify/i, path);
       assert.match(value, /capacity pressure.*never authorization/i, path);
-      assert.match(value, /human-command-only|human-only.*\/agents recover-cleanup|no model-callable/i, path);
+      assert.match(value, /manage_agent[\s\S]{0,300}recover_cleanup[\s\S]{0,500}(?:Pi UI|human confirmation)|recover_cleanup[\s\S]{0,500}(?:Pi UI|human confirmation)/i, path);
+      assert.match(value, /\/agents recover-cleanup[\s\S]{0,300}(?:direct human|human-command-only|human-only|literal command)/i, path);
       assert.match(value, /never (?:automatically |auto-?)?(?:restore|restart|create).*worker|no automatic (?:restore|restart)/i, path);
     }
     for (const path of ["README.md", "docs/lifecycle.md", "docs/manage-agent.md"]) {

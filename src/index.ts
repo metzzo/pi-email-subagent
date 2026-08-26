@@ -6,6 +6,7 @@ import * as PiTui from "@earendil-works/pi-tui";
 import { makeMainAddress } from "./address.ts";
 import { AgentBroker } from "./broker.ts";
 import { executeCleanupRecoveryCommand } from "./cleanup-recovery.ts";
+import { createCleanupRecoveryProposalCapability } from "./confirmed-cleanup-recovery.ts";
 import { isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
@@ -138,7 +139,14 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
   });
 
-  const [inspectAgentTool, waitForRepliesTool, cancelRequestTool, manageAgentTool] = createMainCoordinationTools(() => broker);
+  const cleanupRecovery = createCleanupRecoveryProposalCapability({
+    getState: () => ({ context: currentContext, generation, broker }),
+    namespaceDir: (sessionId) => join(getAgentDir(), "subagents", sessionId),
+  });
+  const [inspectAgentTool, waitForRepliesTool, cancelRequestTool, manageAgentTool] = createMainCoordinationTools(
+    () => broker,
+    cleanupRecovery,
+  );
 
   pi.registerTool({
     ...fetchTool,

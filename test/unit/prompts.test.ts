@@ -149,8 +149,10 @@ describe("mail prompts", () => {
     assert.match(prompt, /at most one justified recovery attempt/i);
     assert.match(prompt, /then report the failure or blocker/i);
     assert.match(prompt, /main-only coordination tools.*inspect_agent.*wait_for_replies.*cancel_request.*manage_agent/is);
-    assert.match(prompt, /no model-callable cleanup recovery action.*human-command-only.*literal.*\/agents recover-cleanup.*exact-address.*worker-generation.*external quiescence verification/is);
-    assert.match(prompt, /model must never invoke.*or synthesize.*operator evidence/i);
+    assert.match(prompt, /manage_agent recover_cleanup.*proposal.*only when the user.*externally verified.*exact.*generation.*quiescence/is);
+    assert.match(prompt, /always asks.*human.*Pi UI.*confirmation/is);
+    assert.match(prompt, /model-generated.*evidence.*zero authority.*without.*affirmative.*UI confirmation/is);
+    assert.match(prompt, /model must never invoke.*literal.*\/agents recover-cleanup.*or claim approval/i);
     assert.match(prompt, /capacity pressure alone is never authorization/i);
     assert.match(prompt, /never restarts, archives, delivers queued mail, or cancels obligations/i);
     assert.match(prompt, /cancel_request.*only when the user explicitly abandons.*substantive reason/is);

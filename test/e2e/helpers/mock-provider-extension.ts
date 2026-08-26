@@ -25,6 +25,7 @@
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
  *   user "E2E INSPECT [XHIGH]"                      → inspect_agent on the scout
  *   user "E2E STOP" / "E2E ARCHIVE"                 → manage_agent
+ *   user "E2E RECOVER CLEANUP"                       → confirmation-gated manage_agent recovery proposal
  *   user "E2E CANCEL"                                → cancel_request on latest request
  *   send_email result                                → wait_for_replies for all
  *                                                      correlation IDs seen so
@@ -52,6 +53,7 @@ export const MOCK_MODEL_ID = "mock-e2e";
 export const MOCK_WORKER_ADDRESS = "scout.e2e@mock-e2e.com";
 export const MOCK_REVIEWER_ADDRESS = "reviewer.e2e@mock-e2e.com";
 export const MOCK_WRITER_ADDRESS = "worker.work-e2e@mock-e2e.com";
+export const MOCK_RECOVERY_ADDRESS = "worker.confirmed-recovery@mock-e2e.com";
 export const MOCK_MAIN_ADDRESS = "main@mock-e2e.com";
 process.env.PI_EMAIL_MOCK_PROVIDER_AUTH ??= "configured";
 const RATE_ADDRESSES = ["scout.e2e", "scout.two", "scout.three", "scout.four"].map((name) => `${name}@mock-e2e.com`);
@@ -251,6 +253,17 @@ function planMain(messages: readonly Message[]): Plan {
         subject: "Verify cleanup quarantine",
         message: `CLEANUP PROCESS PATH ${paths[1]} HEARTBEAT ${paths[2]}`,
         priority: "low",
+      },
+    }] };
+  }
+  if (lastText.includes("E2E RECOVER CLEANUP")) {
+    return { toolCalls: [{
+      name: "manage_agent",
+      arguments: {
+        address: MOCK_RECOVERY_ADDRESS,
+        action: "recover_cleanup",
+        workerGeneration: 9,
+        operatorEvidence: "The human said exact generation 9 was externally verified quiescent. Authorization: Bearer rpc-secret-sentinel",
       },
     }] };
   }
