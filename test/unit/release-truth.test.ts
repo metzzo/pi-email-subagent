@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 async function text(path: string): Promise<string> {
@@ -27,6 +27,17 @@ describe("release contract truth", () => {
     const runtimeSource = await text("src/model-runtime.ts");
     assert.match(runtimeSource, /public post-registration availability\/auth check/i);
     assert.doesNotMatch(runtimeSource, /coalesces that exact pending refresh|pending refresh is joined|joined available set/i);
+
+    const currentDocs = [
+      "README.md",
+      "CHANGELOG.md",
+      "SECURITY.md",
+      ...(await readdir("docs")).filter((name) => name.endsWith(".md")).map((name) => `docs/${name}`),
+    ];
+    const staleRefreshReceipt = /(?:getAvailable(?:\([^)]*\))?[\s\S]{0,160}(?:join\w*|coalesc\w*)[\s\S]{0,160}(?:pending|refresh)|(?:pending|refresh)[\s\S]{0,160}(?:join\w*|coalesc\w*)[\s\S]{0,160}getAvailable(?:\([^)]*\))?)/i;
+    for (const path of currentDocs) {
+      assert.doesNotMatch(await text(path), staleRefreshReceipt, path);
+    }
   });
 
   it("states disabled nested delegation and exact-dead-owner automatic reclaim without obsolete release claims", async () => {
