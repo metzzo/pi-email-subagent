@@ -4,10 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+Initial `0.1.0` release candidate (unpublished).
+
 ### Changed
 
 - The exact tested host baseline is Pi 0.84.2 with TypeBox 1.3.7. Startup rejects any other public Pi `VERSION` before extension registration or broker/state construction, while required Pi packages remain wildcard host peers.
-- Exact worker request-model matching now includes nested `samplingParams`, and the selected runtime model is deeply frozen after admission.
+- Exact worker request-model matching now includes nested `samplingParams`; after admission, a detached clone is deeply frozen for worker use while provider/runtime-owned catalog models remain mutable.
 - `wait_for_replies` keeps its 120-second default and early completion but permits one bounded wait of up to 3600 seconds. Coordination guidance reuses identities only for continuing work in the same feature, worktree, or review-repair cycle.
 - The optional paid live-provider helper now waits for final main settlement plus a bounded grace, rejects RPC/tool/extension and canonical namespace inconsistencies, preserves unsafe state, and removes only Pi session/tool-settled namespaces after secret-free evidence is saved and read back.
 - Removed mechanical completion replies: only an exact successful `send_email` reply closes a mail obligation, while final assistant text remains session-local and exhausted enforcement leaves requests unanswered.
@@ -29,9 +31,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - Release guidance now requires one clean pushed candidate, complete deterministic validation/package/secret/audit/diff logs, schema-parsed evidence, exact Pi 0.84.2 behavioral authority rather than duck-typing claims, independent post-writer reviews, package/state/sentinel hygiene, and an explicit live/platform not-tested list.
 - Real Pi coverage proves nested response-required delegation is rejected even when legacy configuration sets `canSpawn: true`. A direct canonical legacy-journal suite covers queued reply delivery, parent wake, terminal blocker recovery, archive blockers, and cancellation wake without exposing a new delegation path.
 
-## [0.1.0] - 2026-08-23
+### Initial release candidate scope
 
-### Added
+#### Added
 
 - Persistent model-addressed Pi workers coordinated through virtual email.
 - Durable at-least-once mail journal with reply reservation/commit/release semantics and crash reconciliation.
@@ -52,7 +54,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Pi-managed provider retry start/recovery/end visibility through the existing bounded Activity/current-activity path, plus current-batch effect warnings and same-identity terminal recovery guidance without a new diagnostic schema.
 - Durable first-mail provider/model binding intent with exact crash-window recovery, legacy unique migration, bounded binding diagnostics, and additive provider visibility in send/inspect/dashboard surfaces.
 
-### Changed
+#### Changed
 
 - Tool string enums now use Google-compatible schemas.
 - Tool failures use Pi's native thrown-error contract.
@@ -72,9 +74,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - The npm package excludes internal implementation plans and enforces one shared entry-count, tarball-size, required-file, forbidden-path, and package-local Markdown-link policy in local smoke and CI.
 - Conversation and persisted-diff readers use the supported `SessionManager.open(...).getBranch()` path instead of Pi test-only parsing exports.
 - The Pi RPC E2E client now decodes split UTF-8 safely and rejects malformed or unterminated JSONL stdout records.
-- Version 0.1.0 is supported and CI/load-tested against Pi 0.84.2; wildcard host peers do not imply compatibility with untested Pi versions.
+- The `0.1.0` release candidate is CI/load-tested against Pi 0.84.2; wildcard host peers do not imply compatibility with untested Pi versions.
 
-### Security
+#### Security
 
 - XML framing escapes peer-controlled content; TUI rendering strips terminal controls.
 - State directories/files use restrictive permissions.
@@ -83,7 +85,4 @@ All notable changes to this project are documented here. The format follows [Kee
 - Existing namespace directories are repaired to `0700` before locking, and newly persisted owner metadata safely replaces stale metadata at `0600`.
 - Direct mutation serialization is documented as best-effort, including upstream missing-target symlink and hard-link alias gaps.
 
-The initial release uses tag `v0.1.0`; subsequent changes remain under Unreleased until the next versioned tag.
-
-[Unreleased]: https://github.com/metzzo/pi-email-subagent/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/metzzo/pi-email-subagent/releases/tag/v0.1.0
+The initial release candidate remains unpublished; this changelog claims no release tag or npm publication.

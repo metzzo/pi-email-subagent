@@ -107,13 +107,24 @@ describe("worker model runtime", () => {
     }
   });
 
-  it("accepts equal nested sampling parameters and deeply freezes the exact request model without resolving secrets", async () => {
-    const runtimeModel = structuredClone(model);
+  it("detaches and deeply freezes the exact request model without freezing provider or runtime models", async () => {
+    const providerModel = structuredClone(model);
+    const runtimeModel = structuredClone(providerModel);
     const runtime = targetRuntime({ configured: true, source: "stored" }, runtimeModel);
-    const snapshot = await new WorkerRuntimeFactory(sourceRegistry(), {}, async () => runtime)
-      .preflight("builtin-provider", "model-a");
+    const provider = nativeProvider({ getModels: () => [providerModel] });
+    const snapshot = await new WorkerRuntimeFactory(
+      sourceRegistry(undefined, providerModel, provider),
+      {},
+      async () => runtime,
+    ).preflight("builtin-provider", "model-a");
+
     assert.equal(snapshot.runtime, runtime);
-    assert.equal(snapshot.model, runtimeModel);
+    assert.notEqual(snapshot.model, runtimeModel);
+    assert.deepEqual(snapshot.model, runtimeModel);
+    assert.equal(Object.isFrozen(providerModel), false);
+    assert.equal(Object.isFrozen(providerModel.samplingParams), false);
+    assert.equal(Object.isFrozen(runtimeModel), false);
+    assert.equal(Object.isFrozen(runtimeModel.samplingParams), false);
     assert.equal(Object.isFrozen(snapshot.model), true);
     assert.equal(Object.isFrozen(snapshot.model.compat), true);
     assert.equal(Object.isFrozen(snapshot.model.samplingParams), true);
@@ -121,6 +132,37 @@ describe("worker model runtime", () => {
     assert.equal(Object.isFrozen(providerOptions), true);
     assert.equal(Object.isFrozen(providerOptions.modes), true);
     assert.equal(Object.isFrozen(providerOptions.modes[1]), true);
+
+    ((providerModel.samplingParams!.providerOptions as { modes: Array<{ nested?: boolean } | string> }).modes[1] as { nested: boolean }).nested = false;
+    (runtimeModel.samplingParams!.providerOptions as { modes: unknown[] }).modes.push("mutable");
+    assert.equal(((providerOptions.modes[1]) as { nested: boolean }).nested, true);
+    assert.equal(providerOptions.modes.length, 2);
+  });
+
+  it("detaches and freezes cyclic nested metadata beneath a shallow-frozen runtime root", async () => {
+    const samplingParams: Record<string, unknown> = { nested: { enabled: true } };
+    samplingParams.self = samplingParams;
+    const providerModel = structuredClone(model);
+    providerModel.samplingParams = samplingParams;
+    const runtimeModel = structuredClone(providerModel);
+    Object.freeze(runtimeModel);
+    assert.equal(Object.isFrozen(runtimeModel.samplingParams), false);
+
+    const snapshot = await new WorkerRuntimeFactory(
+      sourceRegistry(undefined, providerModel),
+      {},
+      async () => targetRuntime({ configured: true, source: "stored" }, runtimeModel),
+    ).preflight("builtin-provider", "model-a");
+
+    assert.notEqual(snapshot.model, runtimeModel);
+    const frozenSampling = snapshot.model.samplingParams as Record<string, any>;
+    assert.equal(frozenSampling.self, frozenSampling);
+    assert.equal(Object.isFrozen(frozenSampling), true);
+    assert.equal(Object.isFrozen(frozenSampling.nested), true);
+    assert.equal(Object.isFrozen(runtimeModel.samplingParams), false);
+    assert.equal(Object.isFrozen((runtimeModel.samplingParams as Record<string, any>).nested), false);
+    (runtimeModel.samplingParams as Record<string, any>).nested.enabled = false;
+    assert.equal(frozenSampling.nested.enabled, true);
   });
 
   it("rejects drift in every non-secret request-affecting model field", async () => {
@@ -208,22 +250,22 @@ describe("worker model runtime", () => {
     }
   });
 
-  it("awaits the public availability refresh after safe static provider registration", async () => {
+  it("requires a public post-registration availability check for a safe static provider", async () => {
     let registered = 0;
-    let readiness = 0;
+    let availabilityChecks = 0;
     const runtime = targetRuntime() as unknown as ModelRuntime & {
       registerProvider(): void;
       getAvailable(): Promise<readonly Model<any>[]>;
     };
     runtime.registerProvider = () => { registered += 1; };
-    runtime.getAvailable = async () => { readiness += 1; return [model]; };
+    runtime.getAvailable = async () => { availabilityChecks += 1; return [model]; };
     await new WorkerRuntimeFactory(sourceRegistry(undefined, model, "safe"), {}, async () => runtime)
       .create("builtin-provider", "model-a");
     assert.equal(registered, 1);
-    assert.equal(readiness, 1);
+    assert.equal(availabilityChecks, 1);
   });
 
-  it("requires a safe registered native provider's exact model in the joined available set", async () => {
+  it("requires a safe registered native provider's exact model in the public post-registration available set", async () => {
     let registered = 0;
     let lookedUp = 0;
     const runtime = targetRuntime() as ModelRuntime & {
@@ -240,7 +282,7 @@ describe("worker model runtime", () => {
       /exact model.*not in.*available/i,
     );
     assert.equal(registered, 1);
-    assert.equal(lookedUp, 0, "provisional registry lookup cannot replace public readiness evidence");
+    assert.equal(lookedUp, 0, "provisional registry lookup cannot replace the public availability check");
   });
 
   it("rejects unsupported source classes before a model request", async () => {

@@ -139,10 +139,12 @@ function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
   }) as RequestModelSnapshot;
 }
 
-function freezeRequestModel<T>(value: T): T {
-  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
-  for (const nested of Object.values(value as Record<string, unknown>)) freezeRequestModel(nested);
-  return Object.freeze(value);
+function freezeRequestModel<T>(value: T, seen = new WeakSet<object>()): T {
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value as Record<string, unknown>)) freezeRequestModel(nested, seen);
+  return Object.isFrozen(value) ? value : Object.freeze(value);
 }
 
 function modelKey(providerId: string, modelId: string): string {
@@ -152,8 +154,9 @@ function modelKey(providerId: string, modelId: string): string {
 /**
  * Prepares one exact isolated runtime/model request object. Self-contained
  * native/static configured providers are registered as the same public provider
- * object/config and their pending refresh is joined through getAvailable().
- * Dynamic OAuth/catalog/header policy remains fail-closed.
+ * object/config. The public post-registration availability/auth check uses
+ * getAvailable(providerId). Dynamic OAuth/catalog/header policy remains
+ * fail-closed.
  */
 export class WorkerRuntimeFactory {
   private readonly registeredProviders = new Map<string, RegisteredProvider>();
@@ -212,9 +215,9 @@ export class WorkerRuntimeFactory {
       runtime = await this.createRuntime(this.options);
       if (registered?.kind === "native") runtime.registerNativeProvider(registered.provider);
       else if (registered?.kind === "configured") runtime.registerProvider(providerId, registered.config);
-      // registerProvider/registerNativeProvider start an internal refresh without
-      // returning it. Public getAvailable() coalesces that exact pending refresh,
-      // so readiness is not declared from the provisional snapshot.
+      // Public getAvailable(providerId) is the post-registration availability/auth
+      // check. It is not a receipt for any exact internal refresh Promise, so
+      // readiness is established only from the public available-model result.
       if (registered) available = await runtime.getAvailable(providerId);
     } catch {
       throw new ProviderReadinessError(
@@ -228,7 +231,7 @@ export class WorkerRuntimeFactory {
       throw new ProviderReadinessError(
         providerId,
         "registered-model-not-available",
-        `Registered provider ${providerId}'s exact model ${providerId}/${modelId} was not in the joined available set. Correct provider authentication/catalog policy, then reload the extension.`,
+        `Registered provider ${providerId}'s exact model ${providerId}/${modelId} was not in the public post-registration available set. Correct provider authentication/catalog policy, then reload the extension.`,
       );
     }
 
@@ -263,8 +266,9 @@ export class WorkerRuntimeFactory {
     const workerStatus = runtime.getProviderAuthStatus(providerId);
     assertCredentialSourceEquivalent(providerId, parentStatus, workerStatus);
 
-    // This is the exact object passed to createAgentSession; no second runtime
-    // or model lookup occurs after mail admission.
-    return { runtime, model: freezeRequestModel(model) };
+    // Detach before freezing: runtime/provider-owned catalog objects remain mutable.
+    // This exact clone is passed to createAgentSession; no second model lookup occurs.
+    const detachedModel = structuredClone(model) as Model<Api>;
+    return { runtime, model: freezeRequestModel(detachedModel) };
   }
 }

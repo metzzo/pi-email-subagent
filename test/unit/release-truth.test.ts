@@ -14,6 +14,21 @@ describe("release contract truth", () => {
     assert.doesNotMatch(readme, /extension-originated slash messages cannot safely defer/i);
   });
 
+  it("keeps the unpublished initial release candidate entirely under Unreleased", async () => {
+    const readme = await text("README.md");
+    const changelog = await text("CHANGELOG.md");
+    assert.match(readme, /unpublished `0\.1\.0` release candidate/i);
+    assert.match(changelog, /## \[Unreleased\][\s\S]*Initial `0\.1\.0` release candidate \(unpublished\)/i);
+    assert.doesNotMatch(changelog, /^## \[0\.1\.0\](?:\s|$)/im);
+    assert.doesNotMatch(changelog, /compare\/v0\.1\.0|releases\/tag\/v0\.1\.0|initial release uses tag `v0\.1\.0`/i);
+  });
+
+  it("describes registered-provider readiness as a public availability check, not a refresh receipt", async () => {
+    const runtimeSource = await text("src/model-runtime.ts");
+    assert.match(runtimeSource, /public post-registration availability\/auth check/i);
+    assert.doesNotMatch(runtimeSource, /coalesces that exact pending refresh|pending refresh is joined|joined available set/i);
+  });
+
   it("states disabled nested delegation and exact-dead-owner automatic reclaim without obsolete release claims", async () => {
     const changelog = await text("CHANGELOG.md");
     const unreleased = changelog.split("## [0.1.0]", 1)[0]!;
