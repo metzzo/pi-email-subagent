@@ -135,6 +135,8 @@ describe("mail prompts", () => {
     assert.match(prompt, /Never downgrade implementation/i);
     assert.match(prompt, /Use one primary agent by default/i);
     assert.match(prompt, /Reuse a relevant existing agent/i);
+    assert.match(prompt, /reuse.*only.*same feature.*worktree.*review-repair cycle/is);
+    assert.match(prompt, /do not reuse.*unrelated later phases or features/i);
     assert.match(prompt, /Select a role or exact address whose configured tools can perform the task/i);
     assert.match(prompt, /Default unknown role names receive read\/search\/mail tools/i);
     assert.match(prompt, /configured role and exact-address overlays can replace those defaults/i);
@@ -163,7 +165,7 @@ describe("mail prompts", () => {
     assert.match(prompt, /late reply remains in durable mail.*may not have durably appended.*visible presentation/is);
     assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
     assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
-    assert.match(prompt, /collection provides at most one live presentation.*Pi 0\.81\.1.*no staged tool-result append receipt/is);
+    assert.match(prompt, /collection provides at most one live presentation.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
     assert.match(prompt, /not a crash-proof exactly-once presentation guarantee/i);
     assert.match(prompt, /continue useful work or end the turn/i);
     assert.match(prompt, /identity-capacity recovery.*reuse.*relevant existing identity/is);
@@ -257,7 +259,7 @@ describe("mail prompts", () => {
       activity: [],
     };
     const prompt = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
-    assert.match(prompt, /nested delegation.*disabled.*Pi 0\.81\.1.*durable child-reply presentation receipt/i);
+    assert.match(prompt, /nested delegation.*disabled.*Pi 0\.84\.2.*durable child-reply presentation receipt/i);
     assert.doesNotMatch(prompt, /permitted to delegate response-required requests to other subagents/);
     const restricted = subagentPrompt({ ...record, canSpawn: false }, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
     assert.match(restricted, /not permitted to send response-required requests to any other subagent/i);

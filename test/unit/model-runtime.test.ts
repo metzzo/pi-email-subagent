@@ -21,6 +21,7 @@ const model = {
   cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
   contextWindow: 128_000,
   maxTokens: 32_000,
+  samplingParams: { temperature: 0.25, providerOptions: { modes: ["fast", { nested: true }] } },
   compat: { supportsLongCacheRetention: false, supportsToolSearch: true },
 } as Model<any>;
 
@@ -106,7 +107,7 @@ describe("worker model runtime", () => {
     }
   });
 
-  it("prepares one exact frozen request model without resolving or comparing secret material", async () => {
+  it("accepts equal nested sampling parameters and deeply freezes the exact request model without resolving secrets", async () => {
     const runtimeModel = structuredClone(model);
     const runtime = targetRuntime({ configured: true, source: "stored" }, runtimeModel);
     const snapshot = await new WorkerRuntimeFactory(sourceRegistry(), {}, async () => runtime)
@@ -115,6 +116,11 @@ describe("worker model runtime", () => {
     assert.equal(snapshot.model, runtimeModel);
     assert.equal(Object.isFrozen(snapshot.model), true);
     assert.equal(Object.isFrozen(snapshot.model.compat), true);
+    assert.equal(Object.isFrozen(snapshot.model.samplingParams), true);
+    const providerOptions = snapshot.model.samplingParams?.providerOptions as { modes: unknown[] };
+    assert.equal(Object.isFrozen(providerOptions), true);
+    assert.equal(Object.isFrozen(providerOptions.modes), true);
+    assert.equal(Object.isFrozen(providerOptions.modes[1]), true);
   });
 
   it("rejects drift in every non-secret request-affecting model field", async () => {
@@ -126,6 +132,7 @@ describe("worker model runtime", () => {
       ["cost", (value) => { value.cost.input = 9; }],
       ["context", (value) => { value.contextWindow = 64_000; }],
       ["max tokens", (value) => { value.maxTokens = 8_000; }],
+      ["nested sampling params", (value) => { value.samplingParams.providerOptions.modes[1].nested = false; }],
       ["compat", (value) => { value.compat.supportsToolSearch = false; }],
       ["api", (value) => { value.api = "openai-completions"; }],
     ];
@@ -135,7 +142,9 @@ describe("worker model runtime", () => {
       await assert.rejects(
         new WorkerRuntimeFactory(sourceRegistry(), {}, async () => targetRuntime(undefined, changed))
           .create("builtin-provider", "model-a"),
-        /request metadata differs.*reload/i,
+        label === "nested sampling params"
+          ? /request metadata differs.*sampling parameters.*reload/i
+          : /request metadata differs.*reload/i,
         label,
       );
     }

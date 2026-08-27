@@ -15,7 +15,7 @@ No cleanup-recovery action or evidence/generation fields exist.
 
 ### `stop`
 
-Detaches routing immediately and joins the exact worker-generation cleanup lease. Cleanup waits for factory/start settlement, the real Pi 0.81.1 `AgentSession.abort()` idle boundary when streaming, active tool promises/listeners, and disposal. State becomes `stopped` only after those Pi session/tool facts settle successfully. The record, session file, mailbox, and activation lease are retained, so stop does not free `maxAgents` capacity.
+Detaches routing immediately and joins the exact worker-generation cleanup lease. Cleanup waits for factory/start settlement, the real Pi 0.84.2 `AgentSession.abort()` idle boundary when streaming, active tool promises/listeners, and disposal. State becomes `stopped` only after those Pi session/tool facts settle successfully. The record, session file, mailbox, and activation lease are retained, so stop does not free `maxAgents` capacity.
 
 A caller timeout does not cancel cleanup. It leaves only that exact address failed/quarantined while the operation remains observed; queued mail stays durable and a late success releases the hold. Unrelated agents remain schedulable. A completed ordinary Bash command does not poison the generation.
 
@@ -52,7 +52,7 @@ Identity lease remains held; stop alone does not free maxAgents identity capacit
 
 ## Safe identity-capacity recovery
 
-1. Reuse a relevant existing identity where appropriate.
+1. Reuse a relevant existing identity only for continuing work in the same feature, worktree, or review-repair cycle, never for unrelated later phases or features.
 2. Restart stopped/failed assigned work instead of abandoning it.
 3. Stop only to make active work inactive; its identity lease remains held.
 4. Cancel only an exact request the user explicitly abandoned, after its recipient is inactive.

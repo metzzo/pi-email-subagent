@@ -46,6 +46,8 @@ try {
     PI_CODING_AGENT_DIR: agentDir,
     PATH: `${join(root, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
   };
+  const hostVersion = run(pi, ["--version"], { cwd: consumer, env }).stdout.trim();
+  assert.equal(hostVersion, SUPPORTED_PI_VERSION, "packed smoke must use the exact tested Pi host version");
   const installedPackage = join(consumer, "node_modules", "pi-email-subagent");
   run(pi, ["install", installedPackage], { cwd: consumer, env });
   const rpc = run(pi, ["--mode", "rpc", "--no-session"], {

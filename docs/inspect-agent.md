@@ -53,7 +53,7 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `holdsActivationLease` | Whether this exact address currently consumes identity capacity |
 | `modelId`, `provider`, `effort`, `role`, `tools`, `instructions` | Effective profile (record if live, resolved config otherwise) |
 | `writable` | Effective tools include a known mutation tool or any unknown/custom tool (fail-closed) |
-| `canSpawn` | Always `false` on Pi 0.81.1; nested response-required delegation lacks a durable child-reply presentation receipt |
+| `canSpawn` | Always `false` on Pi 0.84.2; nested response-required delegation lacks a durable child-reply presentation receipt |
 | `state` | `new` for prospective addresses, otherwise the lifecycle state |
 | `currentActivity` | Latest activity summary, when present |
 | `queued` / `unanswered` / `outgoingUnanswered` / `pendingReplies` | Queued inbound, incoming open requests, requests sent by this identity that remain open, and replies reserved but not yet delivered |
@@ -71,7 +71,7 @@ Failures throw `Could not inspect agent: <reason>`, so Pi records `isError: true
 
 - Call before delegating when recipient capability is uncertain — in particular before authorizing repository changes, to confirm the address is actually writable. The main prompt's 8 KiB / 64-line capability block is only a bounded configured-intent display and may omit complete entries; this tool returns the exact bounded live/prospective profile.
 - Also useful before spawning to distinguish identity lease use from run concurrency, check whether this address already holds a lease, and inspect exact bounded blockers.
-- Follow the rendered recovery hint. Reuse a relevant leased identity first; restart real stopped/failed work; stop only to become inactive; cancel only a user-abandoned exact request after final validation; archive only when clean; then retry.
+- Follow the rendered recovery hint. Reuse a relevant leased identity first only for continuing work in the same feature, worktree, or review-repair cycle, never for unrelated later phases or features; restart real stopped/failed work; stop only to become inactive; cancel only a user-abandoned exact request after final validation; archive only when clean; then retry.
 - When `cleanup` is present, only that exact address is blocked while its live factory/start/AgentSession/tool/disposal operation remains unsettled. A caller deadline does not cancel the operation; late success releases it. Unrelated agents remain schedulable. The field claims no OS descendant containment.
 - Live retry activity is Pi-managed and non-terminal; wait for settlement rather than restarting. After terminal failure, inspect Work and Conversation, correct configuration/provider availability as needed, and explicitly restart the same identity only when possible effects have been accounted for. Never resend the accepted envelope merely because a provider attempt failed.
 

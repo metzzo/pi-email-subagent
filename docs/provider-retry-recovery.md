@@ -4,7 +4,7 @@ Pi core owns provider retry classification, attempt limits, backoff, and continu
 
 ## What the extension shows
 
-For Pi 0.81.1 retry events, the existing bounded Activity path records:
+For Pi 0.84.2 retry events, the existing bounded Activity path records:
 
 ```text
 Pi agent retry 1/3 scheduled in 2000ms: WebSocket error
@@ -19,7 +19,7 @@ Pi agent retry ended after attempt 3: WebSocket error
 
 Retry activity uses the existing `ActivityItem` type and 40-item record limit plus the shared safe-summary boundary. It is cycle status, not a mail outcome. A retrying `agent_end.willRetry=true` does not fail the worker or alert main. Only the final non-retrying assistant error enters `record.failure` and generates one main alert.
 
-Pi 0.81.1's observed order is:
+Pi 0.84.2's observed order is:
 
 - retryable attempt: assistant error → `agent_end(willRetry=true)` → `auto_retry_start`;
 - recovered attempt: successful assistant message → `auto_retry_end(success=true)` → final `agent_end(willRetry=false)` → `agent_settled`;
@@ -48,7 +48,7 @@ The extension does not raise Pi defaults. Provider/SDK retries remain at Pi's de
 
 ## Provider option ownership
 
-Long cache retention is selected by provider environment such as `PI_CACHE_RETENTION`, separately from worker settings. Pi 0.81.1 serializes `prompt_cache_retention: "24h"` only when exact effective compatibility metadata allows it, and omits it when `compat.supportsLongCacheRetention` is false. The worker factory rejects drift in every non-secret request model field and passes the same prepared runtime/model object from pre-email admission into execution. Header-bearing and dynamic OAuth/catalog provider routes fail closed. Native public providers with provider-wide headers, OAuth, refresh hooks, or filter hooks are rejected before worker runtime creation/registration. Demonstrably static registrations reuse the same public object/config, join Pi's pending readiness refresh through public `getAvailable()`, and require the exact provider/model in the joined available set. An endpoint that rejects the option needs corrected provider/model metadata and extension reload; the extension never catches the rejection, strips the option, and automatically retries or replays the prompt.
+Long cache retention is selected by provider environment such as `PI_CACHE_RETENTION`, separately from worker settings. Pi 0.84.2 serializes `prompt_cache_retention: "24h"` only when exact effective compatibility metadata allows it, and omits it when `compat.supportsLongCacheRetention` is false. The worker factory rejects drift in every non-secret request model field, including nested sampling parameters, and passes the same prepared runtime/model object from pre-email admission into execution. Header-bearing and dynamic OAuth/catalog provider routes fail closed. Native public providers with provider-wide headers, OAuth, refresh hooks, or filter hooks are rejected before worker runtime creation/registration. Demonstrably static registrations reuse the same public object/config, join Pi's pending readiness refresh through public `getAvailable()`, and require the exact provider/model in the joined available set. An endpoint that rejects the option needs corrected provider/model metadata and extension reload; the extension never catches the rejection, strips the option, and automatically retries or replays the prompt.
 
 ## Safe shared errors and protected native detail
 

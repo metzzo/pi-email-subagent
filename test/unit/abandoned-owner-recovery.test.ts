@@ -59,7 +59,7 @@ it("migrates the exact old completed-Bash generation 9 shape to failed without c
     mutationCapableAtStart: true,
     heldRunSlot: false,
     activeTools: [],
-    detail: "Pi 0.81.1 process receipt unavailable",
+    detail: "Pi 0.84.2 process receipt unavailable",
   };
   const migrated = transitionAbandonedOwnerRecovery(prior, "2026-08-25T02:00:00.000Z");
   assert.equal(migrated.record.state, "failed");

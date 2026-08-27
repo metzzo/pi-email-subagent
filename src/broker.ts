@@ -60,6 +60,7 @@ import type {
 import { byteLength, clone, nowIso, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 
+export const MAX_REPLY_WAIT_MS = 3_600_000;
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
 
 /** Conservative byte budget: reserve declared output and 75% of remaining context for system/history/token-estimation error. */
@@ -887,8 +888,8 @@ export class AgentBroker {
   private capacityFullDiagnostic(mainCaller = true): string {
     const capacity = this.capacitySnapshot();
     const recovery = mainCaller
-      ? "Reuse a relevant existing address, or use inspect_agent or /agents to restart real work, resolve exact obligations, archive one clean identity, then retry."
-      : "Reuse a relevant existing address you already know, or ask main to resolve real obligations and archive one clean identity before retrying; only main can manage agents or cancel requests.";
+      ? "Reuse a relevant existing address only for the same continuing feature, worktree, or review-repair cycle; otherwise use inspect_agent or /agents to restart real work, resolve exact obligations, archive one clean identity, then retry."
+      : "Reuse a relevant existing address you already know only for that same continuing cycle, or ask main to resolve real obligations and archive one clean identity before retrying; only main can manage agents or cancel requests.";
     return `Agent limit reached: identity capacity is full (${capacity.identitiesUsed}/${capacity.identitiesLimit} activation leases). Run concurrency is separate (${capacity.runSlotsUsed}/${capacity.runSlotsLimit} slots currently used); waiting for a run slot or stopping an agent does not free an identity lease. ${recovery}`;
   }
 
@@ -2904,8 +2905,8 @@ export class AgentBroker {
     const requestIds = [...new Set(requestIdsInput)];
     if (requestIds.length === 0) throw new Error("At least one request ID is required.");
     if (requestIds.length > 32) throw new Error("At most 32 request IDs can be joined at once.");
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 300_000) {
-      throw new Error("Reply wait timeout must be from 0 to 300000 milliseconds.");
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > MAX_REPLY_WAIT_MS) {
+      throw new Error(`Reply wait timeout must be from 0 to ${MAX_REPLY_WAIT_MS} milliseconds.`);
     }
     for (const id of requestIds) {
       const request = this.mailStore.get(id);

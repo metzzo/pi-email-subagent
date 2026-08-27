@@ -506,7 +506,7 @@ export class SdkWorker implements WorkerTransport {
                 const vetoInvalidAdmission = (): void => {
                   if (!this.disposed && this.session === session) return;
                   preflightResult(false);
-                  // Pi 0.81.1 invokes this callback synchronously immediately
+                  // Pi 0.84.2 invokes this callback synchronously immediately
                   // before _runAgentPrompt. Throwing is the admission veto that
                   // prevents a late old-generation model run from starting.
                   throw new Error("Worker prompt was cancelled by cleanup before Pi preflight admission.");

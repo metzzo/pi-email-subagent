@@ -39,7 +39,7 @@ class PinnedPreflightSession {
   async prompt(_message: string, options: { preflightResult(success: boolean): void }): Promise<void> {
     const promptNumber = this.promptCount++;
     if (this.oldGeneration && promptNumber === 0) {
-      // A pinned-accurate Pi 0.81.1 handled-input preflight: accepted without
+      // A pinned-accurate Pi 0.84.2 handled-input preflight: accepted without
       // entering _runAgentPrompt. This creates the worker without a provider run.
       options.preflightResult(true);
       return;
@@ -48,7 +48,7 @@ class PinnedPreflightSession {
       this.entered.resolve();
       await this.release.promise;
     }
-    // Pi 0.81.1 calls preflightResult(true) synchronously immediately before
+    // Pi 0.84.2 calls preflightResult(true) synchronously immediately before
     // _runAgentPrompt. If the callback throws, the following old run is vetoed.
     options.preflightResult(true);
     this.isIdle = false;

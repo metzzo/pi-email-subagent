@@ -35,7 +35,7 @@ export class ProviderReadinessError extends Error {
 }
 
 /**
- * Enforce only the credential-source equivalence Pi 0.81.1 can prove without
+ * Enforce only the credential-source equivalence Pi 0.84.2 can prove without
  * resolving, comparing, copying, or logging credential material.
  */
 export function assertCredentialSourceEquivalent(
@@ -85,7 +85,7 @@ function headerProvenanceError(providerId: string, modelId: string): ProviderRea
   return new ProviderReadinessError(
     providerId,
     "model-header-provenance-unavailable",
-    `Model ${providerId}/${modelId} uses request headers whose non-secret provenance cannot be proven by Pi 0.81.1. Remove those headers or use the main session; no email was accepted.`,
+    `Model ${providerId}/${modelId} uses request headers whose non-secret provenance cannot be proven by Pi 0.84.2. Remove those headers or use the main session; no email was accepted.`,
   );
 }
 
@@ -93,7 +93,7 @@ function nativeProviderPolicyUnavailable(providerId: string): ProviderReadinessE
   return new ProviderReadinessError(
     providerId,
     "native-provider-policy-unavailable",
-    `Native provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.81.1 worker; no email was accepted.`,
+    `Native provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.84.2 worker; no email was accepted.`,
   );
 }
 
@@ -119,6 +119,7 @@ function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
     cost,
     contextWindow,
     maxTokens,
+    samplingParams,
     compat,
   } = model;
   return structuredClone({
@@ -133,6 +134,7 @@ function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
     cost,
     contextWindow,
     maxTokens,
+    ...(samplingParams !== undefined ? { samplingParams } : {}),
     ...(compat !== undefined ? { compat } : {}),
   }) as RequestModelSnapshot;
 }
@@ -199,7 +201,7 @@ export class WorkerRuntimeFactory {
         throw new ProviderReadinessError(
           providerId,
           "registered-provider-policy-unavailable",
-          `Provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.81.1 worker; no email was accepted.`,
+          `Provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.84.2 worker; no email was accepted.`,
         );
       }
     }
@@ -253,7 +255,7 @@ export class WorkerRuntimeFactory {
       throw new ProviderReadinessError(
         providerId,
         "model-request-metadata-mismatch",
-        `Model ${providerId}/${modelId} request metadata differs from the extension-start snapshot. API, endpoint, reasoning/thinking, input, cost, context/output limits, or compatibility policy changed; reload the extension.`,
+        `Model ${providerId}/${modelId} request metadata differs from the extension-start snapshot. API, endpoint, reasoning/thinking, input, cost, context/output limits, sampling parameters, or compatibility policy changed; reload the extension.`,
       );
     }
 

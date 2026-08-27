@@ -43,6 +43,7 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   const wait = tools[1];
   assert.equal(wait.executionMode, "sequential");
   assert.match(wait.description, /bounded (observation|collection) window/i);
+  assert.match(wait.description, /up to 3600 seconds.*returns early/i);
   assert.match(wait.description, /late replies remain durable.*ordinary main presentation is attempted.*without a durable append receipt/i);
   assert.match(wait.description, /at-most-one live presentation.*not crash-proof exactly once.*no staged tool-result append receipt/i);
   const waitGuidelines = wait.promptGuidelines ?? [];
@@ -59,7 +60,7 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   assert.equal(waitParameters.properties.request_ids.maxItems, 32);
   assert.equal(waitParameters.properties.timeout_seconds.default, 120);
   assert.equal(waitParameters.properties.timeout_seconds.minimum, 0);
-  assert.equal(waitParameters.properties.timeout_seconds.maximum, 300);
+  assert.equal(waitParameters.properties.timeout_seconds.maximum, 3_600);
   assert.equal(waitParameters.properties.collect.default, true);
 
   await assert.rejects(
@@ -380,7 +381,7 @@ it("guides timed-out pending waits without changing exact structured results", a
   const rendered = await renderWait(pending);
   const text = (rendered.content[0] as { text: string }).text;
   assert.match(text, /Replies: timed out with pending work/);
-  assert.match(text, /at most one live presentation.*Pi 0\.81\.1.*no staged tool-result append receipt/is);
+  assert.match(text, /at most one live presentation.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
   assert.match(text, /mail journal answered.*before.*tool result.*durably present/is);
   assert.match(text, /pending requests remain correlated/i);
   assert.match(text, /ordinary main presentation is attempted.*no durable sendMessage append acknowledgement/i);

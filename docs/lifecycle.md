@@ -15,9 +15,9 @@ Pi-managed retry/backoff remains within the accepted run and never resets its ab
 
 ## Cleanup contract
 
-pi-subagent controls a trusted Pi 0.81.1 `AgentSession` and its currently active model/tool work. It is not an OS sandbox.
+pi-subagent controls a trusted Pi 0.84.2 `AgentSession` and its currently active model/tool work. It is not an OS sandbox.
 
-One exact worker-generation cleanup lease owns factory/start settlement, every already-started `AgentSession.prompt` preflight, `AgentSession.abort()`, active tool promises/listeners, and disposal. Routing detaches immediately. Cleanup invalidates prompt admission first, joins each preflight, and rejects late acceptance at Pi 0.81.1's synchronous `preflightResult(true)` boundary before `_runAgentPrompt` can start. If the session is streaming, cleanup waits for the real `abort()` result and Pi's idle boundary; it does not dispose at the abort caller deadline. Active tool IDs/names remain pending diagnostics until that boundary. Cleanup releases only when:
+One exact worker-generation cleanup lease owns factory/start settlement, every already-started `AgentSession.prompt` preflight, `AgentSession.abort()`, active tool promises/listeners, and disposal. Routing detaches immediately. Cleanup invalidates prompt admission first, joins each preflight, and rejects late acceptance at Pi 0.84.2's synchronous `preflightResult(true)` boundary before `_runAgentPrompt` can start. If the session is streaming, cleanup waits for the real `abort()` result and Pi's idle boundary; it does not dispose at the abort caller deadline. Active tool IDs/names remain pending diagnostics until that boundary. Cleanup releases only when:
 
 1. the exact factory/start operation settled;
 2. every started prompt preflight settled or was vetoed;
