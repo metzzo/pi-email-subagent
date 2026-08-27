@@ -209,6 +209,11 @@ export class NamespaceLock {
           `Subagent namespace owner identity is incomplete or mismatched and recovery fails closed: ${namespaceDir}.`,
         );
       }
+      if (process.platform !== "linux") {
+        throw new Error(
+          `Subagent namespace has complete owner metadata, but exact dead-owner recovery requires Linux boot-ID/PID/process-start verification and fails closed on non-Linux hosts: ${namespaceDir}.`,
+        );
+      }
       const live = await exactOwnerStillLive(priorOwner as NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>);
       if (live) {
         throw new Error(

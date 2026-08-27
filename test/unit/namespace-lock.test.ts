@@ -143,6 +143,37 @@ it("blocks an incomplete owner whose PID exists without claiming exact-owner ide
   assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino);
 });
 
+it("rejects complete Linux owner metadata on simulated non-Linux before liveness or lock mutation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-non-linux-complete-owner-"));
+  const namespace = join(root, "state");
+  await mkdir(namespace, { recursive: true });
+  const ownerPath = join(namespace, ".broker-owner.json");
+  const bytes = `${JSON.stringify({
+    pid: 999_999_999,
+    token: "complete-linux-owner",
+    acquiredAt: "2026-09-01T00:00:00.000Z",
+    namespaceDir: namespace,
+    bootId: "00000000-0000-0000-0000-000000000001",
+    processStartTime: "1",
+  }, null, 2)}\n`;
+  await writeFile(ownerPath, bytes);
+  await mkdir(`${namespace}.lock`);
+  const lockBefore = await stat(`${namespace}.lock`);
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  assert.ok(platformDescriptor?.configurable, "process.platform must support this bounded test override");
+  let acquisitionError: unknown;
+  try {
+    Object.defineProperty(process, "platform", { ...platformDescriptor, value: "darwin" });
+    acquisitionError = await NamespaceLock.acquire(namespace, () => undefined).catch((error: unknown) => error);
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
+  }
+
+  assert.equal(await readFile(ownerPath, "utf8"), bytes);
+  assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino);
+  assert.match(String(acquisitionError), /complete owner.*exact dead-owner recovery requires Linux.*fails closed on non-Linux/i);
+});
+
 it("rejects truthy malformed exact-owner identity fields without changing the owner or lock", {
   skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
 }, async () => {
