@@ -3,7 +3,7 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import * as TypeBox from "typebox";
 
-export const SUPPORTED_PI_VERSION = "0.81.1";
+export const SUPPORTED_PI_VERSION = "0.84.2";
 
 export interface CollectedReplyPresentationCapability {
   supported: false;
@@ -19,7 +19,7 @@ export interface UnavailablePiCoreCapability {
 }
 
 /**
- * Pi 0.81.1 has no released staged tool-result append receipt. Keep collection
+ * Pi 0.84.2 has no released staged tool-result append receipt. Keep collection
  * policy fail-closed instead of inferring presentation from execute() return,
  * tool lifecycle events, stdout, sendMessage(), or appendEntry().
  */
@@ -35,7 +35,7 @@ export function collectedReplyPresentationCapability(): CollectedReplyPresentati
 export function sessionPresentationReceiptCapability(): UnavailablePiCoreCapability {
   return {
     supported: false,
-    detailCode: "PI_0_81_1_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE",
+    detailCode: "PI_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE",
     reason: `Pi ${SUPPORTED_PI_VERSION} sendMessage, prompt preflight, steer, and followUp do not acknowledge a durable native-session append.`,
     requiredCoreContract: "A stable envelope/session-entry receipt with a post-append commit acknowledgement recoverable by envelope ID after every crash kill point.",
   };
@@ -49,7 +49,7 @@ export function sessionPresentationReceiptCapability(): UnavailablePiCoreCapabil
 export function directMutationAliasSerializationCapability(): UnavailablePiCoreCapability {
   return {
     supported: false,
-    detailCode: "PI_0_81_1_MUTATION_ALIAS_IDENTITY_UNAVAILABLE",
+    detailCode: "PI_MUTATION_ALIAS_IDENTITY_UNAVAILABLE",
     reason: `Pi ${SUPPORTED_PI_VERSION} cannot assign one authoritative queue key to every missing target alias or existing hard-link alias.`,
     requiredCoreContract: "A supported alias identity covering missing-target symlink ancestors, existing hard-link aliases, replacement/rename windows, and concurrent create windows.",
   };
@@ -182,6 +182,16 @@ export function assertPiRuntimeFeatures(
   tui: Record<string, unknown>,
   typebox: Record<string, unknown>,
 ): void {
+  const actualVersion = member(codingAgent, ["VERSION"]);
+  if (actualVersion !== SUPPORTED_PI_VERSION) {
+    const actual = typeof actualVersion === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(actualVersion)
+      ? actualVersion
+      : "missing or invalid";
+    throw new Error(
+      `pi-email-subagent requires an exact tested Pi version; actual ${actual}; supported ${SUPPORTED_PI_VERSION}. `
+      + `Install Pi ${SUPPORTED_PI_VERSION} or use an extension release explicitly tested for your Pi version. Structural similarity does not certify behavioral compatibility.`,
+    );
+  }
   const missing = [
     ...CODING_AGENT_FEATURES.filter((feature) => !feature.present(codingAgent)).map((feature) => `@earendil-works/pi-coding-agent.${feature.path}`),
     ...AI_FEATURES.filter((feature) => !feature.present(ai)).map((feature) => `@earendil-works/pi-ai.${feature.path}`),

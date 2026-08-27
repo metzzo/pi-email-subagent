@@ -65,7 +65,7 @@ export class WorkerSettingsSnapshot {
       return copy as T;
     };
     // DefaultResourceLoader.reload always invokes PackageManager.resolve in Pi
-    // 0.81.1. Remove every package/resource source from the immutable worker
+    // 0.84.2. Remove every package/resource source from the immutable worker
     // storage before its first reload; no trusted-project write API is needed.
     const storage = new SnapshotSettingsStorage(
       stripResourceSources(this.globalSettings),

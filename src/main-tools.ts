@@ -2,7 +2,7 @@ import * as PiAi from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
 import * as TypeBox from "typebox";
-import type { AgentBroker } from "./broker.ts";
+import { MAX_REPLY_WAIT_MS, type AgentBroker } from "./broker.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { textResult } from "./tool-result.ts";
 import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
@@ -12,8 +12,8 @@ import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 const errorMessage = safeErrorSummary;
 const { Type } = TypeBox;
 const { Text } = PiTui;
-const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. Ordinary main presentation is attempted when replies arrive, but Pi 0.81.1 exposes no durable sendMessage append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
-const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live presentation. Pi 0.81.1 exposes no staged tool-result append receipt, so a process crash can leave the mail journal answered before this exact tool result is durably present in the main session. Recover by inspecting Conversation/mail and rejoining the stable request ID; this is not a crash-proof exactly-once guarantee.";
+const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. Ordinary main presentation is attempted when replies arrive, but Pi 0.84.2 exposes no durable sendMessage append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
+const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live presentation. Pi 0.84.2 exposes no staged tool-result append receipt, so a process crash can leave the mail journal answered before this exact tool result is durably present in the main session. Recover by inspecting Conversation/mail and rejoining the stable request ID; this is not a crash-proof exactly-once guarantee.";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
@@ -57,16 +57,16 @@ function inspectionRecovery(inspection: AgentInspection): string {
     + inspection.archiveBlockers.outgoingUnanswered.count
     + inspection.archiveBlockers.pendingReplies.count;
   if (inspection.cleanup) return "Pi session/tool cleanup settlement is unknown for this exact address. Wait for its live cleanup operation to settle; restart/archive remain blocked only for this identity and queued mail is preserved.";
-  if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity or ask main to resolve real obligations and archive a clean identity before retrying.";
-  if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity or archive another clean identity first.";
+  if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity only for the same feature, worktree, or review-repair cycle; otherwise ask main to resolve real obligations and archive a clean identity before retrying.";
+  if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity only for the same continuing cycle, or archive another clean identity first.";
   if (inspection.state === "paused" && !inspection.holdsActivationLease) return "This overflow identity needs free identity capacity before restart; retain or resolve its obligations through main.";
   if ((inspection.state === "stopped" || inspection.state === "failed") && blockers > 0) {
     return "Restart this inactive identity to finish real obligations. Cancel only an explicitly abandoned exact request after final validation; archive only after blockers are clear.";
   }
   if (inspection.archiveEligible && inspection.holdsActivationLease) {
-    return "Reuse this identity if relevant, or archive this clean identity when it is no longer needed; stop alone does not free its lease.";
+    return "Reuse this identity only for the same continuing feature, worktree, or review-repair cycle, or archive it when no longer needed; do not reuse it for unrelated later work. Stop alone does not free its lease.";
   }
-  if (inspection.holdsActivationLease) return "Reuse this relevant identity and finish real obligations; stop only to become inactive and never to free its lease.";
+  if (inspection.holdsActivationLease) return "Reuse this identity only to finish its continuing cycle and real obligations; never reuse it for unrelated later work. Stop only to become inactive and never to free its lease.";
   return "Ask main to resolve obligations and obtain identity capacity before retrying.";
 }
 
@@ -163,7 +163,7 @@ export function createMainCoordinationTools(
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
-      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. Returns completed and pending results together. Collection suppresses a separate live turn and is at-most-one live presentation, not crash-proof exactly once: Pi 0.81.1 has no staged tool-result append receipt. After a pending timeout, late replies remain durable and ordinary main presentation is attempted without a durable append receipt.",
+      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. A single wait may last up to 3600 seconds and returns early when all requests become terminal. Returns completed and pending results together. Collection suppresses a separate live turn and is at-most-one live presentation, not crash-proof exactly once: Pi 0.84.2 has no staged tool-result append receipt. After a pending timeout, late replies remain durable and ordinary main presentation is attempted without a durable append receipt.",
     promptSnippet: "Open a bounded observation window for replies to delegated email request IDs.",
     promptGuidelines: [
       "Use request IDs returned by send_email; never invent IDs.",
@@ -173,7 +173,7 @@ export function createMainCoordinationTools(
     executionMode: "sequential" as const,
     parameters: Type.Object({
       request_ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
-      timeout_seconds: Type.Optional(Type.Integer({ minimum: 0, maximum: 300, default: 120 })),
+      timeout_seconds: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_REPLY_WAIT_MS / 1_000, default: 120 })),
       collect: Type.Optional(Type.Boolean({ default: true })),
     }, { additionalProperties: false }),
     async execute(_id, params, signal) {

@@ -740,7 +740,11 @@ describe("broker hardening", () => {
       assert.equal(request.recipientRole, "worker");
       assert.equal(request.recipientTools?.includes("write"), true);
 
-      const waiting = broker.waitForReplies([request.envelope.id], 2_000, true);
+      await assert.rejects(
+        broker.waitForReplies([request.envelope.id], 3_600_001, true),
+        /0 to 3600000 milliseconds/,
+      );
+      const waiting = broker.waitForReplies([request.envelope.id], 3_600_000, true);
       const secondWaiter = broker.waitForReplies([request.envelope.id], 2_000, true);
       await workers[0]!.send({
         to: broker.mainAddress,

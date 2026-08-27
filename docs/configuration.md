@@ -59,7 +59,7 @@ Every identity receives finite deadlines. Global defaults (milliseconds) are:
 
 All values are integer milliseconds from 1 through `2147483647` (Node's runtime-safe `setTimeout` maximum); zero, negative/fractional values, larger delays, `null`, infinity, and omitted mandatory defaults never mean unbounded. Oversized configured values are ignored with an actionable startup warning rather than overflowing into an almost-immediate timer. During a run, `idleTimeoutMs` is armed only when no known tool call is active; the final parallel tool end starts a fresh idle interval. Active tools never extend the absolute `runTimeoutMs`. Use Bash's per-call `timeout` when a shell command needs a smaller bound.
 
-`abortTimeoutMs` and `disposeTimeoutMs` bound caller responsiveness, not the lifetime of the underlying cleanup Promise. Routing detaches, but replacement of that exact address waits for factory/start settlement, Pi 0.81.1 `AgentSession.abort()`/idle, active tool promises/listeners, and disposal. A timeout keeps only that exact identity failed/quarantined while late success remains observed and can release it; unrelated agents remain schedulable. These defaults are Pi session/tool deadlines, not OS-process containment guarantees, and increasing them does not create cancellation. See [lifecycle.md](lifecycle.md).
+`abortTimeoutMs` and `disposeTimeoutMs` bound caller responsiveness, not the lifetime of the underlying cleanup Promise. Routing detaches, but replacement of that exact address waits for factory/start settlement, Pi 0.84.2 `AgentSession.abort()`/idle, active tool promises/listeners, and disposal. A timeout keeps only that exact identity failed/quarantined while late success remains observed and can release it; unrelated agents remain schedulable. These defaults are Pi session/tool deadlines, not OS-process containment guarantees, and increasing them does not create cancellation. See [lifecycle.md](lifecycle.md).
 
 For the six worker fields, `lifecycleMaxima` is the administrative ceiling for initial delegation overrides and resolution is field-by-field: initial request → exact address → role → global `lifecycle`. Role and address objects accept those six worker lifecycle fields. `brokerShutdownTimeoutMs` and its maximum are global administrator-only configuration; broker shutdown is never delegated or resolved per worker. See [lifecycle.md](lifecycle.md).
 
@@ -86,7 +86,7 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
 - Resolution order per configured profile field: exact address → role → defaults. An initial `send_email.effort` overrides those three levels only while creating an unknown identity; the resulting effort is persisted. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
-- `canSpawn` is parsed only for configuration compatibility. Nested response-required delegation is fail-closed disabled for every subagent on Pi 0.81.1 because child-reply presentation has no durable recoverable append receipt. Exact replies the worker owns and ordinary mail to main remain allowed.
+- `canSpawn` is parsed only for configuration compatibility. Nested response-required delegation is fail-closed disabled for every subagent on Pi 0.84.2 because child-reply presentation has no durable recoverable append receipt. Exact replies the worker owns and ordinary mail to main remain allowed.
 - An unavailable tool name is dropped at worker start and noted in the agent's activity log. Before exact activation is known, every unknown/custom configured tool is classified conservatively as writable and effect-capable; after activation, live capability uses Pi's exact active tool names. Role labels never grant safety or authority. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
@@ -113,7 +113,7 @@ The email domain remains a model ID. Provider choice is not configured in `subag
 - an existing identity always resolves its persisted exact provider/model; and
 - a missing exact tuple remains unavailable and is never replaced by a same-ID candidate from another provider.
 
-The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Before that event, the extension prepares the exact isolated runtime/model object later consumed by worker execution and matches all non-secret request model fields. Header-bearing and dynamic OAuth/catalog extension providers fail closed because Pi 0.81.1 cannot prove their isolated provenance. Native public providers with provider-wide headers, OAuth, refresh hooks, or filter hooks are rejected before worker runtime creation or registration. Demonstrably static registrations reuse the same public object/config, await public `getAvailable()` to join Pi's pending auth/availability refresh, and require the exact provider/model in that available set before readiness. Legacy accepted mail without binding intent migrates only when the model ID has one global candidate; duplicates remain unavailable. See [Provider-aware durable model routing](provider-aware-model-routing.md).
+The first accepted mail for a new identity journals exact provider/model binding intent with effort/lifecycle intent. Before that event, the extension prepares the exact isolated runtime/model object later consumed by worker execution and matches all non-secret request model fields, including nested sampling parameters. Header-bearing and dynamic OAuth/catalog extension providers fail closed because Pi 0.84.2 cannot prove their isolated provenance. Native public providers with provider-wide headers, OAuth, refresh hooks, or filter hooks are rejected before worker runtime creation or registration. Demonstrably static registrations reuse the same public object/config, await public `getAvailable()` to join Pi's pending auth/availability refresh, and require the exact provider/model in that available set before readiness. Legacy accepted mail without binding intent migrates only when the model ID has one global candidate; duplicates remain unavailable. See [Provider-aware durable model routing](provider-aware-model-routing.md).
 
 ## Pi retry and transport settings
 
@@ -130,7 +130,7 @@ The snapshot preserves effective retry/provider-retry values, transport, HTTP/We
 
 ## Credential-source readiness
 
-The worker boundary checks Pi 0.81.1's non-secret auth-status surface; it does not resolve or compare credential material. Supported matching source classes are:
+The worker boundary checks Pi 0.84.2's non-secret auth-status surface; it does not resolve or compare credential material. Supported matching source classes are:
 
 - `stored`, using the same explicit `auth.json` path and provider snapshot (including stored OAuth/refresh credentials);
 - `environment`, with the same non-secret source context in the same process; and
@@ -140,7 +140,7 @@ Runtime overrides, `models_json_command`, provider `fallback`, source/context mi
 
 ## Long prompt-cache retention
 
-`PI_CACHE_RETENTION=long` is provider environment, not a Pi settings-manager field. Pi 0.81.1 emits `prompt_cache_retention: "24h"` for the relevant OpenAI request only when the exact effective model metadata permits long retention, and omits it when `compat.supportsLongCacheRetention` is false. Parent/worker API family and that effective capability must match the extension-start snapshot. If a proxy rejects long retention, correct its model override/upstream metadata and reload. There is no `gpt-5.6-sol` special case, option-stripping retry, automatic replay, provider switch, or fallback.
+`PI_CACHE_RETENTION=long` is provider environment, not a Pi settings-manager field. Pi 0.84.2 emits `prompt_cache_retention: "24h"` for the relevant OpenAI request only when the exact effective model metadata permits long retention, and omits it when `compat.supportsLongCacheRetention` is false. Parent/worker API family and that effective capability must match the extension-start snapshot. If a proxy rejects long retention, correct its model override/upstream metadata and reload. There is no `gpt-5.6-sol` special case, option-stripping retry, automatic replay, provider switch, or fallback.
 
 See [Provider retry visibility and recovery](provider-retry-recovery.md).
 
@@ -152,7 +152,7 @@ See [Provider retry visibility and recovery](provider-retry-recovery.md).
 | `reviewer` | high | read, grep, find, ls + mail | Review with findings and validation; read-only |
 | `worker` | medium | read, grep, find, ls, bash, edit, write + mail | Implement and validate changes |
 
-All runtime profiles report nested delegation disabled. Legacy `canSpawn` values do not create an opt-in on Pi 0.81.1.
+All runtime profiles report nested delegation disabled. Legacy `canSpawn` values do not create an opt-in on Pi 0.84.2.
 
 ## Notes
 

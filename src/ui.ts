@@ -562,7 +562,7 @@ export class DashboardComponent {
     } else {
       lines.push(this.theme.fg(full ? "warning" : "dim", `${identityCapacity} · ${runCapacity} · ${mainSummary}`));
     }
-    if (full) lines.push(this.theme.fg("warning", "FULL: reuse/restart relevant work; stop retains its lease; archive only a clean identity."));
+    if (full) lines.push(this.theme.fg("warning", "FULL: reuse only the same continuing cycle; restart relevant work; stop retains its lease; archive only a clean identity."));
     lines.push(this.theme.fg("borderMuted", "─".repeat(Math.max(1, Math.min(width, 80)))));
 
     if (agents.length === 0) {
@@ -685,10 +685,10 @@ export class DashboardComponent {
               : (inspection.state === "stopped" || inspection.state === "failed") && obligations > 0
                 ? "restart real obligations; cancel only an explicitly abandoned exact request; then archive when clean"
                 : inspection.archiveEligible && inspection.holdsActivationLease
-                  ? "reuse if relevant, or archive this clean identity; stop alone does not free its lease"
+                  ? "reuse only for the same continuing cycle, or archive this clean identity; stop alone does not free its lease"
                   : inspection.state === "archived" || !inspection.holdsActivationLease
                     ? "free identity capacity is required before restart/restoration"
-                    : "reuse this identity and finish real obligations before archival";
+                    : "reuse only to finish this continuing cycle and real obligations before archival";
             lines.push(this.theme.fg("warning", `recovery: ${recovery}`));
           }
           if (agent.failure) {

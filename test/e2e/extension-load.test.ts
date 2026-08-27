@@ -3,9 +3,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { it } from "node:test";
-import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
+import { discoverAndLoadExtensions, VERSION } from "@earendil-works/pi-coding-agent";
+import { SUPPORTED_PI_VERSION } from "../../src/pi-compat.ts";
 
 it("loads the packaged extension with tools, command, and renderers and no conflicts", async () => {
+  assert.equal(VERSION, SUPPORTED_PI_VERSION, "the canonical host loader uses the exact tested Pi version");
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-extension-load-"));
   const result = await discoverAndLoadExtensions([resolve("src/index.ts")], process.cwd(), agentDir);
   assert.deepEqual(result.errors, []);
@@ -47,7 +49,7 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   const emailComponent = emailRenderer({
     role: "custom", customType: "pi-email-subagent.email", content: "", display: true,
     details: envelope, timestamp: Date.now(),
-  } as never, { expanded: true }, theme);
+  } as never, { expanded: true, outputPad: 0 }, theme);
   const emailOutput = emailComponent!.render(100).join("\n");
   assert.match(emailOutput, /Conversation preview is loading.*Full transcript/s);
   assert.doesNotMatch(emailOutput, /clipboard|https:\/\/bad\.invalid|\x1b|\x07/);

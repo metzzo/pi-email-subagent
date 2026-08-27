@@ -360,7 +360,7 @@ it("never writes shared settings while two workers start and change effort indep
     assert.equal(lowSession.settingsManager.getDefaultThinkingLevel(), "low");
     assert.equal(highSession.settingsManager.getDefaultThinkingLevel(), "high");
     assert.deepEqual(lowSession.settingsManager.getRetrySettings(), { enabled: true, maxRetries: 4, baseDelayMs: 7 });
-    assert.deepEqual(lowSession.settingsManager.getProviderRetrySettings(), { timeoutMs: 5_001, maxRetries: undefined, maxRetryDelayMs: 60_000 });
+    assert.deepEqual(lowSession.settingsManager.getProviderRetrySettings(), { timeoutMs: 5_001, maxRetries: 2, maxRetryDelayMs: 2_001 });
     assert.equal(lowSession.settingsManager.getTransport(), "websocket");
     assert.equal(lowSession.settingsManager.getHttpIdleTimeoutMs(), 3_001);
     assert.equal(lowSession.settingsManager.getWebSocketConnectTimeoutMs(), 4_001);

@@ -8,26 +8,46 @@ import {
   assertExtensionApiFeatures,
   assertPiRuntimeFeatures,
   assertSupportedPiRuntime,
+  SUPPORTED_PI_VERSION,
   collectedReplyPresentationCapability,
   directMutationAliasSerializationCapability,
   sessionPresentationReceiptCapability,
 } from "../../src/pi-compat.ts";
 
-it("accepts the supported Pi public feature surface", () => {
+it("accepts the exact supported Pi public version and feature surface", () => {
+  assert.equal(PiCodingAgent.VERSION, SUPPORTED_PI_VERSION);
   assert.doesNotThrow(() => assertSupportedPiRuntime());
+});
+
+it("rejects a structurally compatible wrong Pi version with actual and supported diagnostics", () => {
+  const wrongVersion = "0.84.1";
+  assert.throws(
+    () => assertPiRuntimeFeatures(
+      { ...PiCodingAgent, VERSION: wrongVersion } as unknown as Record<string, unknown>,
+      PiAi as unknown as Record<string, unknown>,
+      PiTui as unknown as Record<string, unknown>,
+      TypeBox as unknown as Record<string, unknown>,
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(`actual ${wrongVersion.replaceAll(".", "\\.")}`));
+      assert.match(error.message, new RegExp(`supported ${SUPPORTED_PI_VERSION.replaceAll(".", "\\.")}`));
+      return true;
+    },
+  );
 });
 
 it("fails closed on collected-reply presentation without a staged Pi receipt", () => {
   const capability = collectedReplyPresentationCapability();
   assert.equal(capability.supported, false);
-  assert.match(capability.reason, /Pi 0\.81\.1.*no post-append acknowledgement/i);
+  assert.match(capability.reason, /Pi 0\.84\.2.*no post-append acknowledgement/i);
   assert.match(capability.requiredCoreContract, /stable request\/reply\/toolCall\/result-entry.*callback.*before Pi continues/i);
 });
 
 it("characterizes every general Pi presentation kill point as unacknowledged", () => {
   const capability = sessionPresentationReceiptCapability();
   assert.equal(capability.supported, false);
-  assert.equal(capability.detailCode, "PI_0_81_1_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE");
+  assert.equal(capability.detailCode, "PI_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE");
   for (const boundary of [/sendMessage/i, /prompt preflight/i, /steer/i, /followUp/i]) assert.match(capability.reason, boundary);
   assert.match(capability.requiredCoreContract, /stable envelope.*post-append.*recoverable.*crash/i);
 });
@@ -35,8 +55,8 @@ it("characterizes every general Pi presentation kill point as unacknowledged", (
 it("keeps mutation-alias integration disabled without a released authoritative contract", () => {
   const mutationAliases = directMutationAliasSerializationCapability();
   assert.equal(mutationAliases.supported, false);
-  assert.equal(mutationAliases.detailCode, "PI_0_81_1_MUTATION_ALIAS_IDENTITY_UNAVAILABLE");
-  for (const fact of [/Pi 0\.81\.1/i, /missing target/i, /hard-link/i, /queue key/i]) {
+  assert.equal(mutationAliases.detailCode, "PI_MUTATION_ALIAS_IDENTITY_UNAVAILABLE");
+  for (const fact of [/Pi 0\.84\.2/i, /missing target/i, /hard-link/i, /queue key/i]) {
     assert.match(mutationAliases.reason, fact);
   }
   assert.match(mutationAliases.requiredCoreContract, /missing-target symlink.*hard-link.*replacement.*concurrent create/i);
@@ -44,8 +64,8 @@ it("keeps mutation-alias integration disabled without a released authoritative c
 
 it("reports an actionable supported-Pi error for a missing required public feature", () => {
   assert.throws(
-    () => assertPiRuntimeFeatures({ SessionManager: { open() {} } }, {}, {}, {}),
-    /requires the Pi 0\.81\.1 public API surface.*@earendil-works\/pi-coding-agent\.getAgentDir.*Install Pi 0\.81\.1/s,
+    () => assertPiRuntimeFeatures({ VERSION: SUPPORTED_PI_VERSION, SessionManager: { open() {} } }, {}, {}, {}),
+    /requires the Pi 0\.84\.2 public API surface.*@earendil-works\/pi-coding-agent\.getAgentDir.*Install Pi 0\.84\.2/s,
   );
 });
 

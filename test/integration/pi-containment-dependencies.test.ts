@@ -34,7 +34,7 @@ async function secondOperationEnteredWhileFirstWasHeld(
   return enteredBeforeRelease;
 }
 
-describe("Pi 0.81.1 containment dependency characterization", { concurrency: false }, () => {
+describe("Pi 0.84.2 containment dependency characterization", { concurrency: false }, () => {
   it("serializes two operations using the same direct mutation path", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-mutation-queue-same-path-"));
     try {
@@ -58,7 +58,7 @@ describe("Pi 0.81.1 containment dependency characterization", { concurrency: fal
       assert.equal(
         await secondOperationEnteredWhileFirstWasHeld(join(real, "missing.txt"), join(alias, "missing.txt")),
         true,
-        "Pi 0.81.1 does not serialize missing targets whose symlinked ancestors converge",
+        "Pi 0.84.2 does not serialize missing targets whose symlinked ancestors converge",
       );
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -75,7 +75,7 @@ describe("Pi 0.81.1 containment dependency characterization", { concurrency: fal
       assert.equal(
         await secondOperationEnteredWhileFirstWasHeld(target, alias),
         true,
-        "Pi 0.81.1 does not serialize two existing pathnames for the same hard-linked inode",
+        "Pi 0.84.2 does not serialize two existing pathnames for the same hard-linked inode",
       );
     } finally {
       await rm(root, { recursive: true, force: true });

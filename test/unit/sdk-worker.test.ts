@@ -207,7 +207,7 @@ describe("SDK worker failures", () => {
       isIdle: true,
       prompt: async (_message: string, options: { preflightResult(success: boolean): void }) => {
         await preflight;
-        // Pi 0.81.1 calls this immediately before _runAgentPrompt. Throwing
+        // Pi 0.84.2 calls this immediately before _runAgentPrompt. Throwing
         // here is the last synchronous point that can prevent the old run.
         options.preflightResult(true);
         providerCalls += 1;
