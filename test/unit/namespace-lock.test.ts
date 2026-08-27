@@ -174,6 +174,49 @@ it("rejects complete Linux owner metadata on simulated non-Linux before liveness
   assert.match(String(acquisitionError), /complete owner.*exact dead-owner recovery requires Linux.*fails closed on non-Linux/i);
 });
 
+it("blocks a live owner when the kernel identity read returns ENOENT without changing owner artifacts", {
+  skip: process.platform !== "linux" ? "controlled kernel identity read requires the Linux recovery path" : false,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-live-owner-identity-enoent-"));
+  const namespace = join(root, "state");
+  await mkdir(namespace, { recursive: true });
+  const ownerPath = join(namespace, ".broker-owner.json");
+  const bytes = `${JSON.stringify({
+    pid: process.pid,
+    token: "live-owner-identity-enoent",
+    acquiredAt: "2026-09-01T00:00:00.000Z",
+    namespaceDir: namespace,
+    bootId: "00000000-0000-0000-0000-000000000001",
+    processStartTime: "1",
+  }, null, 2)}\n`;
+  await writeFile(ownerPath, bytes);
+  await mkdir(`${namespace}.lock`);
+  const lockBefore = await stat(`${namespace}.lock`);
+  let acquired: NamespaceLock | undefined;
+  let acquisitionError: unknown;
+  try {
+    acquired = await NamespaceLock.acquire(namespace, () => undefined, {
+      beforePriorOwnerIdentityRead: () => {
+        throw Object.assign(new Error("controlled boot-ID read failure"), { code: "ENOENT" });
+      },
+    });
+  } catch (error) {
+    acquisitionError = error;
+  }
+
+  try {
+    assert.equal(await readFile(ownerPath, "utf8"), bytes);
+    assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino);
+    assert.equal(acquired, undefined);
+    assert.match(
+      String(acquisitionError),
+      /kernel identity could not be read.*signal-0 did not report ESRCH.*live or unverifiable.*does not establish exact-owner identity.*no reclaim/i,
+    );
+  } finally {
+    await acquired?.release().catch(() => undefined);
+  }
+});
+
 it("rejects truthy malformed exact-owner identity fields without changing the owner or lock", {
   skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
 }, async () => {

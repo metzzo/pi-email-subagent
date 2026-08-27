@@ -14,6 +14,8 @@ const PROCESS_START_PATTERN = /^[1-9][0-9]{0,31}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface NamespaceLockHooks {
+  /** Narrow characterization seam; production callers leave this unset. */
+  beforePriorOwnerIdentityRead?: () => void | Promise<void>;
   afterFilesystemLockAcquired?: () => void | Promise<void>;
   afterFilesystemLockReleased?: () => void | Promise<void>;
 }
@@ -78,16 +80,28 @@ function pidExistsForBlockingOnly(pid: number): boolean {
   }
 }
 
-async function exactOwnerStillLive(owner: NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>): Promise<boolean> {
+type ExactOwnerStatus = "exact-live" | "live-or-unverifiable" | "exact-owner-absent";
+
+async function exactOwnerStatus(
+  owner: NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>,
+  beforeIdentityRead?: () => void | Promise<void>,
+): Promise<ExactOwnerStatus> {
   try {
+    await beforeIdentityRead?.();
     const current = await kernelProcessIdentity(owner.pid);
-    return current.bootId === owner.bootId && current.processStartTime === owner.processStartTime;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    // An existing PID whose kernel identity cannot be read is not safe to
-    // steal from. A missing PID was handled above.
-    try { process.kill(owner.pid, 0); return true; } catch (killError) {
-      return (killError as NodeJS.ErrnoException).code !== "ESRCH";
+    return current.bootId === owner.bootId && current.processStartTime === owner.processStartTime
+      ? "exact-live"
+      : "exact-owner-absent";
+  } catch {
+    // An identity-read failure never proves death. Only signal-0 ESRCH can
+    // establish that no process currently occupies the recorded PID.
+    try {
+      process.kill(owner.pid, 0);
+      return "live-or-unverifiable";
+    } catch (killError) {
+      return (killError as NodeJS.ErrnoException).code === "ESRCH"
+        ? "exact-owner-absent"
+        : "live-or-unverifiable";
     }
   }
 }
@@ -214,16 +228,28 @@ export class NamespaceLock {
           `Subagent namespace has complete owner metadata, but exact dead-owner recovery requires Linux boot-ID/PID/process-start verification and fails closed on non-Linux hosts: ${namespaceDir}.`,
         );
       }
-      const live = await exactOwnerStillLive(priorOwner as NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>);
-      if (live) {
+      const ownerStatus = await exactOwnerStatus(
+        priorOwner as NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>,
+        hooks.beforePriorOwnerIdentityRead,
+      );
+      if (ownerStatus === "exact-live") {
         throw new Error(
           `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
           + "The kernel still identifies that exact owner process; close or resume it before retrying.",
         );
       }
-      // Exact Linux boot/PID/start identity proves this owner generation dead.
-      // Its in-process AgentSessions/callbacks are gone, so the stale
-      // proper-lockfile directory can be removed under the transition guard.
+      if (ownerStatus === "live-or-unverifiable") {
+        throw new Error(
+          `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
+          + "Kernel identity could not be read, and signal-0 did not report ESRCH; the owner remains live or unverifiable. "
+          + "This does not establish exact-owner identity, recovery fails closed, and no reclaim was attempted.",
+        );
+      }
+      // A successful boot/start mismatch, or signal-0 ESRCH after an identity-
+      // read failure, establishes that the recorded exact generation is absent.
+      // The read failure alone never authorizes removal. That old generation's
+      // in-process AgentSessions/callbacks are gone, so its stale proper-lockfile
+      // directory can be removed under the transition guard.
       abandonedOwner = true;
       await rm(`${namespaceDir}.lock`, { recursive: true, force: true });
     } else if (priorOwnerPathExists || priorLockExists) {
