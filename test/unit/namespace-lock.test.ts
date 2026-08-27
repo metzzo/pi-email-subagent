@@ -113,6 +113,33 @@ it("fails closed on malformed owner metadata even without a lock directory", asy
   assert.equal(await readFile(ownerPath, "utf8"), "{malformed\n");
 });
 
+it("blocks an incomplete owner whose PID exists without claiming exact-owner identity or changing artifacts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-incomplete-live-owner-"));
+  const namespace = join(root, "state");
+  await mkdir(namespace, { recursive: true });
+  const ownerPath = join(namespace, ".broker-owner.json");
+  const bytes = `${JSON.stringify({
+    pid: process.pid,
+    token: "incomplete-live-owner",
+    acquiredAt: "2026-09-01T00:00:00.000Z",
+    namespaceDir: namespace,
+  }, null, 2)}\n`;
+  await writeFile(ownerPath, bytes);
+  await mkdir(`${namespace}.lock`);
+  const lockBefore = await stat(`${namespace}.lock`);
+
+  await assert.rejects(
+    NamespaceLock.acquire(namespace, () => undefined),
+    (error: Error) => {
+      assert.match(error.message, new RegExp(`already owned.*pid ${process.pid}`, "i"));
+      assert.match(error.message, /PID existence.*only to block.*does not establish exact-owner identity.*no reclaim/i);
+      return true;
+    },
+  );
+  assert.equal(await readFile(ownerPath, "utf8"), bytes);
+  assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino);
+});
+
 it("rejects truthy malformed exact-owner identity fields without changing the owner or lock", {
   skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
 }, async () => {
@@ -158,29 +185,29 @@ it("rejects truthy malformed exact-owner identity fields without changing the ow
   }
 });
 
-it("fails closed on an orphaned lock with no complete exact owner identity", {
-  skip: process.platform !== "linux" ? "Linux fixture uses kernel owner metadata" : false,
-}, async () => {
+it("fails closed on an orphaned lock with no complete exact owner identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-stale-lock-"));
   const namespace = join(root, "state");
   await mkdir(namespace, { recursive: true });
   await chmod(namespace, 0o755);
   await mkdir(`${namespace}.lock`);
   const ownerPath = join(namespace, ".broker-owner.json");
-  await writeFile(ownerPath, JSON.stringify({
+  const bytes = JSON.stringify({
     pid: 999_999_999,
     token: "stale-token",
     acquiredAt: "2000-01-01T00:00:00.000Z",
     namespaceDir: namespace,
-  }));
+  });
+  await writeFile(ownerPath, bytes);
   await chmod(ownerPath, 0o644);
   const stale = new Date(Date.now() - 30_000);
   await utimes(`${namespace}.lock`, stale, stale);
+  const lockBefore = await stat(`${namespace}.lock`);
 
   await assert.rejects(
     NamespaceLock.acquire(namespace, () => undefined),
     /identity is incomplete|ownership is ambiguous.*fails closed/i,
   );
-  const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { token: string };
-  assert.equal(owner.token, "stale-token");
+  assert.equal(await readFile(ownerPath, "utf8"), bytes);
+  assert.equal((await stat(`${namespace}.lock`)).ino, lockBefore.ino);
 });

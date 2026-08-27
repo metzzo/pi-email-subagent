@@ -67,6 +67,17 @@ async function restrictMode(path: string, mode: number): Promise<void> {
   }
 }
 
+function pidExistsForBlockingOnly(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM proves only that the PID exists. Every other outcome remains
+    // insufficient for a live-owner diagnostic and can never enable reclaim.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 async function exactOwnerStillLive(owner: NamespaceOwner & Required<Pick<NamespaceOwner, "bootId" | "processStartTime">>): Promise<boolean> {
   try {
     const current = await kernelProcessIdentity(owner.pid);
@@ -188,6 +199,12 @@ export class NamespaceLock {
     let abandonedOwner = false;
     if (priorOwner) {
       if (!priorOwner.bootId || !priorOwner.processStartTime) {
+        if (pidExistsForBlockingOnly(priorOwner.pid)) {
+          throw new Error(
+            `Subagent namespace is already owned according to incomplete metadata (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
+            + "PID existence is used only to block this contender and does not establish exact-owner identity; recovery fails closed and no reclaim was attempted.",
+          );
+        }
         throw new Error(
           `Subagent namespace owner identity is incomplete or mismatched and recovery fails closed: ${namespaceDir}.`,
         );
