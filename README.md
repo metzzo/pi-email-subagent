@@ -16,7 +16,7 @@ After the first npm release, the canonical command will be:
 pi install npm:pi-email-subagent
 ```
 
-For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads the source directly. On Pi 0.84.2, run `/reload-runtime` manually after changes; extension-originated slash messages cannot safely defer that command. The supported host provenance is Pi's canonical CLI/TUI extension runtime. Direct third-party SDK embedding is outside the release contract.
+For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads the source directly. On Pi 0.84.2, reload changed source through a command handler that treats `await ctx.reload(); return;` as terminal. An extension tool can safely queue `/reload-runtime` after its active turn with `pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp", expandPromptTemplates: true })`; extension-command dispatch requires that explicit expansion opt-in. The supported host provenance is Pi's canonical CLI/TUI extension runtime. Direct third-party SDK embedding is outside the release contract.
 
 ## Tools
 

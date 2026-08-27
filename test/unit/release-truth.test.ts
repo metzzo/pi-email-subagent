@@ -7,6 +7,13 @@ async function text(path: string): Promise<string> {
 }
 
 describe("release contract truth", () => {
+  it("documents the safe Pi 0.84.2 reload handoff", async () => {
+    const readme = await text("README.md");
+    assert.match(readme, /await ctx\.reload\(\); return;/i);
+    assert.match(readme, /sendUserMessage\([\s\S]*\/reload-runtime[\s\S]*deliverAs[\s\S]*followUp[\s\S]*expandPromptTemplates[\s\S]*true/i);
+    assert.doesNotMatch(readme, /extension-originated slash messages cannot safely defer/i);
+  });
+
   it("states disabled nested delegation and exact-dead-owner automatic reclaim without obsolete release claims", async () => {
     const changelog = await text("CHANGELOG.md");
     const unreleased = changelog.split("## [0.1.0]", 1)[0]!;
