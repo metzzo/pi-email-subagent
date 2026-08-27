@@ -131,8 +131,11 @@ it("blocks an incomplete owner whose PID exists without claiming exact-owner ide
   await assert.rejects(
     NamespaceLock.acquire(namespace, () => undefined),
     (error: Error) => {
-      assert.match(error.message, new RegExp(`already owned.*pid ${process.pid}`, "i"));
-      assert.match(error.message, /PID existence.*only to block.*does not establish exact-owner identity.*no reclaim/i);
+      assert.match(
+        error.message,
+        new RegExp(`^Subagent namespace is already owned \\(pid ${process.pid}, acquired 2026-09-01T00:00:00\\.000Z\\):`),
+      );
+      assert.match(error.message, /incomplete-metadata\/PID-blocking diagnostic only.*does not establish exact-owner identity or reclaim authority.*no reclaim/i);
       return true;
     },
   );

@@ -201,8 +201,8 @@ export class NamespaceLock {
       if (!priorOwner.bootId || !priorOwner.processStartTime) {
         if (pidExistsForBlockingOnly(priorOwner.pid)) {
           throw new Error(
-            `Subagent namespace is already owned according to incomplete metadata (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
-            + "PID existence is used only to block this contender and does not establish exact-owner identity; recovery fails closed and no reclaim was attempted.",
+            `Subagent namespace is already owned (pid ${priorOwner.pid}, acquired ${priorOwner.acquiredAt}): ${namespaceDir}. `
+            + "This is an incomplete-metadata/PID-blocking diagnostic only: PID existence does not establish exact-owner identity or reclaim authority; recovery fails closed and no reclaim was attempted.",
           );
         }
         throw new Error(
