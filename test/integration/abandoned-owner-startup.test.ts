@@ -88,7 +88,11 @@ it("retains exact namespace ownership when abandoned normalization cannot be com
 });
 
 it("retries exact-dead takeover safely after failures before and immediately after normalized save", {
-  timeout: 30_000,
+  // This case launches two crash/restart helpers. The aggregate suite runs
+  // other process-level Pi tests concurrently, so keep a finite but
+  // contention-tolerant budget rather than treating child startup delay as a
+  // product timeout.
+  timeout: 90_000,
   skip: process.platform !== "linux" ? "exact owner fencing requires Linux /proc" : false,
 }, async () => {
   for (const stage of ["before-save", "after-save"] as const) {
