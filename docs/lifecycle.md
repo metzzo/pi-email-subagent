@@ -50,7 +50,7 @@ Legacy data is canonicalized on read:
 - After exact-owner death, the old generation-9-like shape (`abort` and `dispose` succeeded, no active tools, no held run slot, exact matching epoch) becomes `failed` with no cleanup diagnostic and the same bounded warning.
 - A structurally ambiguous cleanup/epoch mismatch remains failed and blocked only at that exact address; no dead owner's run-slot claim or namespace-wide mutation quarantine is synthesized.
 
-When startup reports an exact live owner, never delete its owner or lock artifacts. Close or resume that owning process first; after it exits, resume the same parent session and follow the checked-out version's documented recovery flow. A clone has a fresh mailbox and cannot recover obligations from the original parent session.
+When startup reports an exact live owner, never delete its owner or lock artifacts. Close or resume that owning Pi process first. After the exact owner exits, resume the same parent session so startup can reclaim the exact-dead-owner lock and perform the migration above. Then explicitly restart the same identity so its preserved session and mailbox can continue. A clone has a fresh mailbox and cannot recover obligations from the original parent session.
 
 ## Shutdown
 

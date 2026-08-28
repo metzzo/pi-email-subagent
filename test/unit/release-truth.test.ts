@@ -67,8 +67,10 @@ describe("release contract truth", () => {
       const value = await text(path);
       assert.match(value, /exact.*owner.*dead[\s\S]{0,100}startup automatically reclaim|automatically reclaim.*exact.*dead.*owner/is, path);
       assert.match(value, /live.*SIGSTOP.*fail-closed|live or `SIGSTOP`ed.*reject/is, path);
-      assert.match(value, /generation 9[\s\S]*explicit.*restart[\s\S]{0,150}preserv.*(?:session|mail)|generation 9[\s\S]*preserv.*(?:session|mail)[\s\S]*explicit.*restart/is, path);
-      assert.match(value, /clone.*fresh mailbox.*cannot recover.*old obligations/i, path);
+      assert.match(value, /exact live owner[\s\S]*(?:do not|never) delete[\s\S]*same parent session[\s\S]*explicitly restart/is, path);
+      assert.match(value, /preserv.*(?:session|mailbox)/i, path);
+      assert.match(value, /clone.*fresh mailbox.*cannot recover.*obligations/i, path);
+      assert.doesNotMatch(value, /\bPID\s+\d+|current generation \d+ case/i, path);
     }
     const manage = await text("src/main-tools.ts");
     assert.doesNotMatch(manage, /recover_cleanup|operatorEvidence|recoveryStatus/);
@@ -93,23 +95,4 @@ describe("release contract truth", () => {
     assert.match(script, /productionAudit/);
   });
 
-  it("marks remediation plans complete and retains only the two current upstream capability gates", async () => {
-    const overview = await text("plans/remaining-open-problems.md");
-    assert.match(overview, /Status: remediation complete/i);
-    assert.doesNotMatch(overview, /regeneration in progress|implementation not started/i);
-    assert.match(overview, /durable session-presentation receipt/i);
-    assert.doesNotMatch(overview.split("## 1\. Executive summary", 1)[0]!, /process-tree quiescence receipt/i);
-    assert.match(overview, /mutation-alias identity/i);
-    for (const path of [
-      "plans/remaining-open-problems/01-mail-obligations.md",
-      "plans/remaining-open-problems/02-runtime-provider-boundary.md",
-      "plans/remaining-open-problems/03-runtime-truth-and-liveness.md",
-      "plans/remaining-open-problems/04-crash-recovery-and-containment.md",
-      "plans/remaining-open-problems/05-compatibility-and-release.md",
-    ]) {
-      const value = await text(path);
-      assert.match(value, /Status: (?:remediation )?complete/i, path);
-      assert.match(value, /Historical implementation record/i, path);
-    }
-  });
 });

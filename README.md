@@ -16,6 +16,15 @@ After the first npm release, the canonical command will be:
 pi install npm:pi-email-subagent
 ```
 
+> [!WARNING]
+> Subagents are trusted collaborators, not sandboxed processes. They share Pi's
+> process and project working directory; writable profiles can run shell commands
+> and modify any path allowed by their host tools. Host credentials, environment,
+> and network access may also be reachable, parallel writers can conflict, and
+> provider calls may incur charges. Start with read-only `scout` or `reviewer`
+> profiles, delegate only to providers you trust, and review the limits in
+> [`SECURITY.md`](SECURITY.md) before enabling writable workers.
+
 For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads the source directly. On Pi 0.84.2, reload changed source through a command handler that treats `await ctx.reload(); return;` as terminal. An extension tool can safely queue `/reload-runtime` after its active turn with `pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp", expandPromptTemplates: true })`; extension-command dispatch requires that explicit expansion opt-in. The supported host provenance is Pi's canonical CLI/TUI extension runtime. Direct third-party SDK embedding is outside the release contract.
 
 ## Tools
@@ -52,11 +61,12 @@ Pi remains the sole owner of automatic provider retries. **Pi agent retry** star
 
 ## Model selection
 
-- Use `k3` (`k3.com` in an email address) for challenging, web-development-related, or creative tasks.
-- Use `gpt-5.6-sol` (`gpt-5.6-sol.com`) for very difficult, complicated, or high-reasoning-dependent tasks. This higher threshold takes precedence over `k3`.
-- Use `gpt-5.6-terra` (`gpt-5.6-terra.com`) only for very simple, fully explicit tasks that are not open to interpretation.
-- Do not use any other model unless the user explicitly requests that specific model.
-- When classification is ambiguous, do not use Terra if interpretation is required; use K3 unless the Sol threshold is clearly met. If the preferred model is unavailable, report that instead of silently substituting another model.
+The default policy is catalog-neutral:
+
+- Create identities only with model IDs shown in the available-model list.
+- Honor an explicitly requested model when it is available; otherwise report that it is unavailable instead of silently substituting another model.
+- When no model is specified, choose an available model suited to the task's complexity and required capabilities.
+- Use `inspect_agent` for an exact prospective routing decision. Administrators can replace the full policy with `modelPolicy`.
 
 ## UI
 
@@ -79,7 +89,7 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
 ```json
 {
   "defaultEffort": "medium",
-  "modelPolicy": "- Use model ID `k3` ... (override the model selection policy section of every agent prompt)",
+  "modelPolicy": "- Choose only from available model IDs ... (override the model selection policy section of every agent prompt)",
   "maxAgents": 8,
   "maxConcurrent": 4,
   "maxMailsPerMinute": 60,
@@ -132,7 +142,7 @@ Provider/session errors crossing into registry, Activity, work-ledger, UI, or ma
 
 State is stored under `~/.pi/agent/subagents/<parent-session-id>/`. A cooperative filesystem lease reduces accidental concurrent state writers only on the same local host and PID namespace; it is not a workspace, distributed-filesystem, container-boundary, or security fence. On Linux, boot ID plus kernel process-start identity prevents a stale mtime from taking the lease from an exact live or `SIGSTOP`ed owner. When the complete recorded boot ID, PID, process start time, and namespace match and that exact owner is dead, startup automatically reclaims the stale lock under a serialized owner-transition guard. Mail, sessions, and obligations are preserved; formerly active workers become failed/inactive and require explicit same-identity restart. The caller namespace path is validated before any artifact is created, and owner path/boot ID/PID/start time/token/timestamp fields are validated canonically before publication, liveness comparison, removal, or clean release. A live or `SIGSTOP`ed owner, missing/incomplete/malformed identity, owner-publication gap, or abandoned transition guard remains fail-closed without changing the old owner/lock. On non-Linux hosts, an existing PID from incomplete owner metadata is only a blocking diagnostic: it does not establish exact-owner identity or permit reclaim, and an absent/unknown incomplete owner also remains unreclaimable. On Linux, a successful boot/start mismatch establishes that the recorded exact generation is absent. An identity-read failure alone never does: signal-0 success, `EPERM`, or any non-`ESRCH` error blocks as live/unverifiable, while only `ESRCH` confirms PID absence and may continue toward exact-dead recovery.
 
-When startup reports an exact live owner, never delete its owner or lock artifacts. Close or resume that owning process first; after it exits, resume the same parent session and follow the checked-out version's documented recovery flow. A clone has a fresh mailbox and cannot recover obligations from the original parent session.
+When startup reports an exact live owner, do not delete its owner or lock artifacts. Close or resume that owning Pi process first. After the exact owner exits, resume the same parent session: startup automatically reclaims the exact-dead-owner lock, normalizes a coherent legacy completed-cleanup record to `failed` without a cleanup hold, preserves its mailbox and session file, and records a bounded warning that claims neither OS-process proof nor automatic work completion. Then explicitly restart the same identity to resume queued obligations. A clone creates a fresh mailbox and cannot recover obligations from the original parent session.
 
 Mail is journaled before acceptance and worker sessions are resumed after reload. The initial mail contains durable provider/model, lifecycle, and effort spawn intent, and the registry record is saved before worker/provider startup; startup reconciles queued mail whose recipient record was not persisted before a crash without selecting again or widening its accepted policy. Run, active-run stall, prompt, spawn, abort, dispose, and global shutdown deadlines are finite. Known in-flight tools disarm only the idle/stall timer; the absolute run deadline stays armed, and the last parallel tool end starts a fresh idle interval. Bash's optional per-call `timeout` can provide a smaller shell-specific bound. Worker teardown is owned by one generation-bound cleanup lease: routing detaches immediately, then the lease invalidates and joins every already-started Pi prompt preflight, waits for any factory/start operation, waits for Pi 0.84.2 `AgentSession.abort()` to reach idle, waits for active tool promises/listeners to settle, and disposes. An exact-dead takeover is not releasable as clean until the registry commit containing its normalization succeeds. A caller deadline does not cancel the cleanup operation. While it remains genuinely pending, only that exact address is blocked; failure or timeout keeps an exact-address diagnostic, and late success releases it. A completed ordinary Bash call is settled and does not poison its generation. Deliberately detached effects from completed commands remain outside stop semantics. Broker shutdown is bounded, but retains namespace ownership if its own live Pi session/tool cleanup remains unsettled; see [`docs/lifecycle.md`](docs/lifecycle.md). The journal is maintained during live sessions: excess transitions are compacted into a snapshot and the oldest terminal envelopes above `maxRetainedEmails` are pruned, while every open obligation and retained request/reply pair is preserved. Defaults allow eight active registered identities and four concurrently running workers. Clean stopped/idle identities can be archived without deleting their sessions or mail; archived identities do not consume active capacity and restore their persistent context when restarted or mailed again.
 

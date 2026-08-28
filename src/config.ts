@@ -7,12 +7,10 @@ import type { AddressConfig, LifecycleOverride, LifecyclePolicy, RoleConfig, Sub
 
 const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
-export const DEFAULT_MODEL_POLICY = `- Use model ID \`k3\` (email-domain suffix \`k3.com\`) for challenging, web-development-related, or creative tasks.
-- Use model ID \`gpt-5.6-sol\` (email-domain suffix \`gpt-5.6-sol.com\`) for very difficult, complicated, or high-reasoning-dependent tasks. This higher threshold takes precedence over \`k3\`.
-- Use model ID \`gpt-5.6-terra\` (email-domain suffix \`gpt-5.6-terra.com\`) only for very simple, fully explicit tasks that are not open to interpretation.
-- Never use any other model unless the user explicitly requests that specific model.
-- For ambiguous tasks, never choose \`gpt-5.6-terra\` if interpretation is needed; use \`k3\` unless the \`gpt-5.6-sol\` threshold is clearly met.
-- If a preferred model is not currently routable, report that limitation instead of silently substituting another model.`;
+export const DEFAULT_MODEL_POLICY = `- Use only model IDs listed in the available-email-models section when creating an identity.
+- If the user explicitly requests a model, use that exact model when it is available; otherwise report that it is unavailable instead of silently substituting another model.
+- When the user does not specify a model, choose an available model appropriate for the task's complexity and required capabilities.
+- Never invent a model ID or infer that an omitted model is routable; use inspect_agent for an exact prospective routing decision.`;
 
 /** Maximum delay Node setTimeout can represent without overflow/clamping. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
