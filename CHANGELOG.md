@@ -49,7 +49,6 @@ Initial `0.1.0` release candidate (unpublished).
 - Initial-delegation lifecycle policies with finite defaults/maxima, durable crash-safe spawn intent, runtime watchdogs, bounded cleanup/shutdown, and inspection/dashboard disclosure.
 - Work-first `/agents` telemetry and UI: correlated edit/write outcomes, patch statistics and bounded diffs, unverified shell/custom effects, inspection counters, exact-path active warnings, and session-backed crash recovery.
 - Required secret scanning and fail-closed production dependency-license checks with a generated release inventory.
-- Mechanical completion replies that deliver a successful worker's visible final text when it forgets to call `send_email`, without duplicating explicit replies.
 - Exact-ID administrative cancellation for intentionally abandoned requests to inactive recipients, with durable actor/reason audit metadata and no fabricated reply.
 - Initial-delegation `effort` overrides on `send_email`, including side-effect-free prospective previews through `inspect_agent` and crash-safe spawn-intent recovery.
 - Generation-bound worker cleanup leases with persisted fail-closed quarantine diagnostics, exact inherited run-slot/capability facts, durable queued-mail preservation, late-settlement observation, and namespace-safe shutdown handoff.
