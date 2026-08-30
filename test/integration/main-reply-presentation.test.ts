@@ -90,6 +90,15 @@ class BlockingRejectingMainAdapter extends BlockingMainAdapter {
   }
 }
 
+class ShutdownAfterAcceptanceMainAdapter extends FakeMainAdapter {
+  onAccepted?: () => void;
+
+  override async deliver(delivery: MainDelivery): Promise<void> {
+    await super.deliver(delivery);
+    this.onAccepted?.();
+  }
+}
+
 describe("deferred low-priority main presentation", () => {
   it("lets a late collector claim a low reply that arrived while main was busy", async () => {
     const main = new FakeMainAdapter();
@@ -463,8 +472,15 @@ describe("deferred low-priority main presentation", () => {
         await commitEntered.promise;
         const waiting = first.broker.waitForReplies([request.correlationId], 0, true);
         releaseCommit.resolve();
-        const [sendOutcome, joined] = await Promise.all([sending.then(() => "fulfilled", () => "rejected"), waiting]);
-        assert.equal(sendOutcome, "rejected");
+        const [sendOutcome, joined] = await Promise.all([
+          sending.then(
+            (value) => ({ status: "fulfilled" as const, value }),
+            (reason) => ({ status: "rejected" as const, reason }),
+          ),
+          waiting,
+        ]);
+        assert.equal(sendOutcome.status, deliveryCommitApplied ? "fulfilled" : "rejected");
+        if (sendOutcome.status === "fulfilled") assert.equal(sendOutcome.value.envelope.deliveryState, "delivered");
         assert.equal(
           failedTransitions,
           deliveryCommitApplied ? 0 : 1,
@@ -501,40 +517,150 @@ describe("deferred low-priority main presentation", () => {
     }
   });
 
-  it("keeps settlement flushing coherent when its delivered commit rejects before a late collector", async () => {
+  it("reports unresolved accepted-presentation uncertainty when both canonical appends reject", async () => {
     const main = new FakeMainAdapter();
-    main.idle = false;
     const { broker, workers } = await setup(main);
     try {
-      const { request, reply } = await requestAndReply(broker, workers);
-      const commitEntered = deferred();
-      const releaseCommit = deferred();
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.main-unresolved@gpt-5.4.com", subject: "Unresolved reply", message: "Reply once.", priority: "low",
+      });
       const realMarkDelivered = broker.mailStore.markDelivered.bind(broker.mailStore);
-      let rejectCommit = true;
       broker.mailStore.markDelivered = async (ids) => {
-        if (rejectCommit && ids.includes(reply.envelope.id)) {
-          rejectCommit = false;
-          commitEntered.resolve();
-          await releaseCommit.promise;
-          throw new Error("deterministic flush delivered commit rejection");
+        if (ids.some((id) => broker.mailStore.get(id)?.kind === "reply")) {
+          throw new Error("deterministic delivered append rejection");
         }
         await realMarkDelivered(ids);
       };
-
-      main.idle = true;
-      const flushing = broker.flushQueuedMainMail();
-      await commitEntered.promise;
-      const waiting = broker.waitForReplies([request.correlationId], 0, true);
-      releaseCommit.resolve();
-      const [, joined] = await Promise.all([flushing, waiting]);
+      broker.mailStore.markFailed = async () => {
+        throw new Error("deterministic failure append rejection");
+      };
+      await assert.rejects(
+        workers[0]!.send({
+          to: broker.mainAddress,
+          subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+          message: "Visible but canonically unresolved.",
+          priority: "low",
+        }),
+        /delivery failed.*route failure finalization also failed/i,
+      );
       assert.equal(main.deliveries.length, 1);
-      assert.equal(joined.items[0]?.reply, undefined);
-      assert.equal(broker.mailStore.get(reply.envelope.id)?.deliveryState, "failed");
-      const original = broker.mailStore.get(request.envelope.id);
-      assert.equal(original?.answeredBy, undefined);
-      assert.equal(original?.replyReservedBy, undefined);
-      assert.match(main.failures.at(-1) ?? "", /canonical state failed/i);
+      const reply = broker.mailStore.list().find((email) => email.inReplyTo === request.envelope.id);
+      assert.ok(reply);
+      assert.equal(reply.deliveryState, "queued");
+      assert.equal(broker.mailStore.get(request.envelope.id)?.replyReservedBy, reply.id);
+      assert.equal(broker.mailStore.get(request.envelope.id)?.answeredBy, undefined);
     } finally { await broker.shutdown(); }
+  });
+
+  it("commits or fails an accepted presentation when orderly shutdown starts at the adapter boundary", async () => {
+    for (const deliveredCommitRejects of [false, true]) {
+      const root = await mkdtemp(join(tmpdir(), `pi-email-main-accepted-shutdown-${deliveredCommitRejects ? "reject" : "commit"}-`));
+      const main = new ShutdownAfterAcceptanceMainAdapter();
+      const first = await setup(main, root);
+      let restored: Awaited<ReturnType<typeof setup>> | undefined;
+      let shuttingDown: Promise<void> | undefined;
+      try {
+        const request = await first.broker.send(first.broker.mainAddress, {
+          to: "worker.main-accepted-shutdown@gpt-5.4.com",
+          subject: "Accepted shutdown",
+          message: "Reply once.",
+          priority: "low",
+        });
+        const realMarkDelivered = first.broker.mailStore.markDelivered.bind(first.broker.mailStore);
+        let deliveredCommitAttempts = 0;
+        first.broker.mailStore.markDelivered = async (ids) => {
+          const targetsReply = ids.some((id) => first.broker.mailStore.get(id)?.kind === "reply");
+          if (targetsReply) {
+            deliveredCommitAttempts += 1;
+            if (deliveredCommitRejects) throw new Error("deterministic accepted-boundary commit rejection");
+          }
+          await realMarkDelivered(ids);
+        };
+        main.onAccepted = () => { shuttingDown ??= first.broker.shutdown(); };
+
+        const outcome = await first.workers[0]!.send({
+          to: first.broker.mainAddress,
+          subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+          message: "Accepted before shutdown.",
+          priority: "low",
+        }).then(
+          (value) => ({ status: "fulfilled" as const, value }),
+          (reason) => ({ status: "rejected" as const, reason }),
+        );
+        await shuttingDown;
+        assert.equal(deliveredCommitAttempts, 1);
+        assert.equal(main.deliveries.length, 1);
+        const reply = first.broker.mailStore.list().find((email) => email.inReplyTo === request.envelope.id);
+        assert.ok(reply);
+        const original = first.broker.mailStore.get(request.envelope.id);
+        assert.notEqual(reply.deliveryState, "queued");
+        assert.equal(original?.replyReservedBy, undefined);
+        if (deliveredCommitRejects) {
+          assert.equal(outcome.status, "rejected");
+          assert.equal(reply.deliveryState, "failed");
+          assert.equal(original?.answeredBy, undefined);
+        } else {
+          assert.equal(outcome.status, "fulfilled");
+          if (outcome.status === "fulfilled") assert.equal(outcome.value.envelope.deliveryState, "delivered");
+          assert.equal(reply.deliveryState, "delivered");
+          assert.equal(original?.answeredBy, reply.id);
+        }
+
+        const restoredMain = new FakeMainAdapter();
+        restored = await setup(restoredMain, root);
+        assert.equal(restoredMain.deliveries.length, 0, "startup never repeats a presentation accepted before shutdown");
+        assert.equal(restored.broker.mailStore.get(reply.id)?.deliveryState, reply.deliveryState);
+        assert.equal(restored.broker.mailStore.get(request.envelope.id)?.answeredBy, original?.answeredBy);
+      } finally {
+        await first.broker.shutdown().catch(() => undefined);
+        await restored?.broker.shutdown().catch(() => undefined);
+      }
+    }
+  });
+
+  it("keeps settlement flushing coherent when its delivered commit reports rejection", async () => {
+    for (const deliveryCommitApplied of [false, true]) {
+      const main = new FakeMainAdapter();
+      main.idle = false;
+      const { broker, workers } = await setup(main);
+      try {
+        const { request, reply } = await requestAndReply(broker, workers);
+        const commitEntered = deferred();
+        const releaseCommit = deferred();
+        const realMarkDelivered = broker.mailStore.markDelivered.bind(broker.mailStore);
+        let rejectCommit = true;
+        broker.mailStore.markDelivered = async (ids) => {
+          if (rejectCommit && ids.includes(reply.envelope.id)) {
+            rejectCommit = false;
+            commitEntered.resolve();
+            await releaseCommit.promise;
+            if (deliveryCommitApplied) await realMarkDelivered(ids);
+            throw new Error("deterministic flush delivered commit rejection");
+          }
+          await realMarkDelivered(ids);
+        };
+
+        main.idle = true;
+        const flushing = broker.flushQueuedMainMail();
+        await commitEntered.promise;
+        const waiting = broker.waitForReplies([request.correlationId], 0, true);
+        releaseCommit.resolve();
+        const [, joined] = await Promise.all([flushing, waiting]);
+        assert.equal(main.deliveries.length, 1);
+        assert.equal(joined.items[0]?.reply, undefined);
+        const original = broker.mailStore.get(request.envelope.id);
+        if (deliveryCommitApplied) {
+          assert.equal(broker.mailStore.get(reply.envelope.id)?.deliveryState, "delivered");
+          assert.equal(original?.answeredBy, reply.envelope.id);
+          assert.equal(main.failures.length, 0, "canonical flush success suppresses the stale ancillary error");
+        } else {
+          assert.equal(broker.mailStore.get(reply.envelope.id)?.deliveryState, "failed");
+          assert.equal(original?.answeredBy, undefined);
+          assert.match(main.failures.at(-1) ?? "", /canonical state failed/i);
+        }
+        assert.equal(original?.replyReservedBy, undefined);
+      } finally { await broker.shutdown(); }
+    }
   });
 
   it("routes a high reply accepted before a collector and omits its ordinarily presented body", async () => {

@@ -907,6 +907,13 @@ export class AgentBroker {
     return finalizationErrors;
   }
 
+  private mainRouteCanonicallyComplete(envelope: EmailEnvelope): boolean {
+    const current = this.mailStore.get(envelope.id);
+    if (current?.deliveryState !== "delivered") return false;
+    if (current.kind !== "reply" || !current.inReplyTo) return true;
+    return this.mailStore.get(current.inReplyTo)?.answeredBy === current.id;
+  }
+
   private async transitionMainEnvelope(envelope: EmailEnvelope, generation?: number): Promise<void> {
     const current = this.mailStore.get(envelope.id);
     if (!current || current.deliveryState !== "queued" || this.disposed) return;
@@ -919,7 +926,6 @@ export class AgentBroker {
       if (!collectionClaim) {
         await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
         ordinaryPresentationAccepted = true;
-        if (generation !== undefined) this.checkpoint(generation);
       }
       await this.mailStore.markDelivered([current.id]);
       if (ordinaryPresentationAccepted && this.recordOrdinaryMainPresentation(current)) this.emitChange();
@@ -928,9 +934,10 @@ export class AgentBroker {
     }
 
     const lifecycleCancelled = this.disposed || (generation !== undefined && this.cancelled(generation));
+    const mayFailQueued = ordinaryPresentationAccepted || !lifecycleCancelled;
     let finalizationErrors = routeError === undefined
       ? []
-      : await this.finalizeMainRouteFailure(current, routeError, ordinaryPresentationAccepted, !lifecycleCancelled);
+      : await this.finalizeMainRouteFailure(current, routeError, ordinaryPresentationAccepted, mayFailQueued);
     let releaseError: unknown;
     if (collectionClaim) {
       try {
@@ -944,14 +951,15 @@ export class AgentBroker {
         current,
         releaseError,
         ordinaryPresentationAccepted,
-        !lifecycleCancelled,
+        mayFailQueued,
       );
     } else if (releaseError !== undefined) {
       finalizationErrors.push(errorMessage(releaseError));
     }
 
     const failure = routeError ?? releaseError;
-    if (failure !== undefined && !this.disposed) {
+    if (failure === undefined || this.mainRouteCanonicallyComplete(current)) return;
+    if (ordinaryPresentationAccepted || !this.disposed) {
       throw new FinalizedMainDeliveryError(errorMessage(failure), finalizationErrors);
     }
   }
