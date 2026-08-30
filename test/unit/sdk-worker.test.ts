@@ -405,7 +405,13 @@ describe("SDK worker failures", () => {
     let disposals = 0;
     const session = {
       isStreaming: true,
-      abort: async () => { aborts += 1; await new Promise((resolve) => setTimeout(resolve, 5)); },
+      isIdle: false,
+      abort: async () => {
+        aborts += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        session.isStreaming = false;
+        session.isIdle = true;
+      },
       dispose: () => { disposals += 1; },
     };
     (worker as unknown as { session: typeof session }).session = session;

@@ -31,7 +31,10 @@ function registrationIssue(value: unknown): string | undefined {
   if (candidate.protocolVersion !== WORKER_EXTENSION_PROTOCOL_VERSION) return "Ignored a worker extension registration with an unsupported protocol version.";
   if (typeof candidate.name !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(candidate.name)) return "Ignored a worker extension registration with an invalid name.";
   if (typeof candidate.factory !== "function") return "Ignored a worker extension registration without a factory.";
-  if (!Array.isArray(candidate.tools) || candidate.tools.length > MAX_CONFIG_PROFILE_TOOLS) return "Ignored a worker extension registration with an invalid tool list.";
+  if (
+    !Array.isArray(candidate.tools) || candidate.tools.length > MAX_CONFIG_PROFILE_TOOLS ||
+    Array.from({ length: candidate.tools.length }, (_, index) => index).some((index) => !(index in candidate.tools!))
+  ) return "Ignored a worker extension registration with an invalid tool list.";
   if (!candidate.tools.every((tool) => (
     typeof tool === "string" && /^[a-zA-Z0-9_-]+$/.test(tool) && Buffer.byteLength(tool, "utf8") <= MAX_CONFIG_TOOL_NAME_BYTES
   ))) return "Ignored a worker extension registration with an invalid tool name.";

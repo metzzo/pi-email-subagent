@@ -194,9 +194,9 @@ export class SdkWorker implements WorkerTransport {
   /** Full accepted prompt operations, including awaited extension settlement handlers. */
   private readonly promptOperations = new Set<Promise<void>>();
   private readonly activeToolCalls = new Map<string, string>();
-  private agentRunDepth = 0;
-  private awaitingAgentRetry = false;
   private workerSettlementPending = false;
+  private workerSettlementObserved = false;
+  private sessionShutdownEmitted = false;
   private startGeneration = 0;
   private startOperation?: Promise<void>;
   private runFailure?: string;
@@ -236,6 +236,38 @@ export class SdkWorker implements WorkerTransport {
     this.record.state = state;
     this.record.updatedAt = nowIso();
     this.emit({ type: "state", state });
+  }
+
+  private settleWorkerIfQuiescent(): void {
+    if (
+      this.disposed || !this.record || !this.workerSettlementPending || !this.workerSettlementObserved ||
+      this.promptOperations.size > 0 || this.session?.isIdle === false
+    ) return;
+    this.workerSettlementPending = false;
+    this.workerSettlementObserved = false;
+    if (this.record.work) {
+      interruptActive(this.record.work);
+      this.record.work.batchEndedAt = nowIso();
+    }
+    if (this.runFailure) {
+      this.setState("failed");
+      this.activity("status", "Agent run failed");
+      this.emit({ type: "failure", error: this.runFailure });
+    } else {
+      this.setState("idle");
+      this.activity("status", "Agent run settled");
+    }
+    this.emit({ type: "settled" });
+    this.runFailure = undefined;
+  }
+
+  private async emitSessionShutdown(session: AgentSession): Promise<void> {
+    if (this.sessionShutdownEmitted) return;
+    this.sessionShutdownEmitted = true;
+    const runner = (session as AgentSession & { extensionRunner?: AgentSession["extensionRunner"] }).extensionRunner;
+    if (runner?.hasHandlers("session_shutdown")) {
+      await runner.emit({ type: "session_shutdown", reason: "quit" });
+    }
   }
 
   start(config: WorkerStartConfig): Promise<void> {
@@ -329,35 +361,41 @@ export class SdkWorker implements WorkerTransport {
         throw new Error(`Worker extension ${registration.name} did not register exactly its declared tools.`);
       }
     }
+    const shutdownAndDisposeBoundSession = async (): Promise<void> => {
+      await this.emitSessionShutdown(session).catch(() => undefined);
+      if (session.isCompacting) session.abortCompaction();
+      if (session.isStreaming) await session.abort().catch(() => undefined);
+      session.dispose();
+    };
     try {
       await session.bindExtensions({
         mode: "print",
         onError: () => this.activity("error", "A registered worker extension reported an error."),
       });
     } catch (error) {
-      session.dispose();
+      await shutdownAndDisposeBoundSession();
       throw error;
     }
     if (this.disposed || generation !== this.startGeneration) {
-      if (session.isStreaming) await session.abort().catch(() => undefined);
-      session.dispose();
+      await shutdownAndDisposeBoundSession();
       throw new Error("Worker start was cancelled.");
     }
     const activeTools = session.getActiveToolNames();
     for (const registration of this.workerExtensions) {
       const missing = registration.tools.filter((tool) => !activeTools.includes(tool));
       if (missing.length > 0) {
-        session.dispose();
+        await shutdownAndDisposeBoundSession();
         throw new Error(`Worker extension ${registration.name} did not activate its declared tool ${missing[0]}.`);
       }
     }
-    this.session = session;
     this.record.sessionFile = session.sessionFile;
     this.record.effort = session.thinkingLevel;
     this.record.tools = activeTools;
     if (!this.record.tools.includes("send_email") || !this.record.tools.includes("fetch_emails")) {
+      await shutdownAndDisposeBoundSession();
       throw new Error("Worker mailbox tools were not activated.");
     }
+    this.session = session;
     this.unsubscribeSession = session.subscribe((event) => this.onSessionEvent(event));
     this.setState("idle");
     const unknownTools = requestedTools.filter((tool) => !this.record!.tools.includes(tool));
@@ -377,15 +415,9 @@ export class SdkWorker implements WorkerTransport {
     }
     switch (event.type) {
       case "agent_start":
-        if (this.awaitingAgentRetry) {
-          this.awaitingAgentRetry = false;
-        } else {
-          if (this.agentRunDepth === 0) {
-            this.runFailure = undefined;
-            this.workerSettlementPending = true;
-          }
-          this.agentRunDepth += 1;
-        }
+        if (!this.workerSettlementPending) this.runFailure = undefined;
+        this.workerSettlementPending = true;
+        this.workerSettlementObserved = false;
         this.emit({ type: "run_liveness", phase: "model_start" });
         this.setState("running");
         this.activity("status", "Agent run started");
@@ -495,33 +527,18 @@ export class SdkWorker implements WorkerTransport {
         break;
       case "agent_end": {
         this.emit({ type: "run_liveness", phase: "model_end" });
-        if (event.willRetry) this.awaitingAgentRetry = true;
         const failure = terminalAgentError(event.messages, event.willRetry);
         if (failure) {
           this.runFailure = failure;
           this.activity("error", failure);
+        } else {
+          this.runFailure = undefined;
         }
         break;
       }
       case "agent_settled":
-        this.awaitingAgentRetry = false;
-        if (this.agentRunDepth > 0) this.agentRunDepth -= 1;
-        if (this.agentRunDepth > 0 || !this.workerSettlementPending) break;
-        this.workerSettlementPending = false;
-        if (this.record.work) {
-          interruptActive(this.record.work);
-          this.record.work.batchEndedAt = nowIso();
-        }
-        if (this.runFailure) {
-          this.setState("failed");
-          this.activity("status", "Agent run failed");
-          this.emit({ type: "failure", error: this.runFailure });
-        } else {
-          this.setState("idle");
-          this.activity("status", "Agent run settled");
-        }
-        this.emit({ type: "settled" });
-        this.runFailure = undefined;
+        this.workerSettlementObserved = true;
+        this.settleWorkerIfQuiescent();
         break;
       default:
         break;
@@ -586,10 +603,11 @@ export class SdkWorker implements WorkerTransport {
             },
           });
           this.promptOperations.add(operation);
-          operation.then(
-            () => this.promptOperations.delete(operation),
-            () => this.promptOperations.delete(operation),
-          );
+          const finishOperation = (): void => {
+            this.promptOperations.delete(operation);
+            this.settleWorkerIfQuiescent();
+          };
+          operation.then(finishOperation, finishOperation);
           operation.then(finishAdmission, finishAdmission);
           return operation;
         },
@@ -639,35 +657,55 @@ export class SdkWorker implements WorkerTransport {
       // or cancels either underlying operation.
       await startOperation?.catch(() => undefined);
       await Promise.allSettled(promptAdmissions);
-      const promptOperations = [...this.promptOperations];
       const activeToolsAtStart = new Map(this.activeToolCalls);
       if (this.session === session) this.session = undefined;
       this.sessionManager = undefined;
       if (this.unsubscribeSession === unsubscribe) this.unsubscribeSession = undefined;
       let abort: WorkerCleanupReport["abort"] = "succeeded";
       let dispose: WorkerCleanupReport["dispose"] = "succeeded";
-      const wasStreaming = Boolean(session?.isStreaming);
       const details: string[] = [];
 
-      if (session?.isCompacting) {
+      if (session) {
         try {
-          session.abortCompaction();
+          await this.emitSessionShutdown(session);
         } catch (error) {
           abort = "failed";
-          details.push(safeErrorSummary(error));
+          details.push(`session shutdown: ${safeErrorSummary(error)}`);
         }
       }
-      if (wasStreaming) {
-        const outcome = await Promise.resolve().then(() => session!.abort()).then(
-          () => ({ state: "succeeded" as const }),
-          (error: unknown) => ({ state: "failed" as const, detail: safeErrorSummary(error) }),
-        );
-        if (outcome.state === "failed") {
-          abort = "failed";
-          details.push(outcome.detail);
+      let compactionAbortAttempted = false;
+      let streamingAbortAttempted = false;
+      for (let attempt = 0; session && attempt < 3; attempt += 1) {
+        if (session.isCompacting && !compactionAbortAttempted) {
+          compactionAbortAttempted = true;
+          try {
+            session.abortCompaction();
+          } catch (error) {
+            abort = "failed";
+            details.push(safeErrorSummary(error));
+          }
         }
+        if (session.isStreaming && !streamingAbortAttempted) {
+          streamingAbortAttempted = true;
+          const outcome = await Promise.resolve().then(() => session.abort()).then(
+            () => ({ state: "succeeded" as const }),
+            (error: unknown) => ({ state: "failed" as const, detail: safeErrorSummary(error) }),
+          );
+          if (outcome.state === "failed") {
+            abort = "failed";
+            details.push(outcome.detail);
+          }
+        }
+        await Promise.allSettled([...this.promptOperations]);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (!session.isCompacting) compactionAbortAttempted = false;
+        if (!session.isStreaming) streamingAbortAttempted = false;
+        if (!session.isCompacting && !session.isStreaming && this.promptOperations.size === 0) break;
       }
-      await Promise.allSettled(promptOperations);
+      if (session && (session.isCompacting || session.isStreaming || this.promptOperations.size > 0)) {
+        abort = "failed";
+        details.push("Worker session did not become quiescent after shutdown and abort.");
+      }
       const sessionIdle = abort === "succeeded" && (!session || (session.isIdle !== false && !session.isCompacting && this.promptOperations.size === 0));
 
       // Disposal follows, and never bypasses, the real prompt/compaction/idle boundary.

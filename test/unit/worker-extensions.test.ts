@@ -17,6 +17,9 @@ it("collects synchronous, valid, uniquely named worker extension registrations",
     collector.register({ protocolVersion: 1, name: "invalid name", factory: ignoredFactory, tools: [] });
     collector.register({ protocolVersion: 1, name: "missing-factory", tools: [] });
     collector.register({ protocolVersion: 1, name: "bad-tools", factory: ignoredFactory, tools: [""] });
+    const sparseTools: string[] = [];
+    sparseTools.length = 1;
+    collector.register({ protocolVersion: 1, name: "sparse-tools", factory: ignoredFactory, tools: sparseTools });
     collector.register({ protocolVersion: 1, name: "reserved-tool", factory: ignoredFactory, tools: ["bash"] });
     collector.register({ protocolVersion: 1, name: "colliding-tool", factory: ignoredFactory, tools: ["compact_and_continue"] });
     collector.register({ protocolVersion: 2, name: "future-protocol", factory: ignoredFactory, tools: [] });
@@ -28,7 +31,7 @@ it("collects synchronous, valid, uniquely named worker extension registrations",
   assert.equal(result.registrations[0]?.name, "compact-warning");
   assert.equal(result.registrations[0]?.factory, firstFactory);
   assert.deepEqual(result.registrations[0]?.tools, ["compact_and_continue"]);
-  assert.equal(result.issues.length, 7);
+  assert.equal(result.issues.length, 8);
   assert.equal(Object.isFrozen(result), true);
   assert.equal(Object.isFrozen(result.registrations), true);
   assert.equal(Object.isFrozen(result.registrations[0]), true);

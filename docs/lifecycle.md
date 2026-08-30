@@ -17,7 +17,7 @@ Pi-managed retry/backoff remains within the accepted run and never resets its ab
 
 pi-subagent controls a trusted Pi 0.84.2 `AgentSession` and its currently active model/tool work. It is not an OS sandbox.
 
-One exact worker-generation cleanup lease owns factory/start settlement, every already-started `AgentSession.prompt` preflight and full accepted operation, manual/native compaction, `AgentSession.abort()`, active tool promises/listeners, and disposal. Routing detaches immediately. Cleanup invalidates prompt admission first, joins each preflight, and rejects late acceptance at Pi 0.84.2's synchronous `preflightResult(true)` boundary before `_runAgentPrompt` can start. It aborts active compaction, aborts a streaming session, and then joins every admitted prompt through its extension-settlement boundary before disposal. A runner can report non-streaming while an async `agent_settled` extension handler is still retaining that prompt, so `isStreaming` alone is never quiescence proof. Active tool IDs/names remain pending diagnostics until the full boundary. Cleanup releases only when:
+One exact worker-generation cleanup lease owns factory/start settlement, every already-started `AgentSession.prompt` preflight and full accepted operation, manual/native compaction, `AgentSession.abort()`, active tool promises/listeners, and disposal. Routing detaches immediately. Cleanup invalidates prompt admission first, joins each preflight, and rejects late acceptance at Pi 0.84.2's synchronous `preflightResult(true)` boundary before `_runAgentPrompt` can start. It emits exactly one `session_shutdown`, aborts active compaction and streaming work, joins every admitted prompt through its extension-settlement boundary, and rechecks for work created during settlement before disposal. A runner can report non-streaming while an async `agent_settled` extension handler is still retaining that prompt, so `isStreaming` alone is never quiescence proof. Active tool IDs/names remain pending diagnostics until the full boundary. Cleanup releases only when:
 
 1. the exact factory/start operation settled;
 2. every started prompt preflight settled or was vetoed;
@@ -26,7 +26,7 @@ One exact worker-generation cleanup lease owns factory/start settlement, every a
 5. active tool calls/listeners settled; and
 6. session disposal succeeded.
 
-Opted-in worker extensions are explicitly lifecycle-bound in Pi `print` mode. If one starts a continuation run from an awaited `agent_settled` handler, Pi emits nested and outer settlement events; the worker tracks nested run depth and publishes only one worker-level settlement when the full run group reaches zero.
+Opted-in worker extensions are explicitly lifecycle-bound in Pi `print` mode. The worker records public AgentSession settlement but does not publish worker settlement until the tracked top-level prompt operation has resolved. This collapses nested extension runs and inner overflow compact-and-retry starts into one worker-level settlement without assuming a one-to-one count of low-level starts and public settlements. Mailbox enforcement therefore runs only after an opted-in compaction continuation has completed its retained prompt operation.
 
 The persisted compatibility field `quiescence` means only **Pi session/tool settlement**. It never claims that all OS descendants are absent. A completed ordinary Bash command such as `pwd`, `git status`, or a test suite is settled and does not permanently poison its worker generation.
 
