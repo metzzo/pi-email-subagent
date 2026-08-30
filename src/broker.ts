@@ -147,8 +147,10 @@ class LifecycleTimeoutError extends Error {
 }
 
 class FinalizedMainDeliveryError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, finalizationErrors: readonly string[] = []) {
+    super(finalizationErrors.length > 0
+      ? `${message}; route failure finalization also failed: ${finalizationErrors.join("; ")}`
+      : message);
     this.name = "FinalizedMainDeliveryError";
   }
 }
@@ -860,65 +862,117 @@ export class AgentBroker {
     }
   }
 
-  private noteOrdinaryMainPresentation(envelope: EmailEnvelope): void {
-    if (!envelope.inReplyTo) return;
+  private recordOrdinaryMainPresentation(envelope: EmailEnvelope): boolean {
+    if (!envelope.inReplyTo) return false;
     let changed = false;
     for (const window of this.mainWaitWindows) {
       if (!window.requestIds.has(envelope.inReplyTo)) continue;
-      window.ordinarilyPresented.add(envelope.inReplyTo);
-      if (envelope.priority === "high") window.highPresented = true;
-      changed = true;
+      if (!window.ordinarilyPresented.has(envelope.inReplyTo)) {
+        window.ordinarilyPresented.add(envelope.inReplyTo);
+        changed = true;
+      }
+      if (envelope.priority === "high" && !window.highPresented) {
+        window.highPresented = true;
+        changed = true;
+      }
     }
-    if (changed) this.emitChange();
+    return changed;
+  }
+
+  private async finalizeMainRouteFailure(
+    envelope: EmailEnvelope,
+    error: unknown,
+    ordinaryPresentationAccepted: boolean,
+    mayFailQueued: boolean,
+  ): Promise<string[]> {
+    const finalizationErrors: string[] = [];
+    const presentationChanged = ordinaryPresentationAccepted
+      ? this.recordOrdinaryMainPresentation(envelope)
+      : false;
+    const current = this.mailStore.get(envelope.id);
+    if (mayFailQueued && current?.deliveryState === "queued") {
+      try {
+        await this.failEnvelope(current, errorMessage(error));
+      } catch (finalizationError) {
+        finalizationErrors.push(errorMessage(finalizationError));
+      }
+    }
+    if (presentationChanged) {
+      try {
+        this.emitChange();
+      } catch (presentationError) {
+        finalizationErrors.push(errorMessage(presentationError));
+      }
+    }
+    return finalizationErrors;
+  }
+
+  private async transitionMainEnvelope(envelope: EmailEnvelope, generation?: number): Promise<void> {
+    const current = this.mailStore.get(envelope.id);
+    if (!current || current.deliveryState !== "queued" || this.disposed) return;
+    let collectionClaim: string | undefined;
+    let ordinaryPresentationAccepted = false;
+    let routeError: unknown;
+    try {
+      collectionClaim = current.priority === "high" ? undefined : this.claimCollection(current);
+      if (!collectionClaim && current.priority === "low" && !this.options.mainAdapter.isIdle()) return;
+      if (!collectionClaim) {
+        await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
+        ordinaryPresentationAccepted = true;
+        if (generation !== undefined) this.checkpoint(generation);
+      }
+      await this.mailStore.markDelivered([current.id]);
+      if (ordinaryPresentationAccepted && this.recordOrdinaryMainPresentation(current)) this.emitChange();
+    } catch (error) {
+      routeError = error;
+    }
+
+    const lifecycleCancelled = this.disposed || (generation !== undefined && this.cancelled(generation));
+    let finalizationErrors = routeError === undefined
+      ? []
+      : await this.finalizeMainRouteFailure(current, routeError, ordinaryPresentationAccepted, !lifecycleCancelled);
+    let releaseError: unknown;
+    if (collectionClaim) {
+      try {
+        this.releaseCollectionClaim(collectionClaim);
+      } catch (error) {
+        releaseError = error;
+      }
+    }
+    if (routeError === undefined && releaseError !== undefined) {
+      finalizationErrors = await this.finalizeMainRouteFailure(
+        current,
+        releaseError,
+        ordinaryPresentationAccepted,
+        !lifecycleCancelled,
+      );
+    } else if (releaseError !== undefined) {
+      finalizationErrors.push(errorMessage(releaseError));
+    }
+
+    const failure = routeError ?? releaseError;
+    if (failure !== undefined && !this.disposed) {
+      throw new FinalizedMainDeliveryError(errorMessage(failure), finalizationErrors);
+    }
   }
 
   private async routeMainEnvelope(envelope: EmailEnvelope): Promise<void> {
-    await this.withMailSerialization(async () => {
-      const current = this.mailStore.get(envelope.id);
-      if (!current || current.deliveryState !== "queued" || this.disposed) return;
-      const collectionClaim = current.priority === "high" ? undefined : this.claimCollection(current);
-      try {
-        if (!collectionClaim && current.priority === "low" && !this.options.mainAdapter.isIdle()) return;
-        if (!collectionClaim) {
-          try {
-            await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
-          } catch (error) {
-            if (this.disposed) return;
-            const failure = errorMessage(error);
-            await this.failEnvelope(current, failure);
-            throw new FinalizedMainDeliveryError(failure);
-          }
-        }
-        await this.mailStore.markDelivered([current.id]);
-        if (!collectionClaim) this.noteOrdinaryMainPresentation(current);
-      } finally {
-        if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
-      }
-    });
+    await this.withMailSerialization(() => this.transitionMainEnvelope(envelope));
   }
 
   private async flushQueuedMainMailLocked(generation?: number): Promise<void> {
     for (const snapshot of this.queuedMainMail()) {
       if (generation !== undefined) this.checkpoint(generation);
       if (this.disposed) return;
-      const email = this.mailStore.get(snapshot.id);
-      if (!email || email.deliveryState !== "queued") continue;
-      const collectionClaim = email.priority === "high" ? undefined : this.claimCollection(email);
       try {
-        if (!collectionClaim && email.priority === "low" && !this.options.mainAdapter.isIdle()) continue;
-        if (!collectionClaim) {
-          await this.options.mainAdapter.deliver({ envelope: email, formatted: formatEmail(email), triggerTurn: true });
-          if (generation !== undefined) this.checkpoint(generation);
-        }
-        await this.mailStore.markDelivered([email.id]);
-        if (!collectionClaim) this.noteOrdinaryMainPresentation(email);
+        await this.transitionMainEnvelope(snapshot, generation);
       } catch (error) {
         if (generation !== undefined && this.cancelled(generation)) throw error;
         if (this.disposed) return;
-        await this.failEnvelope(email, errorMessage(error));
-        this.options.mainAdapter.notifyFailure(`Queued email ${email.id} could not be delivered to main: ${errorMessage(error)}`);
-      } finally {
-        if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
+        const state = this.mailStore.get(snapshot.id)?.deliveryState ?? "missing";
+        this.options.mainAdapter.notifyFailure(
+          `Queued email ${snapshot.id} main route failed with canonical state ${state}: ${errorMessage(error)}`,
+        );
       }
     }
   }

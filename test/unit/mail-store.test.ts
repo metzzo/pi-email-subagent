@@ -169,6 +169,44 @@ describe("durable mail store", () => {
     assert.equal(restored.get("mail_original")?.answeredBy, "mail_reply_retry");
   });
 
+  it("keeps an answered delivered reply terminal when a stale failure arrives and reloads late journal events coherently", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-reply-terminal-"));
+    const path = join(root, "mail.jsonl");
+    const store = new MailStore(path);
+    await store.init();
+    const original = email("mail_terminal_original");
+    await store.accept(original);
+    await store.markDelivered([original.id]);
+    const reply: EmailEnvelope = {
+      ...email("mail_terminal_reply"),
+      from: original.to,
+      to: original.from,
+      subject: `Re: [${original.id}] ${original.subject}`,
+      kind: "reply",
+      inReplyTo: original.id,
+      requiresResponse: false,
+    };
+    await store.reserveReply(reply, original.id);
+    await store.markDelivered([reply.id]);
+    await store.markFailed(reply.id, "stale failure after delivered commit");
+    assert.equal(store.get(reply.id)?.deliveryState, "delivered");
+    assert.equal(store.get(original.id)?.answeredBy, reply.id);
+    const beforeLateEvents = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(beforeLateEvents.some((event) => event.type === "email.failed" && event.id === reply.id), false);
+
+    const at = new Date().toISOString();
+    await appendFile(path, [
+      JSON.stringify({ type: "email.failed", id: reply.id, at, error: "late persisted failure" }),
+      JSON.stringify({ type: "email.reply_released", id: original.id, replyId: reply.id, at, error: "late release" }),
+      "",
+    ].join("\n"));
+    const restored = new MailStore(path);
+    await restored.init();
+    assert.equal(restored.get(reply.id)?.deliveryState, "delivered");
+    assert.equal(restored.get(original.id)?.answeredBy, reply.id);
+    assert.equal(restored.get(original.id)?.replyReservedBy, undefined);
+  });
+
   it("durably cancels an abandoned obligation without fabricating an answer", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
     const path = join(root, "mail.jsonl");

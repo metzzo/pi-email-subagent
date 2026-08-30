@@ -284,6 +284,8 @@ export class MailStore {
     if (event.type === "email.failed") {
       if (email.deliveryState === "cancelled") return;
       if (email.deliveryState === "failed" && email.error === event.error) return;
+      const original = email.kind === "reply" && email.inReplyTo ? this.emails.get(email.inReplyTo) : undefined;
+      if (email.kind === "reply" && (email.deliveryState === "delivered" || original?.answeredBy === email.id)) return;
       if (email.answeredAt) throw new Error(`Cannot fail answered email ${email.id}.`);
       email.deliveryState = "failed";
       email.error = event.error;
@@ -323,6 +325,7 @@ export class MailStore {
       return;
     }
     if (event.type === "email.reply_released") {
+      if (email.answeredBy === event.replyId) return;
       if (!email.replyReservedBy && !email.answeredAt) return;
       if (email.replyReservedBy !== event.replyId) {
         throw new Error(`Reply ${event.replyId} does not hold reservation for ${email.id}.`);
@@ -438,11 +441,12 @@ export class MailStore {
       const email = this.emails.get(id);
       if (!email) throw new Error(`Unknown email ${id}.`);
       if (email.deliveryState === "failed" || email.deliveryState === "cancelled") return [];
+      const original = email.kind === "reply" && email.inReplyTo ? this.emails.get(email.inReplyTo) : undefined;
+      if (email.kind === "reply" && (email.deliveryState === "delivered" || original?.answeredBy === email.id)) return [];
       const at = nowIso();
       const events: MailEvent[] = [{ type: "email.failed", id, at, error }];
-      if (email.kind === "reply" && email.inReplyTo) {
-        const original = this.emails.get(email.inReplyTo);
-        if (original?.replyReservedBy === email.id && !original.answeredAt) {
+      if (original && email.kind === "reply") {
+        if (original.replyReservedBy === email.id && !original.answeredAt) {
           events.push({ type: "email.reply_released", id: original.id, replyId: email.id, at, error });
         }
       }
