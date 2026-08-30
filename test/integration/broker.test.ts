@@ -121,7 +121,14 @@ describe("AgentBroker end-to-end routing", () => {
 
   it("computes a conservative per-model envelope budget", () => {
     assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 128_000, maxTokens: 32_000 }), 24_000);
-    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 1_000, maxTokens: 1_000 }), 0);
+    // Providers that keep maxTokens in lockstep with contextWindow (uncapped
+    // output clamped downstream, e.g. kimi-coding) must not get a zero budget:
+    // zero rejects every envelope and bricks the whole mail path.
+    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 1_000, maxTokens: 1_000 }), 250);
+    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 1_048_576, maxTokens: 1_048_576 }), 262_144);
+    // Truly unknown metadata stays fail-closed.
+    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 0, maxTokens: 0 }), 0);
+    assert.equal(conservativeModelEnvelopeBudget({ contextWindow: Number.NaN, maxTokens: 32_000 }), 0);
   });
 
   it("rejects an envelope that cannot fit the selected model budget before journaling", async () => {

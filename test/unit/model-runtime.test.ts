@@ -28,14 +28,18 @@ const model = {
 function sourceRegistry(
   status: CredentialStatus = { configured: true, source: "stored" },
   sourceModel: Model<any> = model,
-  registered: "safe" | "unsafe" | Provider | undefined = undefined,
+  registered: "safe" | "unsafe" | "unsafe-headers" | "oauth" | Provider | undefined = undefined,
 ): ModelRegistry {
   const native = typeof registered === "object" ? registered : undefined;
   const config = registered === "unsafe"
-    ? { oauth: { name: "dynamic" } }
-    : registered === "safe"
-      ? { api: "custom", baseUrl: "https://example.invalid", apiKey: "$FIXTURE_KEY", streamSimple() {} }
-      : undefined;
+    ? { refreshModels: async () => [] }
+    : registered === "unsafe-headers"
+      ? { headers: { authorization: "dynamic" } }
+      : registered === "oauth"
+        ? { api: "custom", baseUrl: "https://example.invalid", apiKey: "$FIXTURE_KEY", streamSimple() {}, oauth: { name: "fixture oauth" } }
+        : registered === "safe"
+          ? { api: "custom", baseUrl: "https://example.invalid", apiKey: "$FIXTURE_KEY", streamSimple() {} }
+          : undefined;
   return {
     getAll: () => [sourceModel],
     getRegisteredProviderIds: () => registered ? [sourceModel.provider] : [],
@@ -211,8 +215,28 @@ describe("worker model runtime", () => {
       {},
       async () => { created = true; return targetRuntime(); },
     );
-    await assert.rejects(factory.create("builtin-provider", "model-a"), /dynamic OAuth.*cannot be proven self-contained.*no email was accepted/i);
+    await assert.rejects(factory.create("builtin-provider", "model-a"), /dynamic catalog.*cannot be proven self-contained.*no email was accepted/i);
     assert.equal(created, false, "dynamic hooks are not replayed into a worker runtime");
+
+    const headerFactory = new WorkerRuntimeFactory(
+      sourceRegistry(undefined, model, "unsafe-headers"),
+      {},
+      async () => { created = true; return targetRuntime(); },
+    );
+    await assert.rejects(headerFactory.create("builtin-provider", "model-a"), /dynamic catalog.*cannot be proven self-contained.*no email was accepted/i);
+  });
+
+  it("accepts a configured provider whose only dynamic feature is OAuth login/refresh config", async () => {
+    // kimi-coding shape: configured provider with stored OAuth credentials and
+    // no header/catalog policy. The post-registration availability check and
+    // credential-source equivalence are the gates.
+    const snapshot = await new WorkerRuntimeFactory(
+      sourceRegistry(undefined, model, "oauth"),
+      {},
+      async () => targetRuntime(),
+    ).create("builtin-provider", "model-a");
+    assert.equal(snapshot.model.id, "model-a");
+    assert.ok(Object.isFrozen(snapshot.model));
   });
 
   it("rejects every unsafe native provider policy before worker runtime creation or hook execution", async () => {

@@ -198,13 +198,21 @@ export class WorkerRuntimeFactory {
     if (registered?.kind === "native") assertStaticNativeProvider(providerId, registered.provider);
     if (registered?.kind === "configured") {
       const config = registered.config;
-      if (config.oauth || config.refreshModels
+      // OAuth login/refresh configuration is allowed for configured providers:
+      // the worker runtime is created in this process with the same auth.json
+      // path, so stored credentials resolve identically and the provider's
+      // closures stay valid. The post-registration `getAvailable` check and
+      // credential-source equivalence below remain the actual gates. Dynamic
+      // catalog refresh and header policy stay fail-closed (unprovable
+      // provenance). Request-mutating main-extension hooks are not captured
+      // for any route; see README's provider-readiness contract.
+      if (config.refreshModels
         || (config.headers && Object.keys(config.headers).length > 0)
         || config.models?.some((candidate) => candidate.headers && Object.keys(candidate.headers).length > 0)) {
         throw new ProviderReadinessError(
           providerId,
           "registered-provider-policy-unavailable",
-          `Provider ${providerId} depends on dynamic OAuth/catalog/header policy that cannot be proven self-contained for an isolated Pi 0.84.2 worker; no email was accepted.`,
+          `Provider ${providerId} depends on dynamic catalog/header policy that cannot be proven self-contained for an isolated Pi 0.84.2 worker; no email was accepted.`,
         );
       }
     }

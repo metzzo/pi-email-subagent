@@ -63,11 +63,19 @@ import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverM
 export const MAX_REPLY_WAIT_MS = 3_600_000;
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
 
-/** Conservative byte budget: reserve declared output and 75% of remaining context for system/history/token-estimation error. */
+/**
+ * Conservative byte budget: reserve declared output and 75% of remaining context
+ * for system/history/token-estimation error. Providers that intentionally keep
+ * `maxTokens` in lockstep with `contextWindow` (uncapped output, clamped per
+ * request downstream) get a window-scaled budget instead of zero; returning 0
+ * here rejects every envelope and silently bricks the whole mail path. Truly
+ * unknown metadata (non-positive/non-integer window) stays fail-closed at 0.
+ */
 export function conservativeModelEnvelopeBudget(model: { contextWindow: number; maxTokens: number }): number {
   if (!Number.isSafeInteger(model.contextWindow) || !Number.isSafeInteger(model.maxTokens)
-    || model.contextWindow <= 0 || model.maxTokens < 0 || model.maxTokens >= model.contextWindow) return 0;
-  return Math.floor((model.contextWindow - model.maxTokens) / 4);
+    || model.contextWindow <= 0 || model.maxTokens < 0) return 0;
+  const outputReserve = model.maxTokens >= model.contextWindow ? 0 : model.maxTokens;
+  return Math.floor((model.contextWindow - outputReserve) / 4);
 }
 const ARCHIVE_BLOCKER_ID_LIMIT = 5;
 const MAX_WORKER_EPOCH_TOOLS = MAX_CONFIG_PROFILE_TOOLS;

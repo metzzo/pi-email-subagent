@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 Initial `0.1.0` release candidate (unpublished).
 
+### Fixed
+
+- Models whose provider keeps `maxTokens` in lockstep with `contextWindow` (uncapped output clamped per request, e.g. kimi-coding's K3) no longer get a zero context-safe envelope budget, which rejected every email and made those models unusable as subagents. Uncapped-output metadata now yields a window-scaled budget; only truly unknown metadata (non-positive/non-integer context window) stays fail-closed at zero.
+- Configured providers whose only dynamic feature is OAuth login/refresh configuration (e.g. kimi-coding) are now supported for isolated workers: the worker runtime is created in the same process with the same `auth.json`, provider closures stay valid, and the existing post-registration `getAvailable` availability check plus credential-source equivalence remain the gates. Header-bearing models and dynamic catalog (refresh) registrations still fail closed, as do native public providers with provider-wide headers, OAuth, refresh, or filter hooks. Request-mutating main-extension hooks (`before_provider_headers`/`before_provider_request`) are now documented as not captured for any route.
+
 ### Changed
 
 - Added bounded protocol-v1 opt-in worker extension factories: ordinary global/project extension discovery remains disabled, declared tools are collision/reserved-name checked and verified after activation, worker lifecycle is explicitly bound in `print` mode, nested AgentSession settlements collapse to one worker settlement, and cleanup aborts compaction and joins full admitted prompt operations before certifying quiescence. This enables `pi-compact-warning` warnings, terminating handoffs, compaction, and steering continuations inside email workers.
