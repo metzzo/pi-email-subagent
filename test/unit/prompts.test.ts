@@ -167,7 +167,9 @@ describe("mail prompts", () => {
     assert.match(prompt, /ordinary presentation calls.*sendMessage.*may not have durably appended.*visible presentation/is);
     assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
     assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
-    assert.match(prompt, /collection provides at most one live presentation.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
+    assert.match(prompt, /collection provides at most one live body surface.*active live race.*collector claims first/is);
+    assert.match(prompt, /ordinary presentation wins.*without.*reply body.*fresh deliberate rejoin/is);
+    assert.match(prompt, /Pi 0\.84\.2.*no staged tool-result append receipt/is);
     assert.match(prompt, /not a crash-proof exactly-once presentation guarantee/i);
     assert.match(prompt, /continue useful work or end the turn/i);
     assert.match(prompt, /identity-capacity recovery.*reuse.*relevant existing identity/is);

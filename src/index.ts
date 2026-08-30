@@ -54,7 +54,13 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   let effectiveConfig: SubagentConfig | undefined;
   let latestBrokerSnapshot: BrokerSnapshot | undefined;
   let generation = 0;
+  let mainFlushTimer: ReturnType<typeof setTimeout> | undefined;
   const conversationSources = new Map<string, ConversationSource>();
+
+  const cancelMainFlush = (): void => {
+    if (mainFlushTimer) clearTimeout(mainFlushTimer);
+    mainFlushTimer = undefined;
+  };
 
   const recordedConversationPreview = (address: string): string | undefined => {
     const source = conversationSources.get(address.toLowerCase());
@@ -251,6 +257,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    cancelMainFlush();
     generation += 1;
     const myGeneration = generation;
     currentContext = ctx;
@@ -378,14 +385,19 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    const current = broker;
-    if (!current) return;
-    try {
-      await current.flushQueuedMainMail();
-    } catch (error) {
-      if (broker === current) ctx.ui.notify(`Could not deliver queued main mail: ${errorMessage(error)}`, "error");
-    }
+  pi.on("agent_settled", (_event, ctx) => {
+    if (mainFlushTimer || !broker) return;
+    const expectedGeneration = generation;
+    const expectedBroker = broker;
+    mainFlushTimer = setTimeout(() => {
+      mainFlushTimer = undefined;
+      if (generation !== expectedGeneration || broker !== expectedBroker || !ctx.isIdle()) return;
+      void expectedBroker.flushQueuedMainMail().catch((error) => {
+        if (generation === expectedGeneration && broker === expectedBroker) {
+          ctx.ui.notify(`Could not deliver queued main mail: ${errorMessage(error)}`, "error");
+        }
+      });
+    }, 0);
   });
 
   pi.on("model_select", async (event) => {
@@ -402,6 +414,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async () => {
+    cancelMainFlush();
     generation += 1;
     const current = broker;
     broker = undefined;

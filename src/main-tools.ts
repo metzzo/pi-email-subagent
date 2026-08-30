@@ -12,8 +12,8 @@ import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 const errorMessage = safeErrorSummary;
 const { Type } = TypeBox;
 const { Text } = PiTui;
-const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. A low-priority reply that arrives while main is busy stays broker-queued: a later collector may claim it, otherwise it is presented at Pi agent_settled. Main-idle low mail and high-priority steering remain prompt. Once ordinary presentation calls sendMessage, Pi 0.84.2 exposes no durable append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
-const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live presentation. Pi 0.84.2 exposes no staged tool-result append receipt, so a process crash can leave the mail journal answered before this exact tool result is durably present in the main session. Recover by inspecting Conversation/mail and rejoining the stable request ID; this is not a crash-proof exactly-once guarantee.";
+const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. A low-priority reply that arrives while main is busy stays broker-queued: a later collector may claim it, otherwise it is presented after Pi agent_settled. Main-idle low mail and high-priority steering remain prompt. Once ordinary presentation calls sendMessage, Pi 0.84.2 exposes no durable append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
+const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live body surface for a queued reply in this active race. If this collector claims first, it returns the reply without ordinary presentation. If ordinary presentation wins, this wait returns status without that reply body; a later deliberate rejoin may recover it. Pi 0.84.2 exposes no staged tool-result append receipt, so this is not a crash-proof exactly-once guarantee.";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
@@ -163,7 +163,7 @@ export function createMainCoordinationTools(
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
-      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. A single wait may last up to 3600 seconds and returns early when all requests become terminal. Returns completed and pending results together. Collection suppresses a separate live turn and is at-most-one live presentation, not crash-proof exactly once: Pi 0.84.2 has no staged tool-result append receipt. After a pending timeout, late replies remain durable and ordinary main presentation is attempted without a durable append receipt.",
+      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. A single wait may last up to 3600 seconds and returns early when all requests become terminal. Returns completed and pending results together. For a queued reply, collection suppresses ordinary presentation only when this active wait claims first. If ordinary presentation wins, this wait omits that reply body; correlated high priority also ends a multi-ID wait partial promptly. A later deliberate rejoin may recover an answered reply. Pi 0.84.2 has no staged tool-result or sendMessage append receipt, so this is not crash-proof exactly once.",
     promptSnippet: "Open a bounded observation window for replies to delegated email request IDs.",
     promptGuidelines: [
       "Use request IDs returned by send_email; never invent IDs.",

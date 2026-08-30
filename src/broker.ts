@@ -227,6 +227,13 @@ interface ActiveToolCall {
   toolName: string;
 }
 
+interface MainCollectionWindow {
+  requestIds: ReadonlySet<string>;
+  ordinarilyPresented: Set<string>;
+  highPresented: boolean;
+  notify?: () => void;
+}
+
 interface ToolLifecycleState {
   worker: WorkerTransport;
   watchdogGeneration?: number;
@@ -276,6 +283,7 @@ export class AgentBroker {
   private readonly changeListeners = new Set<() => void>();
   private readonly collectingRequestIds = new Map<string, number>();
   private readonly collectionClaims = new Map<string, number>();
+  private readonly mainCollectionWindows = new Set<MainCollectionWindow>();
   private readonly pendingWorkPersists = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly watchdogs = new Map<string, WatchdogEntry>();
   private readonly toolLifecycles = new Map<string, ToolLifecycleState>();
@@ -834,17 +842,45 @@ export class AgentBroker {
     return sortMail(queued);
   }
 
+  private validateMainQueueCapacity(envelope: EmailEnvelope): void {
+    const queued = this.queuedMainMail();
+    const bytes = queued.reduce(
+      (total, email) => total + byteLength(email.subject) + byteLength(email.message),
+      0,
+    );
+    const nextBytes = bytes + byteLength(envelope.subject) + byteLength(envelope.message);
+    if (queued.length >= this.options.config.maxQueuedMessages || nextBytes > this.options.config.maxQueuedBytes) {
+      throw new Error(`Mailbox queue for main is full; wait for queued main mail to be collected or presented.`);
+    }
+  }
+
+  private noteOrdinaryMainPresentation(envelope: EmailEnvelope): void {
+    if (!envelope.inReplyTo) return;
+    for (const window of this.mainCollectionWindows) {
+      if (!window.requestIds.has(envelope.inReplyTo)) continue;
+      window.ordinarilyPresented.add(envelope.inReplyTo);
+      if (envelope.priority === "high") window.highPresented = true;
+      window.notify?.();
+    }
+  }
+
   private async routeMainEnvelope(envelope: EmailEnvelope): Promise<void> {
-    await this.withMailAdmission(async () => {
+    await this.withMailSerialization(async () => {
       const current = this.mailStore.get(envelope.id);
-      if (!current || current.deliveryState !== "queued") return;
-      const collectionClaim = this.claimCollection(current);
+      if (!current || current.deliveryState !== "queued" || this.disposed) return;
+      const collectionClaim = current.priority === "high" ? undefined : this.claimCollection(current);
       try {
         if (!collectionClaim && current.priority === "low" && !this.options.mainAdapter.isIdle()) return;
         if (!collectionClaim) {
-          await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
+          try {
+            await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
+          } catch (error) {
+            if (this.disposed) return;
+            throw error;
+          }
         }
         await this.mailStore.markDelivered([current.id]);
+        if (!collectionClaim) this.noteOrdinaryMainPresentation(current);
       } finally {
         if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
       }
@@ -854,9 +890,10 @@ export class AgentBroker {
   private async flushQueuedMainMailLocked(generation?: number): Promise<void> {
     for (const snapshot of this.queuedMainMail()) {
       if (generation !== undefined) this.checkpoint(generation);
+      if (this.disposed) return;
       const email = this.mailStore.get(snapshot.id);
       if (!email || email.deliveryState !== "queued") continue;
-      const collectionClaim = this.claimCollection(email);
+      const collectionClaim = email.priority === "high" ? undefined : this.claimCollection(email);
       try {
         if (!collectionClaim && email.priority === "low" && !this.options.mainAdapter.isIdle()) continue;
         if (!collectionClaim) {
@@ -864,8 +901,10 @@ export class AgentBroker {
           if (generation !== undefined) this.checkpoint(generation);
         }
         await this.mailStore.markDelivered([email.id]);
+        if (!collectionClaim) this.noteOrdinaryMainPresentation(email);
       } catch (error) {
         if (generation !== undefined && this.cancelled(generation)) throw error;
+        if (this.disposed) return;
         await this.failEnvelope(email, errorMessage(error));
         this.options.mainAdapter.notifyFailure(`Queued email ${email.id} could not be delivered to main: ${errorMessage(error)}`);
       } finally {
@@ -1059,14 +1098,18 @@ export class AgentBroker {
     }
   }
 
+  private async withMailSerialization<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.mailAdmissionTail.catch(() => undefined).then(operation);
+    this.mailAdmissionTail = run.then(() => undefined, () => undefined);
+    return this.trackInFlight(run, "mail-serialization");
+  }
+
   private async withMailAdmission<T>(operation: () => Promise<T>): Promise<T> {
     // Admission is decided when the caller joins the existing serialization
     // tail. Operations accepted before shutdown retain broker ownership while
     // queued behind an earlier journal/presentation transition.
     this.assertActive();
-    const run = this.mailAdmissionTail.catch(() => undefined).then(operation);
-    this.mailAdmissionTail = run.then(() => undefined, () => undefined);
-    return this.trackInFlight(run, "mail-serialization");
+    return this.withMailSerialization(operation);
   }
 
   private trackInFlight<T>(operation: Promise<T>, label: string): Promise<T> {
@@ -1462,7 +1505,8 @@ export class AgentBroker {
           const steersImmediately = !toMain
             && input.priority === "high"
             && Boolean(currentWorker?.getSnapshot().isStreaming);
-          if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
+          if (toMain && input.priority === "low") this.validateMainQueueCapacity(envelope);
+          else if (!toMain && !steersImmediately) this.validateQueueCapacity(to, input);
           // This is the final synchronous pre-append linearization check. Once
           // accept/reserveReply is invoked, journal ownership continues even if
           // the caller aborts while the append is pending.
@@ -2900,11 +2944,11 @@ export class AgentBroker {
     return requestIds.some((id) => (this.collectionClaims.get(id) ?? 0) > 0);
   }
 
-  private waitItem(requestId: string): ReplyWaitItem {
+  private waitItem(requestId: string, omitReply = false): ReplyWaitItem {
     const request = this.mailStore.get(requestId);
     if (!request) return { requestId, state: "failed", error: `Unknown request ${requestId}.` };
     if (request.answeredAt) {
-      const reply = this.mailStore.getReplyFor(requestId);
+      const reply = omitReply ? undefined : this.mailStore.getReplyFor(requestId);
       return { requestId, state: "answered", request, ...(reply ? { reply } : {}) };
     }
     if (request.deliveryState === "failed") {
@@ -2947,6 +2991,11 @@ export class AgentBroker {
       if (!this.isMainIdentity(request.from)) throw new Error(`${id} was not sent by the main thread.`);
     }
 
+    const collectionWindow: MainCollectionWindow | undefined = collect
+      ? { requestIds: new Set(requestIds), ordinarilyPresented: new Set(), highPresented: false }
+      : undefined;
+    if (collectionWindow) this.mainCollectionWindows.add(collectionWindow);
+
     const incrementCollection = (): void => {
       if (!collect) return;
       for (const id of requestIds) this.collectingRequestIds.set(id, (this.collectingRequestIds.get(id) ?? 0) + 1);
@@ -2960,6 +3009,7 @@ export class AgentBroker {
       }
     };
     let collectionRegistered = false;
+    let collectedQueuedReply = false;
     if (collect) {
       const selected = new Set(requestIds);
       const queuedReplyIds = (): string[] => this.mailStore.list()
@@ -2981,12 +3031,26 @@ export class AgentBroker {
             incrementCollection();
             collectionRegistered = true;
             const ids = queuedReplyIds();
-            if (ids.length > 0) await this.mailStore.markDelivered(ids);
+            if (ids.length > 0) {
+              await this.mailStore.markDelivered(ids);
+              collectedQueuedReply = true;
+            }
           });
           this.emitChange();
         }
       } catch (error) {
         if (collectionRegistered) decrementCollection();
+        if (collectionWindow) this.mainCollectionWindows.delete(collectionWindow);
+        throw error;
+      }
+    }
+    if (collectedQueuedReply) {
+      try {
+        this.scheduleMailMaintenance();
+        this.publish();
+      } catch (error) {
+        if (collectionRegistered) decrementCollection();
+        if (collectionWindow) this.mainCollectionWindows.delete(collectionWindow);
         throw error;
       }
     }
@@ -3000,11 +3064,15 @@ export class AgentBroker {
         this.changeListeners.delete(check);
         signal?.removeEventListener("abort", abort);
         decrementCollection();
+        if (collectionWindow) {
+          delete collectionWindow.notify;
+          this.mainCollectionWindows.delete(collectionWindow);
+        }
       };
       const finish = (timedOut: boolean): void => {
         if (settled) return;
         settled = true;
-        const items = requestIds.map((id) => this.waitItem(id));
+        const items = requestIds.map((id) => this.waitItem(id, collectionWindow?.ordinarilyPresented.has(id)));
         cleanup();
         resolve({ complete: items.every((item) => item.state !== "pending"), timedOut, items });
       };
@@ -3014,6 +3082,10 @@ export class AgentBroker {
         // so no reply is suppressed after its collector disappears.
         if (this.hasCollectionClaim(requestIds)) return;
         const terminal = requestIds.map((id) => this.waitItem(id)).every((item) => item.state !== "pending");
+        if (collectionWindow?.highPresented) {
+          finish(false);
+          return;
+        }
         if (requestedFinish === "abort") {
           finish(false);
           return;
@@ -3034,6 +3106,7 @@ export class AgentBroker {
         check();
       };
       this.changeListeners.add(check);
+      if (collectionWindow) collectionWindow.notify = check;
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) return abort();
       timer = setTimeout(() => {

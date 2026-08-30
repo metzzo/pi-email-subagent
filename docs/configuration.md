@@ -19,8 +19,8 @@ Project values merge over global values, which merge over the defaults below. In
 | `maxSubjectBytes` | `512` | 1 B–8 KB | `send_email` subject size (replies get +64 for the prefix) |
 | `maxMailsPerMinute` | `60` | 1–10000 | Global send rate (sliding window) |
 | `maxMailsPerSenderPerMinute` | `30` | 1–10000 | Per-sender send rate |
-| `maxQueuedMessages` | `256` | 1–10000 | Queued inbound per recipient |
-| `maxQueuedBytes` | `4194304` | 1 B–64 MB | Queued inbound bytes per recipient |
+| `maxQueuedMessages` | `256` | 1–10000 | Queued inbound per worker, or deferred low main mail across all main aliases |
+| `maxQueuedBytes` | `4194304` | 1 B–64 MB | Queued inbound bytes per worker, or deferred low main mail across all main aliases |
 | `maxBatchMessages` | `32` | 1–1024 | Emails per worker prompt batch |
 | `maxBatchBytes` | `524288` | 1 B–512 KB | Formatted bytes per worker delivery batch; fetch/tool output is independently capped by Pi's 50 KB / 2000-line recommendation |
 | `maxRetainedEmails` | `10000` | 1–1000000 | Soft cap for retained envelopes; open obligations are never pruned |

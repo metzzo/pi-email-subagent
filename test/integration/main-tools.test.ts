@@ -44,8 +44,9 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   assert.equal(wait.executionMode, "sequential");
   assert.match(wait.description, /bounded (observation|collection) window/i);
   assert.match(wait.description, /up to 3600 seconds.*returns early/i);
-  assert.match(wait.description, /late replies remain durable.*ordinary main presentation is attempted.*without a durable append receipt/i);
-  assert.match(wait.description, /at-most-one live presentation.*not crash-proof exactly once.*no staged tool-result append receipt/i);
+  assert.match(wait.description, /active wait claims first.*ordinary presentation wins.*omits.*reply body/is);
+  assert.match(wait.description, /correlated high priority.*multi-ID wait partial.*later deliberate rejoin/is);
+  assert.match(wait.description, /no staged tool-result or sendMessage append receipt.*not crash-proof exactly once/is);
   const waitGuidelines = wait.promptGuidelines ?? [];
   assert.match(waitGuidelines.join("\n"), /do not.*rejoin.*keep.*alive/i);
   assert.match(waitGuidelines.join("\n"), /deliberate synchronous.*(collection|status).*window/i);
@@ -381,8 +382,8 @@ it("guides timed-out pending waits without changing exact structured results", a
   const rendered = await renderWait(pending);
   const text = (rendered.content[0] as { text: string }).text;
   assert.match(text, /Replies: timed out with pending work/);
-  assert.match(text, /at most one live presentation.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
-  assert.match(text, /mail journal answered.*before.*tool result.*durably present/is);
+  assert.match(text, /at most one live body surface.*collector claims first.*ordinary presentation wins/is);
+  assert.match(text, /later deliberate rejoin.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
   assert.match(text, /pending requests remain correlated/i);
   assert.match(text, /low-priority reply.*main is busy.*broker-queued.*later collector.*Pi agent_settled/is);
   assert.match(text, /ordinary presentation calls sendMessage.*no durable append acknowledgement/is);

@@ -362,16 +362,22 @@ function planMain(messages: readonly Message[]): Plan {
           : slow
             ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
             : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
-    const send = (to: string): ToolCallPlan => ({
+    const send = (to: string, body = message): ToolCallPlan => ({
       name: "send_email",
       arguments: {
         to,
         subject: "Verify e2e mailbox",
-        message,
+        message: body,
         priority,
         ...(lastText.includes("XHIGH") ? { effort: "xhigh" } : {}),
       },
     });
+    if (lastText.includes("MULTI BLOCKER")) {
+      return { toolCalls: [
+        send(MOCK_WORKER_ADDRESS, "SLOW 1000 REPLY HIGH: return the blocker through exact reply mail."),
+        send(MOCK_REVIEWER_ADDRESS, "SLOW 5000: keep the sibling request pending past the blocker."),
+      ] };
+    }
     if (lastText.includes("BOTH")) return { toolCalls: [send(MOCK_WORKER_ADDRESS), send(MOCK_REVIEWER_ADDRESS)] };
     if (lastText.includes("WORK")) return { toolCalls: [send(MOCK_WRITER_ADDRESS)] };
     if (lastText.includes("REVIEWER")) return { toolCalls: [send(MOCK_REVIEWER_ADDRESS)] };
@@ -484,7 +490,7 @@ function planWorker(messages: readonly Message[]): Plan {
           to: pair.from,
           subject: pair.replySubject,
           message: "Worker result: virtual email tools are send_email and fetch_emails.",
-          priority: "low",
+          priority: lastText.includes("REPLY HIGH") ? "high" : "low",
         },
       }));
       // "IGNORE" requests deliberately return visible final text without a

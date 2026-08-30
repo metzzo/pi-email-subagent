@@ -10,10 +10,12 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
+import { MailStore } from "../../src/mail-store.ts";
 import { PiRpcClient, type RpcLine } from "./helpers/rpc-client.ts";
 
 const MOCK_EXTENSION = resolve("test/e2e/helpers/mock-provider-extension.ts");
 const EXTENSION = resolve("src/index.ts");
+const SHUTDOWN_ON_SETTLED_EXTENSION = resolve("test/e2e/helpers/shutdown-on-settled-extension.ts");
 const WORKER_ADDRESS = "scout.e2e@mock-e2e.com";
 const REVIEWER_ADDRESS = "reviewer.e2e@mock-e2e.com";
 
@@ -24,14 +26,18 @@ interface Started {
   sessionFile?: string;
 }
 
-async function start(options: { config?: Record<string, unknown>; persistSession?: boolean } = {}): Promise<Started> {
+async function start(options: {
+  config?: Record<string, unknown>;
+  persistSession?: boolean;
+  beforeExtension?: string[];
+} = {}): Promise<Started> {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-e2e-agent-"));
   if (options.config) await writeFile(join(agentDir, "subagents.json"), JSON.stringify(options.config));
   const client = PiRpcClient.launch({
     cwd: process.cwd(),
     agentDir,
     model: "mock-e2e/mock-e2e",
-    extensions: [MOCK_EXTENSION, EXTENSION],
+    extensions: [MOCK_EXTENSION, ...(options.beforeExtension ?? []), EXTENSION],
     ...(options.persistSession ? { persistSession: true } : {}),
   });
   const state = await client.getState();
@@ -97,6 +103,19 @@ async function eventuallyRegistry(
 async function readJournal(agentDir: string, sessionId: string): Promise<any[]> {
   const raw = await readFile(join(agentDir, "subagents", sessionId, "mail.jsonl"), "utf8");
   return raw.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+async function readSessionEntries(sessionFile: string): Promise<Array<Record<string, any>>> {
+  return (await readFile(sessionFile, "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, any>);
+}
+
+function emailCustomEntries(entries: Array<Record<string, any>>, replyId?: string): Array<Record<string, any>> {
+  return entries.filter((entry) => entry.type === "custom_message"
+    && entry.customType === "pi-email-subagent.email"
+    && (replyId === undefined || entry.details?.id === replyId));
 }
 
 function isErrorResult(line: RpcLine): boolean {
@@ -168,7 +187,7 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
-  it("collects a reply accepted before the wait tool call without a later custom message", { timeout: 240_000 }, async () => {
+  it("collects a pre-wait reply with no duplicate custom message through observed final settlement", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionFile } = await start({ persistSession: true });
     try {
       assert.ok(sessionFile, "persisted main session file");
@@ -186,20 +205,121 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       await client.waitForSettlement(mark);
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 250));
 
-      const entries = (await readFile(sessionFile!, "utf8"))
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as Record<string, any>);
+      const entries = await readSessionEntries(sessionFile!);
       const collected = entries.filter((entry) => entry.type === "message"
         && entry.message?.role === "toolResult"
         && entry.message?.toolName === "wait_for_replies"
         && entry.message?.details?.result?.items?.some((item: any) => item.requestId === requestId && item.reply?.id === replyId));
-      const laterCustomMessages = entries.filter((entry) => entry.type === "message"
-        && entry.message?.role === "custom"
-        && entry.message?.customType === "pi-email-subagent.email"
-        && entry.message?.details?.id === replyId);
+      const duplicateCustomMessages = emailCustomEntries(entries, replyId);
       assert.equal(collected.length, 1, "the stable reply ID appears once in the wait tool result");
-      assert.equal(laterCustomMessages.length, 0, "the collected reply never appears later as a custom message");
+      assert.equal(duplicateCustomMessages.length, 0, "no duplicate custom message was observed through final settlement");
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes old settlement before deferred ordinary delivery and detects its persisted custom entry", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionFile } = await start({ persistSession: true });
+    try {
+      assert.ok(sessionFile, "persisted main session file");
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE LATE COLLECTOR NOWAIT");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "deferred ordinary send", 90_000, mark));
+      const requestId = sent.correlationId as string;
+      const firstCompletion = await client.waitFor(assistantText("E2E SENT"), "pre-delivery main completion", 90_000, mark);
+      const oldSettled = await client.waitForSettlement(mark, 90_000);
+      const delivered = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as { customType?: string; details?: { inReplyTo?: string } } | undefined)?.customType === "pi-email-subagent.email"
+          && (line.message as { details?: { inReplyTo?: string } }).details?.inReplyTo === requestId,
+        "deferred ordinary custom message",
+        90_000,
+        mark,
+      );
+      const deliveryIndex = client.events().indexOf(delivered);
+      assert.ok(client.events().indexOf(firstCompletion) < client.events().indexOf(oldSettled));
+      assert.ok(client.events().indexOf(oldSettled) < deliveryIndex, "the old public settled event precedes deferred delivery");
+      const replyId = (delivered.message as { details?: { id?: string } }).details?.id;
+      assert.ok(replyId);
+
+      await client.waitFor(assistantText("E2E REPLY SEEN"), "ordinary delivery run", 90_000, deliveryIndex);
+      const finalSettled = await client.waitFor(
+        (line) => line.type === "agent_settled",
+        "post-delivery final settled",
+        90_000,
+        deliveryIndex + 1,
+      );
+      assert.ok(client.events().indexOf(finalSettled) > deliveryIndex);
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250));
+
+      const persisted = emailCustomEntries(await readSessionEntries(sessionFile!), replyId);
+      assert.equal(persisted.length, 1, "the top-level custom_message parser detects known ordinary delivery");
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("cancels a pending settlement flush when real Pi requested shutdown wins", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId, sessionFile } = await start({
+      persistSession: true,
+      beforeExtension: [SHUTDOWN_ON_SETTLED_EXTENSION],
+    });
+    try {
+      assert.ok(sessionFile, "persisted main session file");
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE LATE COLLECTOR NOWAIT");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "shutdown-race send", 90_000, mark));
+      const requestId = sent.correlationId as string;
+      assert.equal(await client.waitForExit(), 0, client.stderr);
+
+      const store = new MailStore(join(agentDir, "subagents", sessionId, "mail.jsonl"));
+      await store.init();
+      const request = store.get(requestId);
+      const reply = store.list().find((email) => email.inReplyTo === requestId);
+      assert.ok(reply);
+      assert.equal(reply.deliveryState, "queued");
+      assert.equal(request?.replyReservedBy, reply.id);
+      assert.equal(emailCustomEntries(await readSessionEntries(sessionFile!), reply.id).length, 0);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("steers a high correlated reply, ends a multi-ID wait partial, and omits the duplicate body", { timeout: 240_000 }, async () => {
+    const { client, agentDir } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE MULTI BLOCKER");
+      const sends = await client.collect(toolEnd("send_email"), 2, "multi-blocker sends", 90_000, mark);
+      const sent = sends.map(sendResult);
+      const highRequestId = sent.find((result) => result.envelope.to === WORKER_ADDRESS)?.correlationId as string;
+      const slowRequestId = sent.find((result) => result.envelope.to === REVIEWER_ADDRESS)?.correlationId as string;
+      assert.ok(highRequestId);
+      assert.ok(slowRequestId);
+
+      const waitEnd = await client.waitFor(toolEnd("wait_for_replies"), "high partial collector", 90_000, mark);
+      const result = waitResult(waitEnd);
+      assert.equal(result.complete, false);
+      assert.equal(result.timedOut, false);
+      const high = result.items.find((item) => item.requestId === highRequestId);
+      const slow = result.items.find((item) => item.requestId === slowRequestId);
+      assert.equal(high?.state, "answered");
+      assert.equal(high?.reply, undefined);
+      assert.equal(slow?.state, "pending");
+      assert.doesNotMatch(toolText(waitEnd), /Worker result: virtual email tools/i);
+
+      const custom = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as { customType?: string; details?: { inReplyTo?: string } } | undefined)?.customType === "pi-email-subagent.email"
+          && (line.message as { details?: { inReplyTo?: string } }).details?.inReplyTo === highRequestId,
+        "high ordinary custom message",
+        90_000,
+        mark,
+      );
+      assert.match(String((custom.message as { details?: { message?: string } }).details?.message), /Worker result: virtual email tools/);
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });

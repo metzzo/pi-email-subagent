@@ -25,7 +25,7 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 - Sending to a `stopped` agent is accepted but stays queued (disposition `stopped`) until the agent is restarted. Sending to a known `failed` agent is also accepted and queued (disposition `failed`) without consulting current catalog/provider readiness and without routing to an attached worker or creating a replacement. Only an explicit `manage_agent restart` may recover the same failed identity; restart revalidates exact-address Pi session/tool cleanup and the persisted provider/model before delivering stable queued IDs. Sending to an `archived` agent restores it.
 - Mail to an address whose cleanup is unsettled is accepted under its stable ID and remains queued. That cleanup does not globally quarantine unrelated mutable identities; normal identity/run capacity limits still apply. A late successful cleanup settlement releases the exact-address hold without creating a second envelope or hidden replacement.
 - Sending to yourself (including main → main aliases) is rejected.
-- `low` mail is queued; `high` mail steers a streaming recipient immediately (and bypasses the per-recipient queue cap), otherwise it queues ahead of low mail. Low mail to busy main stays in the durable broker queue rather than becoming a Pi `followUp`: a correlated collector can claim it, otherwise it flushes at main `agent_settled`. Low main mail arriving while idle presents promptly, and high main steering is unchanged.
+- `low` mail is queued; `high` mail steers a streaming recipient immediately (and bypasses the queue cap), otherwise it queues ahead of low mail. Low mail to busy main stays in the durable broker queue rather than becoming a Pi `followUp`: a correlated collector can claim it, otherwise a one-shot macrotask after main `agent_settled` rechecks the same session/broker/idle state before presenting. A backlog may drain one low per settlement. Low main mail arriving while idle presents promptly. Main high steering is queue-limit exempt and remains immediate.
 - Replies are recognized solely by the subject shape `Re: [mail-id] …`. Subjects starting with `Re: [` that do not parse are rejected as malformed; plain subjects that merely start with `Re:` are valid new mail.
 
 ### Reply validation
@@ -45,7 +45,7 @@ Nested response-required delegation is fail-closed disabled for all subagents on
 - Subject: 512 bytes (+64 allowance for the reply prefix); no line breaks or control characters.
 - Message: 32 KB. After XML escaping, a single envelope must fit the context-safe tool payload budget (currently 48 KB and 1952 lines, or a lower configured `maxBatchBytes`) so it remains retrievable without truncating the task.
 - Rate: 60 mails/minute global, 30 mails/minute per sender (sliding window). Validation and abort-before-append failures are not charged. The tool AbortSignal is rechecked at the synchronous append/reservation boundary; after append begins, broker ownership continues.
-- Queue per recipient: 256 messages / 4 MB.
+- Queue per worker recipient: 256 messages / 4 MB. Deferred low main mail uses the same limits over one deduplicated aggregate of all current and historical main aliases; high main mail is exempt. Count/byte validation and append are serialized, including parallel sends through different aliases.
 
 ### Identity-capacity rejection and recovery
 
