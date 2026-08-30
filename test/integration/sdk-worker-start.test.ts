@@ -6,10 +6,12 @@ import { it } from "node:test";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
 import { WorkerSettingsSnapshot } from "../../src/settings-snapshot.ts";
 import type { AgentRecord } from "../../src/types.ts";
+import type { WorkerExtensionRegistration } from "../../src/worker-extensions.ts";
 
 function successfulStream(
   observed: SimpleStreamOptions[],
@@ -105,7 +107,7 @@ function workerRecord(model: Model<any>, address = `scout.sdk-start@${model.id}.
   };
 }
 
-it("constructs and disposes an isolated real AgentSession without recursively loading extensions", async () => {
+it("constructs and disposes an isolated real AgentSession with only explicit worker extensions", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-"));
   const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
   const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
@@ -113,7 +115,23 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
   const record = workerRecord(model);
   record.tools.splice(4, 0, "not_a_real_tool");
   const settingsSnapshot = WorkerSettingsSnapshot.capture(root, root, false);
-  const worker = new SdkWorker(runtime, undefined, settingsSnapshot);
+  const workerExtension: WorkerExtensionRegistration = {
+    protocolVersion: 1,
+    name: "compact-warning-probe",
+    tools: ["compact_and_continue"],
+    factory(pi) {
+      pi.registerTool({
+        name: "compact_and_continue",
+        label: "compact_and_continue",
+        description: "Worker extension probe.",
+        parameters: Type.Object({}),
+        async execute() {
+          return { content: [{ type: "text", text: "probe" }], details: {} };
+        },
+      });
+    },
+  };
+  const worker = new SdkWorker(runtime, undefined, settingsSnapshot, [workerExtension]);
   await worker.start({
     record,
     model,
@@ -130,6 +148,7 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
   assert.equal(snapshot.record.modelId, model.id);
   assert.equal(snapshot.record.tools.includes("send_email"), true);
   assert.equal(snapshot.record.tools.includes("fetch_emails"), true);
+  assert.equal(snapshot.record.tools.includes("compact_and_continue"), true);
   assert.equal(snapshot.record.tools.includes("not_a_real_tool"), false);
   assert.equal(snapshot.record.tools.includes("inspect_agent"), false);
   assert.equal(snapshot.record.tools.includes("wait_for_replies"), false);
@@ -138,6 +157,240 @@ it("constructs and disposes an isolated real AgentSession without recursively lo
   assert.ok(worker.getSessionFile());
   await worker.dispose();
   assert.equal(worker.getSessionFile(), snapshot.record.sessionFile);
+});
+
+it("loads an opted-in worker extension and delivers its steering message inside a subagent run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-steering-"));
+  const observed: SimpleStreamOptions[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  runtime.registerProvider("worker-extension-steering", {
+    name: "Worker Extension Steering",
+    baseUrl: "http://127.0.0.1:9/worker-extension-steering",
+    apiKey: "deterministic-test-key",
+    api: "worker-extension-steering",
+    models: [{
+      id: "steering-model", name: "Steering Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000,
+    }],
+    streamSimple: successfulStream(observed),
+  });
+  const model = runtime.getModel("worker-extension-steering", "steering-model");
+  assert.ok(model);
+  const registration: WorkerExtensionRegistration = {
+    protocolVersion: 1,
+    name: "steering-probe",
+    tools: [],
+    factory(pi) {
+      let delivered = false;
+      pi.on("turn_end", () => {
+        if (delivered) return;
+        delivered = true;
+        pi.sendMessage(
+          { customType: "worker-extension-probe", content: "SUBAGENT_STEERING_SENTINEL", display: true },
+          { deliverAs: "steer", triggerTurn: true },
+        );
+      });
+    },
+  };
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false), [registration]);
+  try {
+    await worker.start({
+      record: workerRecord(model, "scout.steering@steering-model.com"),
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "Exercise worker extension steering.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const settled = new Promise<void>((resolve) => {
+      const unsubscribe = worker.subscribe((event) => {
+        if (event.type === "settled") { unsubscribe(); resolve(); }
+      });
+    });
+    await worker.prompt("run the steering probe");
+    await settled;
+    assert.equal(observed.length, 2, "the steering message should trigger exactly one additional model turn");
+    const sessionFile = worker.getSessionFile();
+    assert.ok(sessionFile);
+    const customMessages = SessionManager.open(sessionFile).getBranch()
+      .filter((entry) => entry.type === "custom_message")
+      .map((entry) => (entry as any).content);
+    assert.deepEqual(customMessages, ["SUBAGENT_STEERING_SENTINEL"]);
+  } finally {
+    await worker.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("binds worker extension lifecycle and collapses nested AgentSession settlements into one worker settlement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-nested-settlement-"));
+  const observed: SimpleStreamOptions[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  runtime.registerProvider("worker-nested-settlement", {
+    name: "Worker Nested Settlement",
+    baseUrl: "http://127.0.0.1:9/worker-nested-settlement",
+    apiKey: "deterministic-test-key",
+    api: "worker-nested-settlement",
+    models: [{
+      id: "nested-model", name: "Nested Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000,
+    }],
+    streamSimple: successfulStream(observed),
+  });
+  const model = runtime.getModel("worker-nested-settlement", "nested-model");
+  assert.ok(model);
+  let sessionStarts = 0;
+  const registration: WorkerExtensionRegistration = {
+    protocolVersion: 1,
+    name: "nested-settlement-probe",
+    tools: [],
+    factory(pi) {
+      let triggered = false;
+      let releaseOuter: (() => void) | undefined;
+      pi.on("session_start", () => { sessionStarts += 1; });
+      pi.on("agent_settled", async () => {
+        if (releaseOuter) {
+          const release = releaseOuter;
+          releaseOuter = undefined;
+          release();
+          return;
+        }
+        if (triggered) return;
+        triggered = true;
+        await new Promise<void>((resolve) => {
+          releaseOuter = resolve;
+          pi.sendMessage(
+            { customType: "nested-settlement-probe", content: "continue once", display: true },
+            { deliverAs: "steer", triggerTurn: true },
+          );
+        });
+      });
+    },
+  };
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false), [registration]);
+  let settlements = 0;
+  worker.subscribe((event) => { if (event.type === "settled") settlements += 1; });
+  try {
+    await worker.start({
+      record: workerRecord(model, "scout.nested-settlement@nested-model.com"),
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "Exercise nested settlement.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    assert.equal(sessionStarts, 1, "explicit lifecycle binding should emit one session_start");
+    const settled = new Promise<void>((resolve) => {
+      const unsubscribe = worker.subscribe((event) => {
+        if (event.type === "settled") { unsubscribe(); resolve(); }
+      });
+    });
+    await worker.prompt("run nested settlement probe");
+    await settled;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(observed.length, 2, "the nested continuation should run exactly once");
+    assert.equal(settlements, 1, "nested and outer AgentSession settlements should collapse into one worker settlement");
+  } finally {
+    await worker.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("aborts compaction and joins the full admitted prompt before certifying worker cleanup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-compaction-cleanup-"));
+  await writeFile(join(root, "settings.json"), JSON.stringify({ compaction: { reserveTokens: 2_000, keepRecentTokens: 1_000 } }));
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  let allowCompaction = false;
+  let compactionSignal: AbortSignal | undefined;
+  let finishCompaction: (() => void) | undefined;
+  let compactionStarted!: () => void;
+  const compactionStart = new Promise<void>((resolve) => { compactionStarted = resolve; });
+  runtime.registerProvider("worker-compaction-cleanup", {
+    name: "Worker Compaction Cleanup",
+    baseUrl: "http://127.0.0.1:9/worker-compaction-cleanup",
+    apiKey: "deterministic-test-key",
+    api: "worker-compaction-cleanup",
+    models: [{
+      id: "compaction-model", name: "Compaction Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000,
+    }],
+    streamSimple: successfulStream([]),
+  });
+  const model = runtime.getModel("worker-compaction-cleanup", "compaction-model");
+  assert.ok(model);
+  const registration: WorkerExtensionRegistration = {
+    protocolVersion: 1,
+    name: "compaction-cleanup-probe",
+    tools: [],
+    factory(pi) {
+      let started = false;
+      pi.on("session_before_compact", async (event) => {
+        compactionSignal = event.signal;
+        compactionStarted();
+        await new Promise<void>((resolve) => { finishCompaction = resolve; });
+        return { cancel: true };
+      });
+      pi.on("agent_settled", async (_event, ctx) => {
+        if (!allowCompaction || started) return;
+        started = true;
+        await new Promise<void>((resolve) => {
+          ctx.compact({ customInstructions: "cleanup probe", onComplete: () => resolve(), onError: () => resolve() });
+        });
+      });
+    },
+  };
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false), [registration]);
+  try {
+    await worker.start({
+      record: workerRecord(model, "scout.compaction-cleanup@compaction-model.com"),
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "Exercise compaction cleanup.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const seeded = new Promise<void>((resolve) => {
+      const unsubscribe = worker.subscribe((event) => {
+        if (event.type === "settled") { unsubscribe(); resolve(); }
+      });
+    });
+    await worker.prompt("seed a prior turn for compaction");
+    await seeded;
+    allowCompaction = true;
+    await worker.prompt(`start compaction cleanup probe\n${"state ".repeat(4_000)}`);
+    await compactionStart;
+    const internal = worker as unknown as { session: { isCompacting: boolean }; promptOperations: Set<Promise<void>> };
+    assert.equal(internal.session.isCompacting, true);
+    assert.equal(internal.promptOperations.size, 1);
+    const cleanup = worker.cleanup();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(compactionSignal?.aborted, true, "cleanup should abort the active compaction signal");
+    assert.ok(finishCompaction);
+    finishCompaction();
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    const cleanupTimeout = new Promise<never>((_, reject) => {
+      cleanupTimer = setTimeout(() => reject(new Error("cleanup did not join the admitted prompt")), 1_000);
+    });
+    const report = await Promise.race([cleanup, cleanupTimeout]).finally(() => {
+      if (cleanupTimer) clearTimeout(cleanupTimer);
+    });
+    assert.equal(report.abort, "succeeded");
+    assert.equal(report.sessionIdle, true);
+    assert.equal(report.sessionDisposed, true);
+    assert.equal(report.quiescence, "verified");
+  } finally {
+    await worker.dispose().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 it("keeps native provider detail in the protected session while shared worker surfaces use one safe summary", async () => {

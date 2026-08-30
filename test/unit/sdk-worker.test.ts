@@ -62,6 +62,24 @@ describe("SDK worker failures", () => {
     assert.doesNotMatch(JSON.stringify(record.activity), /PRIVATE HEADER|PRIVATE PAYLOAD|authorization|rawPayload/);
   });
 
+  it("does not count Pi retry starts as nested prompt runs", () => {
+    const worker = new SdkWorker({} as never);
+    const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
+    const internal = worker as unknown as { record: typeof record; onSessionEvent(event: unknown): void };
+    internal.record = record;
+    const events: any[] = [];
+    worker.subscribe((event) => events.push(event));
+
+    internal.onSessionEvent({ type: "agent_start" });
+    internal.onSessionEvent({ type: "agent_end", messages: failedRun, willRetry: true });
+    internal.onSessionEvent({ type: "agent_start" });
+    internal.onSessionEvent({ type: "agent_end", messages: [], willRetry: false });
+    internal.onSessionEvent({ type: "agent_settled" });
+
+    assert.equal(events.filter((event) => event.type === "settled").length, 1);
+    assert.equal(record.state, "idle");
+  });
+
   it("sanitizes retry start/end detail before shared activity", () => {
     const worker = new SdkWorker({} as never);
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "running" } as any;
@@ -95,6 +113,7 @@ describe("SDK worker failures", () => {
     const events: any[] = [];
     worker.subscribe((event) => events.push(event));
 
+    internal.onSessionEvent({ type: "agent_start" });
     internal.onSessionEvent({ type: "auto_retry_end", success: false, attempt: 3, finalError: "fetch failed finally" });
     assert.equal(events.some((event) => event.type === "failure"), false);
     internal.onSessionEvent({ type: "agent_end", messages: failedRun, willRetry: false });
@@ -104,6 +123,7 @@ describe("SDK worker failures", () => {
     assert.equal(events.find((event) => event.type === "failure")?.error, "404 resource not found");
     assert.equal(record.state, "failed");
     assert.deepEqual(record.activity.map(({ kind, summary }: any) => ({ kind, summary })), [
+      { kind: "status", summary: "Agent run started" },
       { kind: "error", summary: "Pi agent retry ended after attempt 3: fetch failed finally" },
       { kind: "error", summary: "404 resource not found" },
       { kind: "status", summary: "Agent run failed" },

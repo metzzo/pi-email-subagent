@@ -22,6 +22,7 @@ import { formatUnanswered } from "./prompts.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
+import type { WorkerExtensionRegistration } from "./worker-extensions.ts";
 import { clone, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem, unknownWorkItem } from "./work-ledger.ts";
 
@@ -190,7 +191,12 @@ export class SdkWorker implements WorkerTransport {
   private cleanupPromise?: Promise<WorkerCleanupReport>;
   /** Preflight boundaries for every started AgentSession.prompt operation. */
   private readonly promptAdmissions = new Set<Promise<void>>();
+  /** Full accepted prompt operations, including awaited extension settlement handlers. */
+  private readonly promptOperations = new Set<Promise<void>>();
   private readonly activeToolCalls = new Map<string, string>();
+  private agentRunDepth = 0;
+  private awaitingAgentRetry = false;
+  private workerSettlementPending = false;
   private startGeneration = 0;
   private startOperation?: Promise<void>;
   private runFailure?: string;
@@ -200,6 +206,7 @@ export class SdkWorker implements WorkerTransport {
     private readonly modelRuntime: ModelRuntime,
     private readonly runtimeModel?: Model<any>,
     private readonly settingsSnapshot?: WorkerSettingsSnapshot,
+    private readonly workerExtensions: readonly WorkerExtensionRegistration[] = [],
   ) {}
 
   subscribe(listener: (event: WorkerEvent) => void): () => void {
@@ -258,6 +265,7 @@ export class SdkWorker implements WorkerTransport {
       agentDir: config.agentDir,
       settingsManager: settings,
       noExtensions: true,
+      extensionFactories: this.workerExtensions.map(({ name, factory }) => ({ name, factory })),
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -290,28 +298,63 @@ export class SdkWorker implements WorkerTransport {
     }
 
     const requestedTools = [...this.record.tools];
-    const { session } = await PiCodingAgent.createAgentSession({
+    const workerTools = [...requestedTools];
+    for (const registration of this.workerExtensions) {
+      for (const tool of registration.tools) {
+        if (!workerTools.includes(tool)) workerTools.push(tool);
+      }
+    }
+    const { session, extensionsResult } = await PiCodingAgent.createAgentSession({
       cwd: config.cwd,
       agentDir: config.agentDir,
       modelRuntime: this.modelRuntime,
       model: effectiveWorkerModel(config.model, this.runtimeModel),
       thinkingLevel: this.record.effort,
-      tools: this.record.tools,
+      tools: workerTools,
       customTools: [...createWorkerMailTools(config)],
       resourceLoader: loader,
       sessionManager,
       settingsManager: settings,
       sessionStartEvent: { type: "session_start", reason: resumableSessionFile ? "resume" : "new" },
     });
+    if (extensionsResult.errors.length > 0) {
+      session.dispose();
+      throw new Error("A registered worker extension failed to load.");
+    }
+    for (const registration of this.workerExtensions) {
+      const extension = extensionsResult.extensions.find((candidate) => candidate.path === `<inline:${registration.name}>`);
+      const registeredTools = extension ? [...extension.tools.keys()] : [];
+      if (!extension || registeredTools.length !== registration.tools.length || registeredTools.some((tool) => !registration.tools.includes(tool))) {
+        session.dispose();
+        throw new Error(`Worker extension ${registration.name} did not register exactly its declared tools.`);
+      }
+    }
+    try {
+      await session.bindExtensions({
+        mode: "print",
+        onError: () => this.activity("error", "A registered worker extension reported an error."),
+      });
+    } catch (error) {
+      session.dispose();
+      throw error;
+    }
     if (this.disposed || generation !== this.startGeneration) {
       if (session.isStreaming) await session.abort().catch(() => undefined);
       session.dispose();
       throw new Error("Worker start was cancelled.");
     }
+    const activeTools = session.getActiveToolNames();
+    for (const registration of this.workerExtensions) {
+      const missing = registration.tools.filter((tool) => !activeTools.includes(tool));
+      if (missing.length > 0) {
+        session.dispose();
+        throw new Error(`Worker extension ${registration.name} did not activate its declared tool ${missing[0]}.`);
+      }
+    }
     this.session = session;
     this.record.sessionFile = session.sessionFile;
     this.record.effort = session.thinkingLevel;
-    this.record.tools = session.getActiveToolNames();
+    this.record.tools = activeTools;
     if (!this.record.tools.includes("send_email") || !this.record.tools.includes("fetch_emails")) {
       throw new Error("Worker mailbox tools were not activated.");
     }
@@ -334,7 +377,15 @@ export class SdkWorker implements WorkerTransport {
     }
     switch (event.type) {
       case "agent_start":
-        this.runFailure = undefined;
+        if (this.awaitingAgentRetry) {
+          this.awaitingAgentRetry = false;
+        } else {
+          if (this.agentRunDepth === 0) {
+            this.runFailure = undefined;
+            this.workerSettlementPending = true;
+          }
+          this.agentRunDepth += 1;
+        }
         this.emit({ type: "run_liveness", phase: "model_start" });
         this.setState("running");
         this.activity("status", "Agent run started");
@@ -444,6 +495,7 @@ export class SdkWorker implements WorkerTransport {
         break;
       case "agent_end": {
         this.emit({ type: "run_liveness", phase: "model_end" });
+        if (event.willRetry) this.awaitingAgentRetry = true;
         const failure = terminalAgentError(event.messages, event.willRetry);
         if (failure) {
           this.runFailure = failure;
@@ -452,6 +504,10 @@ export class SdkWorker implements WorkerTransport {
         break;
       }
       case "agent_settled":
+        this.awaitingAgentRetry = false;
+        if (this.agentRunDepth > 0) this.agentRunDepth -= 1;
+        if (this.agentRunDepth > 0 || !this.workerSettlementPending) break;
+        this.workerSettlementPending = false;
         if (this.record.work) {
           interruptActive(this.record.work);
           this.record.work.batchEndedAt = nowIso();
@@ -529,6 +585,11 @@ export class SdkWorker implements WorkerTransport {
               }
             },
           });
+          this.promptOperations.add(operation);
+          operation.then(
+            () => this.promptOperations.delete(operation),
+            () => this.promptOperations.delete(operation),
+          );
           operation.then(finishAdmission, finishAdmission);
           return operation;
         },
@@ -555,6 +616,7 @@ export class SdkWorker implements WorkerTransport {
 
   async abort(): Promise<void> {
     try {
+      if (this.session?.isCompacting) this.session.abortCompaction();
       if (this.session?.isStreaming) await this.session.abort();
     } finally {
       if (this.record?.work) interruptActive(this.record.work);
@@ -577,6 +639,7 @@ export class SdkWorker implements WorkerTransport {
       // or cancels either underlying operation.
       await startOperation?.catch(() => undefined);
       await Promise.allSettled(promptAdmissions);
+      const promptOperations = [...this.promptOperations];
       const activeToolsAtStart = new Map(this.activeToolCalls);
       if (this.session === session) this.session = undefined;
       this.sessionManager = undefined;
@@ -584,20 +647,30 @@ export class SdkWorker implements WorkerTransport {
       let abort: WorkerCleanupReport["abort"] = "succeeded";
       let dispose: WorkerCleanupReport["dispose"] = "succeeded";
       const wasStreaming = Boolean(session?.isStreaming);
-      let sessionIdle = !session || session.isIdle !== false;
       const details: string[] = [];
 
+      if (session?.isCompacting) {
+        try {
+          session.abortCompaction();
+        } catch (error) {
+          abort = "failed";
+          details.push(safeErrorSummary(error));
+        }
+      }
       if (wasStreaming) {
         const outcome = await Promise.resolve().then(() => session!.abort()).then(
           () => ({ state: "succeeded" as const }),
           (error: unknown) => ({ state: "failed" as const, detail: safeErrorSummary(error) }),
         );
-        abort = outcome.state;
-        sessionIdle = outcome.state === "succeeded" && session!.isIdle !== false;
-        if (outcome.state === "failed") details.push(outcome.detail);
+        if (outcome.state === "failed") {
+          abort = "failed";
+          details.push(outcome.detail);
+        }
       }
+      await Promise.allSettled(promptOperations);
+      const sessionIdle = abort === "succeeded" && (!session || (session.isIdle !== false && !session.isCompacting && this.promptOperations.size === 0));
 
-      // Disposal follows, and never bypasses, the real abort/idle boundary.
+      // Disposal follows, and never bypasses, the real prompt/compaction/idle boundary.
       try {
         session?.dispose();
       } catch (error) {

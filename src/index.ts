@@ -23,6 +23,7 @@ import {
   UIController,
 } from "./ui.ts";
 import { truncateText } from "./util.ts";
+import { collectWorkerExtensions } from "./worker-extensions.ts";
 
 const errorMessage = safeErrorSummary;
 const { getAgentDir } = PiCodingAgent;
@@ -279,6 +280,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const agentDir = getAgentDir();
     const projectTrusted = ctx.isProjectTrusted();
     const workerSettings = WorkerSettingsSnapshot.capture(ctx.cwd, agentDir, projectTrusted);
+    const workerExtensionCollection = collectWorkerExtensions(pi.events);
+    const workerExtensions = workerExtensionCollection.registrations;
+    for (const issue of workerExtensionCollection.issues) ctx.ui.notify(issue, "warning");
     for (const { scope } of workerSettings.loadIssues) {
       ctx.ui.notify(`Pi ${scope} settings could not be loaded; the worker snapshot uses Pi fallback settings for that scope.`, "warning");
     }
@@ -338,7 +342,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
         if (snapshot.model.provider !== model.provider || snapshot.model.id !== model.id) {
           throw new Error("Prepared worker runtime does not match the exact selected provider/model binding.");
         }
-        return new SdkWorker(snapshot.runtime, snapshot.model, workerSettings);
+        return new SdkWorker(snapshot.runtime, snapshot.model, workerSettings, workerExtensions);
       },
       projectTrusted,
     });

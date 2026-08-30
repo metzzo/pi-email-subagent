@@ -8,6 +8,7 @@ Initial `0.1.0` release candidate (unpublished).
 
 ### Changed
 
+- Added bounded protocol-v1 opt-in worker extension factories: ordinary global/project extension discovery remains disabled, declared tools are collision/reserved-name checked and verified after activation, worker lifecycle is explicitly bound in `print` mode, nested AgentSession settlements collapse to one worker settlement, and cleanup aborts compaction and joins full admitted prompt operations before certifying quiescence. This enables `pi-compact-warning` warnings, terminating handoffs, compaction, and steering continuations inside email workers.
 - Prepared the public repository surface by removing the internal planning archive from published history, ignoring generated `.test-workspaces` evidence, generalizing exact-owner recovery guidance, and adding a prominent trusted-worker/cost warning.
 - The default model-selection policy is now catalog-neutral: it uses only advertised available model IDs, honors explicit available-model requests without silent substitution, and supports complete administrator replacement through `modelPolicy`.
 - The exact tested host baseline is Pi 0.84.2 with TypeBox 1.3.7. Startup rejects any other public Pi `VERSION` before extension registration or broker/state construction, while required Pi packages remain wildcard host peers.
