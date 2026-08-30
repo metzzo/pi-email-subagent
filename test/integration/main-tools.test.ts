@@ -384,7 +384,8 @@ it("guides timed-out pending waits without changing exact structured results", a
   assert.match(text, /at most one live presentation.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
   assert.match(text, /mail journal answered.*before.*tool result.*durably present/is);
   assert.match(text, /pending requests remain correlated/i);
-  assert.match(text, /ordinary main presentation is attempted.*no durable sendMessage append acknowledgement/i);
+  assert.match(text, /low-priority reply.*main is busy.*broker-queued.*later collector.*Pi agent_settled/is);
+  assert.match(text, /ordinary presentation calls sendMessage.*no durable append acknowledgement/is);
   assert.match(text, /no immediate keepalive rejoin/i);
   assert.match(text, /rejoin.*stable request ID.*deliberate (collection|status).*after restart/is);
   assert.match(text, /after restart.*presentation uncertainty/i, "the same structured branch remains accurate during pending shutdown");

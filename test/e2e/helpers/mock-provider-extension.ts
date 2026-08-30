@@ -61,6 +61,7 @@ type Plan = { toolCalls: ToolCallPlan[] } | { text: string };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 let toolCallSequence = 0;
+let lateCollectorReplyAccepted = false;
 
 function messageText(message: Message | undefined): string {
   const content = message?.content as unknown;
@@ -354,11 +355,13 @@ function planMain(messages: readonly Message[]): Plan {
     const ignore = lastText.includes("IGNORE") ? " IGNORE" : "";
     const message = lastText.includes("NESTED")
       ? "NESTED PARENT: delegate one response-required child request, wait for its exact result, then answer upstream."
-      : lastText.includes("WORK")
-        ? `WORK: ${lastText}`
-        : slow
-          ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
-          : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
+      : lastText.includes("LATE COLLECTOR")
+        ? "LATE COLLECTOR: Call fetch_emails, then immediately return the correlated reply."
+        : lastText.includes("WORK")
+          ? `WORK: ${lastText}`
+          : slow
+            ? `Simulate slow work: SLOW ${slow}.${crash}${ignore} Then report the names of your two virtual email tools.`
+            : `Call fetch_emails, then report the names of your two virtual email tools.${crash}${ignore} Do not modify files.`;
     const send = (to: string): ToolCallPlan => ({
       name: "send_email",
       arguments: {
@@ -491,7 +494,10 @@ function planWorker(messages: readonly Message[]): Plan {
       if (replies.length > 0) return { toolCalls: replies };
       return { text: "WORKER IDLE" };
     }
-    if (last.toolName === "send_email") return { text: "WORKER DONE" };
+    if (last.toolName === "send_email") {
+      if (allText(messages).includes("LATE COLLECTOR")) lateCollectorReplyAccepted = true;
+      return { text: "WORKER DONE" };
+    }
     if (last.toolName === "bash") return { toolCalls: [{ name: "fetch_emails", arguments: {} }] };
     return { text: "WORKER PONG" };
   }
@@ -530,7 +536,20 @@ function streamMock(model: Model<Api>, context: Context, options?: SimpleStreamO
       stream.push({ type: "start", partial: output });
       const system = context.systemPrompt ?? "";
       const messages = context.messages ?? [];
-      const lastText = messageText(messages.at(-1));
+      const lastMessage = messages.at(-1);
+      const lastText = messageText(lastMessage);
+      const mainInstruction = lastUserInstruction(messages);
+      if (system.includes("Main Agent Coordination") && lastText.includes("E2E DELEGATE LATE COLLECTOR")) {
+        lateCollectorReplyAccepted = false;
+      }
+      if (system.includes("Main Agent Coordination")
+        && mainInstruction.includes("LATE COLLECTOR")
+        && lastMessage?.role === "toolResult"
+        && lastMessage.toolName === "send_email") {
+        const deadline = Date.now() + 15_000;
+        while (!lateCollectorReplyAccepted && Date.now() < deadline && !options?.signal?.aborted) await sleep(10);
+        if (!lateCollectorReplyAccepted) throw new Error("Timed out waiting for the late-collector reply acceptance boundary.");
+      }
 
       // Simulate slow work when the delivered email asks for it so tests can
       // exercise steering against a genuinely busy worker.

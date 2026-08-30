@@ -419,6 +419,7 @@ export interface MainDelivery {
 export interface MainAdapter {
   getAddress(): string;
   getAliases(): ReadonlySet<string>;
+  isIdle(): boolean;
   deliver(delivery: MainDelivery): Promise<void>;
   notifyFailure(message: string): void;
   updateState(snapshot: BrokerSnapshot): void;

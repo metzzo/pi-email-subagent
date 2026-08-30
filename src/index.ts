@@ -300,6 +300,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const adapter: MainAdapter = {
       getAddress: () => mainAddress,
       getAliases: () => mainAliases,
+      isIdle: () => ctx.isIdle(),
       async deliver({ envelope, formatted, triggerTurn = true }) {
         if (generation !== myGeneration) throw new Error("Main session was replaced before delivery.");
         pi.sendMessage(
@@ -375,6 +376,16 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       effectiveConfig,
     );
     return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    const current = broker;
+    if (!current) return;
+    try {
+      await current.flushQueuedMainMail();
+    } catch (error) {
+      if (broker === current) ctx.ui.notify(`Could not deliver queued main mail: ${errorMessage(error)}`, "error");
+    }
   });
 
   pi.on("model_select", async (event) => {

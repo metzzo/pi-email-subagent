@@ -821,7 +821,7 @@ export class AgentBroker {
     return outcome.report;
   }
 
-  private async restoreQueuedMainMail(generation: number): Promise<void> {
+  private queuedMainMail(): EmailEnvelope[] {
     const seen = new Set<string>();
     const queued: EmailEnvelope[] = [];
     for (const alias of this.requiredRegistry().mainAliases) {
@@ -831,18 +831,57 @@ export class AgentBroker {
         queued.push(email);
       }
     }
-    for (const email of sortMail(queued)) {
-      this.checkpoint(generation);
+    return sortMail(queued);
+  }
+
+  private async routeMainEnvelope(envelope: EmailEnvelope): Promise<void> {
+    await this.withMailAdmission(async () => {
+      const current = this.mailStore.get(envelope.id);
+      if (!current || current.deliveryState !== "queued") return;
+      const collectionClaim = this.claimCollection(current);
       try {
-        await this.options.mainAdapter.deliver({ envelope: email, formatted: formatEmail(email), triggerTurn: true });
-        this.checkpoint(generation);
+        if (!collectionClaim && current.priority === "low" && !this.options.mainAdapter.isIdle()) return;
+        if (!collectionClaim) {
+          await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
+        }
+        await this.mailStore.markDelivered([current.id]);
+      } finally {
+        if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
+      }
+    });
+  }
+
+  private async flushQueuedMainMailLocked(generation?: number): Promise<void> {
+    for (const snapshot of this.queuedMainMail()) {
+      if (generation !== undefined) this.checkpoint(generation);
+      const email = this.mailStore.get(snapshot.id);
+      if (!email || email.deliveryState !== "queued") continue;
+      const collectionClaim = this.claimCollection(email);
+      try {
+        if (!collectionClaim && email.priority === "low" && !this.options.mainAdapter.isIdle()) continue;
+        if (!collectionClaim) {
+          await this.options.mainAdapter.deliver({ envelope: email, formatted: formatEmail(email), triggerTurn: true });
+          if (generation !== undefined) this.checkpoint(generation);
+        }
         await this.mailStore.markDelivered([email.id]);
       } catch (error) {
-        if (this.cancelled(generation)) throw error;
+        if (generation !== undefined && this.cancelled(generation)) throw error;
         await this.failEnvelope(email, errorMessage(error));
-        this.options.mainAdapter.notifyFailure(`Queued email ${email.id} could not be restored to main: ${errorMessage(error)}`);
+        this.options.mainAdapter.notifyFailure(`Queued email ${email.id} could not be delivered to main: ${errorMessage(error)}`);
+      } finally {
+        if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
       }
     }
+  }
+
+  private async restoreQueuedMainMail(generation: number): Promise<void> {
+    await this.withMailAdmission(() => this.flushQueuedMainMailLocked(generation));
+  }
+
+  async flushQueuedMainMail(): Promise<void> {
+    await this.withMailAdmission(() => this.flushQueuedMainMailLocked());
+    this.scheduleMailMaintenance();
+    this.publish();
   }
 
   private requiredRegistry(): BrokerRegistry {
@@ -1021,12 +1060,13 @@ export class AgentBroker {
   }
 
   private async withMailAdmission<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.mailAdmissionTail.catch(() => undefined).then(async () => {
-      this.assertActive();
-      return operation();
-    });
+    // Admission is decided when the caller joins the existing serialization
+    // tail. Operations accepted before shutdown retain broker ownership while
+    // queued behind an earlier journal/presentation transition.
+    this.assertActive();
+    const run = this.mailAdmissionTail.catch(() => undefined).then(operation);
     this.mailAdmissionTail = run.then(() => undefined, () => undefined);
-    return run;
+    return this.trackInFlight(run, "mail-serialization");
   }
 
   private trackInFlight<T>(operation: Promise<T>, label: string): Promise<T> {
@@ -1445,15 +1485,7 @@ export class AgentBroker {
     let recipientRecord: AgentRecord | undefined;
     try {
       if (toMain) {
-        const collectionClaim = this.claimCollection(envelope);
-        try {
-          if (!collectionClaim) {
-            await this.options.mainAdapter.deliver({ envelope, formatted: formatEmail(envelope), triggerTurn: true });
-          }
-          await this.mailStore.markDelivered([envelope.id]);
-        } finally {
-          if (collectionClaim) this.releaseCollectionClaim(collectionClaim);
-        }
+        await this.routeMainEnvelope(envelope);
       } else {
         const ensured = await this.ensureWorker(to, parsed, envelope, workerPreparation);
         spawned = ensured.spawned;
@@ -2927,9 +2959,39 @@ export class AgentBroker {
         else this.collectingRequestIds.set(id, count - 1);
       }
     };
-    incrementCollection();
+    let collectionRegistered = false;
+    if (collect) {
+      const selected = new Set(requestIds);
+      const queuedReplyIds = (): string[] => this.mailStore.list()
+        .filter((email) => email.kind === "reply"
+          && email.deliveryState === "queued"
+          && Boolean(email.inReplyTo && selected.has(email.inReplyTo))
+          && this.isMainIdentity(email.to))
+        .map((email) => email.id);
+      try {
+        // With no queued match, synchronous registration preserves the prior
+        // shutdown/timeout contract and any later sender claims collection.
+        // An existing queued match must cross the shared presentation tail so
+        // collection and settlement delivery cannot both win.
+        if (queuedReplyIds().length === 0) {
+          incrementCollection();
+          collectionRegistered = true;
+        } else {
+          await this.withMailAdmission(async () => {
+            incrementCollection();
+            collectionRegistered = true;
+            const ids = queuedReplyIds();
+            if (ids.length > 0) await this.mailStore.markDelivered(ids);
+          });
+          this.emitChange();
+        }
+      } catch (error) {
+        if (collectionRegistered) decrementCollection();
+        throw error;
+      }
+    }
 
-    return new Promise<WaitForRepliesResult>((resolve, reject) => {
+    return new Promise<WaitForRepliesResult>((resolve) => {
       let settled = false;
       let requestedFinish: "timeout" | "abort" | undefined;
       let timer: ReturnType<typeof setTimeout> | undefined;

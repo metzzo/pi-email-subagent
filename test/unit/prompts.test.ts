@@ -163,7 +163,8 @@ describe("mail prompts", () => {
     assert.match(prompt, /Never invent.*mail ID.*expected reply subject/i);
     assert.match(prompt, /wait_for_replies.*instead of polling/i);
     assert.match(prompt, /bounded (observation|collection) window/i);
-    assert.match(prompt, /late reply remains in durable mail.*may not have durably appended.*visible presentation/is);
+    assert.match(prompt, /late low reply remains in durable mail.*later collector.*agent_settled/is);
+    assert.match(prompt, /ordinary presentation calls.*sendMessage.*may not have durably appended.*visible presentation/is);
     assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
     assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
     assert.match(prompt, /collection provides at most one live presentation.*Pi 0\.84\.2.*no staged tool-result append receipt/is);

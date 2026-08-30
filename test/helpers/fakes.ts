@@ -36,6 +36,7 @@ export class FakeMainAdapter implements MainAdapter {
   deliveries: MainDelivery[] = [];
   failures: string[] = [];
   snapshots: BrokerSnapshot[] = [];
+  idle = true;
 
   constructor(address = "main@gpt-5.4.com") {
     this.address = address;
@@ -44,6 +45,7 @@ export class FakeMainAdapter implements MainAdapter {
 
   getAddress(): string { return this.address; }
   getAliases(): ReadonlySet<string> { return this.aliases; }
+  isIdle(): boolean { return this.idle; }
   async deliver(delivery: MainDelivery): Promise<void> { this.deliveries.push(structuredClone(delivery)); }
   notifyFailure(message: string): void { this.failures.push(message); }
   updateState(snapshot: BrokerSnapshot): void { this.snapshots.push(structuredClone(snapshot)); }

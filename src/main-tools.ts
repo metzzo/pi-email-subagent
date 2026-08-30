@@ -12,7 +12,7 @@ import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 const errorMessage = safeErrorSummary;
 const { Type } = TypeBox;
 const { Text } = PiTui;
-const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. Ordinary main presentation is attempted when replies arrive, but Pi 0.84.2 exposes no durable sendMessage append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
+const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. A low-priority reply that arrives while main is busy stays broker-queued: a later collector may claim it, otherwise it is presented at Pi agent_settled. Main-idle low mail and high-priority steering remain prompt. Once ordinary presentation calls sendMessage, Pi 0.84.2 exposes no durable append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
 const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live presentation. Pi 0.84.2 exposes no staged tool-result append receipt, so a process crash can leave the mail journal answered before this exact tool result is durably present in the main session. Recover by inspecting Conversation/mail and rejoining the stable request ID; this is not a crash-proof exactly-once guarantee.";
 
 export interface InspectAgentToolDetails {

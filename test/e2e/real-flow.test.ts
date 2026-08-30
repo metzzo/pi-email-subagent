@@ -61,10 +61,10 @@ function sendResult(line: RpcLine): any {
   return (line.result as { details?: { result?: unknown } } | undefined)?.details?.result;
 }
 
-function waitResult(line: RpcLine): { complete: boolean; timedOut: boolean; items: { state: string; requestId: string; reply?: { message: string } }[] } {
+function waitResult(line: RpcLine): { complete: boolean; timedOut: boolean; items: { state: string; requestId: string; reply?: { id: string; message: string } }[] } {
   const result = (line.result as { details?: { result?: unknown } } | undefined)?.details?.result;
   assert.ok(result, "wait_for_replies returned no result details");
-  return result as { complete: boolean; timedOut: boolean; items: { state: string; requestId: string; reply?: { message: string } }[] };
+  return result as { complete: boolean; timedOut: boolean; items: { state: string; requestId: string; reply?: { id: string; message: string } }[] };
 }
 
 async function readRegistry(agentDir: string, sessionId: string): Promise<any> {
@@ -162,6 +162,44 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       const replyId = answered[0].replyId;
       assert.ok(journal.some((event) => event.type === "email.created" && event.email.id === replyId
         && event.email.from === WORKER_ADDRESS && event.email.kind === "reply"));
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("collects a reply accepted before the wait tool call without a later custom message", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionFile } = await start({ persistSession: true });
+    try {
+      assert.ok(sessionFile, "persisted main session file");
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE LATE COLLECTOR");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "late-collector send", 90_000, mark));
+      const requestId = sent.correlationId as string;
+      const waited = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "late collector", 120_000, mark));
+      const replyId = waited.items[0]?.reply?.id;
+      assert.equal(waited.items[0]?.requestId, requestId);
+      assert.equal(waited.items[0]?.state, "answered");
+      assert.ok(replyId, "collected result carries the reply email ID");
+
+      await client.waitFor(assistantText("E2E COMPLETE"), "late-collector final text", 90_000, mark);
+      await client.waitForSettlement(mark);
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250));
+
+      const entries = (await readFile(sessionFile!, "utf8"))
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, any>);
+      const collected = entries.filter((entry) => entry.type === "message"
+        && entry.message?.role === "toolResult"
+        && entry.message?.toolName === "wait_for_replies"
+        && entry.message?.details?.result?.items?.some((item: any) => item.requestId === requestId && item.reply?.id === replyId));
+      const laterCustomMessages = entries.filter((entry) => entry.type === "message"
+        && entry.message?.role === "custom"
+        && entry.message?.customType === "pi-email-subagent.email"
+        && entry.message?.details?.id === replyId);
+      assert.equal(collected.length, 1, "the stable reply ID appears once in the wait tool result");
+      assert.equal(laterCustomMessages.length, 0, "the collected reply never appears later as a custom message");
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });
@@ -448,7 +486,8 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.equal(result.timedOut, true);
       assert.deepEqual(result.items.map((item) => [item.requestId, item.state]), [[requestId, "pending"]]);
       assert.match(toolText(waitEnd), /pending requests remain correlated/i);
-      assert.match(toolText(waitEnd), /ordinary main presentation is attempted.*no durable.*acknowledgement/i);
+      assert.match(toolText(waitEnd), /low-priority reply.*main is busy.*broker-queued.*agent_settled/is);
+      assert.match(toolText(waitEnd), /sendMessage.*no durable append acknowledgement/is);
       assert.match(toolText(waitEnd), /no immediate keepalive rejoin/i);
 
       const mainCompletion = await client.waitFor(
