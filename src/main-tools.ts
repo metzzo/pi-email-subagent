@@ -13,7 +13,7 @@ const errorMessage = safeErrorSummary;
 const { Type } = TypeBox;
 const { Text } = PiTui;
 const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. A low-priority reply that arrives while main is busy stays broker-queued: a later collector may claim it, otherwise it is presented after Pi agent_settled. Main-idle low mail and high-priority steering remain prompt. Once ordinary presentation calls sendMessage, Pi 0.84.2 exposes no durable append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
-const COLLECTION_PRESENTATION_LIMIT = "Collection presentation: at most one live body surface for a queued reply in this active race. If this collector claims first, it returns the reply without ordinary presentation. If ordinary presentation wins, this wait returns status without that reply body; a later deliberate rejoin may recover it. Pi 0.84.2 exposes no staged tool-result append receipt, so this is not a crash-proof exactly-once guarantee.";
+const WAIT_PRESENTATION_LIMIT = "Active wait presentation: every active wait has at most one live body surface for a reply in its live race. With collect:true, if this wait claims a queued low reply first, it returns the reply without ordinary presentation. If ordinary presentation wins, this wait returns status without that reply body; a later deliberate rejoin may recover it. Pi 0.84.2 exposes no staged tool-result append receipt, so this is not a crash-proof exactly-once guarantee.";
 
 export interface InspectAgentToolDetails {
   inspection?: AgentInspection;
@@ -163,7 +163,7 @@ export function createMainCoordinationTools(
     name: "wait_for_replies",
     label: "Wait for replies",
     description:
-      "Join already-sent response-required email requests in a bounded collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. A single wait may last up to 3600 seconds and returns early when all requests become terminal. Returns completed and pending results together. For a queued reply, collection suppresses ordinary presentation only when this active wait claims first. If ordinary presentation wins, this wait omits that reply body; correlated high priority also ends a multi-ID wait partial promptly. A later deliberate rejoin may recover an answered reply. Pi 0.84.2 has no staged tool-result or sendMessage append receipt, so this is not crash-proof exactly once.",
+      "Join already-sent response-required email requests in a bounded observation or collection window until each is answered, failed, stopped, archived, paused without a live worker, or the timeout ends the window. A single wait may last up to 3600 seconds and returns early when all requests become terminal. Returns completed and pending results together. Every active wait observes ordinary presentation ownership. With collect:true, collection suppresses ordinary presentation only when this active wait claims a queued low reply first. If ordinary presentation wins, this wait omits that reply body; correlated high priority also ends a multi-ID wait partial promptly in either mode. A later deliberate rejoin may recover an answered reply. Pi 0.84.2 has no staged tool-result or sendMessage append receipt, so this is not crash-proof exactly once.",
     promptSnippet: "Open a bounded observation window for replies to delegated email request IDs.",
     promptGuidelines: [
       "Use request IDs returned by send_email; never invent IDs.",
@@ -188,8 +188,13 @@ export function createMainCoordinationTools(
         );
         const lines = [
           `Replies: ${result.complete ? "complete" : result.timedOut ? "timed out with pending work" : "partial"}`,
-          ...((params.collect ?? true) ? [COLLECTION_PRESENTATION_LIMIT] : []),
+          WAIT_PRESENTATION_LIMIT,
         ];
+        if (!result.complete
+          && !result.timedOut
+          && result.items.some((item) => item.state === "answered" && !item.reply)) {
+          lines.push("An answered entry without a reply body was already ordinarily presented; ordinary high-priority presentation can wake a multi-ID wait early.");
+        }
         const omitted: string[] = [];
         for (const item of result.items) {
           const subject = item.reply?.subject ?? item.request?.subject ?? item.requestId;

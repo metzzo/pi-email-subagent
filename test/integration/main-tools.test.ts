@@ -21,7 +21,7 @@ function waitRequest(id: string, subject = id): EmailEnvelope {
   };
 }
 
-async function renderWait(result: WaitForRepliesResult, toolResultByteLimit = 40_000) {
+async function renderWait(result: WaitForRepliesResult, toolResultByteLimit = 40_000, collect = true) {
   const broker = {
     toolResultByteLimit,
     waitForReplies: async () => result,
@@ -29,7 +29,7 @@ async function renderWait(result: WaitForRepliesResult, toolResultByteLimit = 40
   const wait = createMainCoordinationTools(() => broker)[1];
   return wait.execute(
     "wait-guidance",
-    { request_ids: result.items.map((item) => item.requestId), timeout_seconds: 0, collect: true },
+    { request_ids: result.items.map((item) => item.requestId), timeout_seconds: 0, collect },
     undefined,
     undefined,
     {} as never,
@@ -42,9 +42,9 @@ it("exposes inspection, reply joining, audited cancellation, and lifecycle contr
   assert.equal(tools.some((tool) => tool.name.includes("spawn")), false);
   const wait = tools[1];
   assert.equal(wait.executionMode, "sequential");
-  assert.match(wait.description, /bounded (observation|collection) window/i);
+  assert.match(wait.description, /bounded observation or collection window/i);
   assert.match(wait.description, /up to 3600 seconds.*returns early/i);
-  assert.match(wait.description, /active wait claims first.*ordinary presentation wins.*omits.*reply body/is);
+  assert.match(wait.description, /collect:true.*active wait claims.*queued low reply first.*ordinary presentation wins.*omits.*reply body/is);
   assert.match(wait.description, /correlated high priority.*multi-ID wait partial.*later deliberate rejoin/is);
   assert.match(wait.description, /no staged tool-result or sendMessage append receipt.*not crash-proof exactly once/is);
   const waitGuidelines = wait.promptGuidelines ?? [];
@@ -382,7 +382,7 @@ it("guides timed-out pending waits without changing exact structured results", a
   const rendered = await renderWait(pending);
   const text = (rendered.content[0] as { text: string }).text;
   assert.match(text, /Replies: timed out with pending work/);
-  assert.match(text, /at most one live body surface.*collector claims first.*ordinary presentation wins/is);
+  assert.match(text, /at most one live body surface.*wait claims.*queued low reply first.*ordinary presentation wins/is);
   assert.match(text, /later deliberate rejoin.*Pi 0\.84\.2.*no staged tool-result append receipt/is);
   assert.match(text, /pending requests remain correlated/i);
   assert.match(text, /low-priority reply.*main is busy.*broker-queued.*later collector.*Pi agent_settled/is);
@@ -397,6 +397,24 @@ it("guides timed-out pending waits without changing exact structured results", a
   assert.equal(details.result.timedOut, true);
   assert.deepEqual(details.result.items.map((item) => [item.requestId, item.state]), [[request.id, "pending"]]);
   assert.equal(details.result.items[0]?.request?.message, "[body omitted from structured tool details; see tool text]");
+});
+
+it("explains ordinary high presentation ownership for collect:false partial results", async () => {
+  const answered = waitRequest("mail_high_presented", "Urgent result");
+  answered.answeredAt = "2026-08-23T00:00:01.000Z";
+  answered.answeredBy = "mail_high_reply";
+  const pending = waitRequest("mail_slow_pending", "Slow result");
+  const rendered = await renderWait({
+    complete: false,
+    timedOut: false,
+    items: [
+      { requestId: answered.id, state: "answered", request: answered },
+      { requestId: pending.id, state: "pending", request: pending },
+    ],
+  }, 40_000, false);
+  const text = (rendered.content[0] as { text: string }).text;
+  assert.match(text, /every active wait.*ordinary presentation/is);
+  assert.match(text, /answered entr(?:y|ies) without.*body.*high-priority presentation.*multi-ID wait early/is);
 });
 
 it("omits timeout guidance for complete, terminal, and abort-partial results", async () => {

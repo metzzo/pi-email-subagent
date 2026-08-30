@@ -326,6 +326,48 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("wakes a collect:false multi-ID wait for ordinary high presentation without duplicating its body", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionFile } = await start({ persistSession: true });
+    try {
+      assert.ok(sessionFile, "persisted main session file");
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE MULTI BLOCKER COLLECT FALSE");
+      const sends = await client.collect(toolEnd("send_email"), 2, "observing multi-blocker sends", 90_000, mark);
+      const sent = sends.map(sendResult);
+      const highRequestId = sent.find((result) => result.envelope.to === WORKER_ADDRESS)?.correlationId as string;
+      const slowRequestId = sent.find((result) => result.envelope.to === REVIEWER_ADDRESS)?.correlationId as string;
+      assert.ok(highRequestId);
+      assert.ok(slowRequestId);
+
+      const waitEnd = await client.waitFor(toolEnd("wait_for_replies"), "collect:false high partial wait", 90_000, mark);
+      const result = waitResult(waitEnd);
+      assert.equal(result.complete, false);
+      assert.equal(result.timedOut, false);
+      assert.equal(result.items.find((item) => item.requestId === highRequestId)?.reply, undefined);
+      assert.equal(result.items.find((item) => item.requestId === slowRequestId)?.state, "pending");
+      assert.doesNotMatch(toolText(waitEnd), /Worker result: virtual email tools/i);
+      assert.match(toolText(waitEnd), /high-priority presentation can wake a multi-ID wait early/i);
+
+      const custom = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as { customType?: string; details?: { inReplyTo?: string } } | undefined)?.customType === "pi-email-subagent.email"
+          && (line.message as { details?: { inReplyTo?: string } }).details?.inReplyTo === highRequestId,
+        "collect:false high ordinary custom message",
+        90_000,
+        mark,
+      );
+      const replyId = (custom.message as { details?: { id?: string } }).details?.id;
+      assert.ok(replyId);
+      assert.match(String((custom.message as { details?: { message?: string } }).details?.message), /Worker result: virtual email tools/);
+      await client.waitForSettlement(mark);
+      await new Promise((resolveSleep) => setTimeout(resolveSleep, 250));
+      assert.equal(emailCustomEntries(await readSessionEntries(sessionFile!), replyId).length, 1);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("records scripted edit/write outcomes and keeps bash effects unverified", { timeout: 240_000 }, async () => {
     const workspace = await mkdtemp(join(tmpdir(), "pi-email-work-ledger-e2e-"));
     const editPath = join(workspace, "edit.txt");

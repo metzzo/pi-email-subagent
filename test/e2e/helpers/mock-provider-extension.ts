@@ -146,7 +146,11 @@ function planMain(messages: readonly Message[]): Plan {
     && lastToolResultIndex(messages, "send_email") > lastToolResultIndex(messages, "wait_for_replies")) {
     return { toolCalls: [{
       name: "wait_for_replies",
-      arguments: { request_ids: ids, timeout_seconds: instruction.includes("WAIT TIMEOUT") ? 0 : 90, collect: true },
+      arguments: {
+        request_ids: ids,
+        timeout_seconds: instruction.includes("WAIT TIMEOUT") ? 0 : instruction.includes("COLLECT FALSE") ? 3 : 90,
+        collect: !instruction.includes("COLLECT FALSE"),
+      },
     }] };
   }
 
@@ -199,7 +203,11 @@ function planMain(messages: readonly Message[]): Plan {
       if (ids.length === 0) return { text: "E2E NO REQUEST IDS" };
       return { toolCalls: [{
         name: "wait_for_replies",
-        arguments: { request_ids: ids, timeout_seconds: instruction.includes("WAIT TIMEOUT") ? 0 : 90, collect: true },
+        arguments: {
+          request_ids: ids,
+          timeout_seconds: instruction.includes("WAIT TIMEOUT") ? 0 : instruction.includes("COLLECT FALSE") ? 3 : 90,
+          collect: !instruction.includes("COLLECT FALSE"),
+        },
       }] };
     }
     if (last.toolName === "wait_for_replies") {

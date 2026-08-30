@@ -59,8 +59,8 @@ function deferred() {
 class BlockingMainAdapter extends FakeMainAdapter {
   block = false;
   entered!: Promise<void>;
-  private signalEntered!: () => void;
-  private releaseDelivery!: () => void;
+  protected signalEntered!: () => void;
+  protected releaseDelivery!: () => void;
 
   constructor() {
     super();
@@ -79,6 +79,14 @@ class BlockingMainAdapter extends FakeMainAdapter {
       await new Promise<void>((resolve) => { this.releaseDelivery = resolve; });
     }
     await super.deliver(delivery);
+  }
+}
+
+class BlockingRejectingMainAdapter extends BlockingMainAdapter {
+  override async deliver(): Promise<void> {
+    this.signalEntered();
+    await new Promise<void>((resolve) => { this.releaseDelivery = resolve; });
+    throw new Error("deterministic main delivery rejection");
   }
 }
 
@@ -327,6 +335,153 @@ describe("deferred low-priority main presentation", () => {
       assert.equal(main.deliveries.at(-1)?.envelope.id, high.envelope.id);
       const recovery = await broker.waitForReplies([first.correlationId], 0, true);
       assert.equal(recovery.items[0]?.reply?.message, "Immediate blocker body.");
+    } finally { await broker.shutdown(); }
+  });
+
+  it("lets collect:false observe ordinary high ownership and end a multi-ID wait partial", async () => {
+    const main = new FakeMainAdapter();
+    main.idle = false;
+    const { broker, workers } = await setup(main);
+    try {
+      const first = await broker.send(broker.mainAddress, {
+        to: "worker.main-observe-high@gpt-5.4.com", subject: "Observed high", message: "Reply high.", priority: "low",
+      });
+      const second = await broker.send(broker.mainAddress, {
+        to: "reviewer.main-observe-slow@gpt-5.4.com", subject: "Observed slow", message: "Remain pending.", priority: "low",
+      });
+      const waiting = broker.waitForReplies([first.correlationId, second.correlationId], 1_000, false);
+      const high = await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(first.envelope.id, first.envelope.subject),
+        message: "Observed urgent body.",
+        priority: "high",
+      });
+      const joined = await waiting;
+      assert.equal(joined.timedOut, false);
+      assert.equal(joined.complete, false);
+      assert.equal(joined.items.find((item) => item.requestId === first.correlationId)?.reply, undefined);
+      assert.equal(joined.items.find((item) => item.requestId === second.correlationId)?.state, "pending");
+      assert.deepEqual(main.deliveries.map((delivery) => delivery.envelope.id), [high.envelope.id]);
+      const recovery = await broker.waitForReplies([first.correlationId], 0, false);
+      assert.equal(recovery.items[0]?.reply?.message, "Observed urgent body.");
+    } finally { await broker.shutdown(); }
+  });
+
+  it("finalizes immediate main delivery failure before a late collector can answer from that reply", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-main-presentation-failure-race-"));
+    const main = new BlockingRejectingMainAdapter();
+    const first = await setup(main, root);
+    let restored: Awaited<ReturnType<typeof setup>> | undefined;
+    try {
+      const request = await first.broker.send(first.broker.mainAddress, {
+        to: "worker.main-reject@gpt-5.4.com", subject: "Reject reply", message: "Reply once.", priority: "low",
+      });
+      let failedTransitions = 0;
+      const markFailed = first.broker.mailStore.markFailed.bind(first.broker.mailStore);
+      first.broker.mailStore.markFailed = async (id, error) => {
+        failedTransitions += 1;
+        await markFailed(id, error);
+      };
+      const sending = first.workers[0]!.send({
+        to: first.broker.mainAddress,
+        subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+        message: "This presentation rejects.",
+        priority: "low",
+      });
+      void sending.catch(() => undefined);
+      await main.entered;
+      const waiting = first.broker.waitForReplies([request.correlationId], 0, true);
+      main.release();
+      const [sendOutcome, joined] = await Promise.all([sending.then(() => "fulfilled", () => "rejected"), waiting]);
+      assert.equal(sendOutcome, "rejected");
+      assert.equal(joined.items[0]?.state, "pending");
+      const reply = first.broker.mailStore.list().find((email) => email.inReplyTo === request.envelope.id);
+      assert.ok(reply);
+      assert.equal(reply.deliveryState, "failed");
+      assert.equal(failedTransitions, 1, "the serialized route finalizes failure exactly once");
+      const original = first.broker.mailStore.get(request.envelope.id);
+      assert.equal(original?.answeredAt, undefined);
+      assert.equal(original?.answeredBy, undefined);
+      assert.equal(original?.replyReservedBy, undefined);
+
+      await first.broker.shutdown();
+      restored = await setup(new FakeMainAdapter(), root);
+      const reloadedReply = restored.broker.mailStore.get(reply.id);
+      const reloadedOriginal = restored.broker.mailStore.get(request.envelope.id);
+      assert.equal(reloadedReply?.deliveryState, "failed");
+      assert.equal(reloadedOriginal?.answeredAt, undefined);
+      assert.equal(reloadedOriginal?.answeredBy, undefined);
+      assert.equal(reloadedOriginal?.replyReservedBy, undefined);
+    } finally {
+      await first.broker.shutdown().catch(() => undefined);
+      await restored?.broker.shutdown().catch(() => undefined);
+    }
+  });
+
+  it("routes a high reply accepted before a collector and omits its ordinarily presented body", async () => {
+    const main = new FakeMainAdapter();
+    main.idle = false;
+    const { broker, workers } = await setup(main);
+    try {
+      const first = await broker.send(broker.mainAddress, {
+        to: "worker.main-preaccepted-high@gpt-5.4.com", subject: "Preaccepted high", message: "Reply high.", priority: "low",
+      });
+      const second = await broker.send(broker.mainAddress, {
+        to: "reviewer.main-preaccepted-slow@gpt-5.4.com", subject: "Preaccepted slow", message: "Remain pending.", priority: "low",
+      });
+      const entered = deferred();
+      const release = deferred();
+      const reserveReply = broker.mailStore.reserveReply.bind(broker.mailStore);
+      broker.mailStore.reserveReply = async (reply, originalId) => {
+        await reserveReply(reply, originalId);
+        entered.resolve();
+        await release.promise;
+      };
+      const sending = workers[0]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(first.envelope.id, first.envelope.subject),
+        message: "Preaccepted urgent body.",
+        priority: "high",
+      });
+      await entered.promise;
+      const waiting = broker.waitForReplies([first.correlationId, second.correlationId], 1_000, true);
+      release.resolve();
+      const [high, joined] = await Promise.all([sending, waiting]);
+      assert.equal(joined.timedOut, false);
+      assert.equal(joined.complete, false);
+      assert.equal(joined.items.find((item) => item.requestId === first.correlationId)?.reply, undefined);
+      assert.equal(joined.items.find((item) => item.requestId === second.correlationId)?.state, "pending");
+      assert.deepEqual(main.deliveries.map((delivery) => delivery.envelope.id), [high.envelope.id]);
+      const recovery = await broker.waitForReplies([first.correlationId], 0, true);
+      assert.equal(recovery.items[0]?.reply?.message, "Preaccepted urgent body.");
+    } finally { await broker.shutdown(); }
+  });
+
+  it("does not count transient queued high mail against the low main backlog limit", async () => {
+    const main = new FakeMainAdapter();
+    main.idle = false;
+    const { broker, workers } = await setup(main, undefined, { maxQueuedMessages: 1 });
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.main-transient-high@gpt-5.4.com", subject: "Start", message: "Start.", priority: "low",
+      });
+      await broker.mailStore.accept({
+        id: "mail_transient_high_capacity",
+        from: "worker.main-transient-high@gpt-5.4.com",
+        to: broker.mainAddress,
+        subject: "Transient high",
+        message: "urgent",
+        priority: "high",
+        kind: "request",
+        requiresResponse: true,
+        createdAt: new Date().toISOString(),
+        deliveryState: "queued",
+      });
+      const low = await workers[0]!.send({
+        to: broker.mainAddress, subject: "Bounded low", message: "ordinary", priority: "low",
+      });
+      assert.equal(low.envelope.deliveryState, "queued");
+      assert.equal(broker.mailStore.queued(broker.mainAddress).filter((email) => email.priority === "low").length, 1);
     } finally { await broker.shutdown(); }
   });
 

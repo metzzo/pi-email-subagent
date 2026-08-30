@@ -167,7 +167,7 @@ describe("mail prompts", () => {
     assert.match(prompt, /ordinary presentation calls.*sendMessage.*may not have durably appended.*visible presentation/is);
     assert.match(prompt, /do not.*rejoin.*keep.*alive/i);
     assert.match(prompt, /deliberate synchronous.*(collection|status).*window/i);
-    assert.match(prompt, /collection provides at most one live body surface.*active live race.*collector claims first/is);
+    assert.match(prompt, /every active wait.*one live body surface.*collect.*true.*collector claims.*queued low reply first/is);
     assert.match(prompt, /ordinary presentation wins.*without.*reply body.*fresh deliberate rejoin/is);
     assert.match(prompt, /Pi 0\.84\.2.*no staged tool-result append receipt/is);
     assert.match(prompt, /not a crash-proof exactly-once presentation guarantee/i);
@@ -264,6 +264,9 @@ describe("mail prompts", () => {
     };
     const prompt = subagentPrompt(record, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
     assert.match(prompt, /nested delegation.*disabled.*Pi 0\.84\.2.*durable child-reply presentation receipt/i);
+    assert.match(prompt, /high.*blockers.*next safe.*boundary/is);
+    assert.match(prompt, /low.*ordinary.*recipient finishes/is);
+    assert.doesNotMatch(prompt, /macrotask|agent_settled|historical main alias|active multi-request collector|already-presented body/i);
     assert.doesNotMatch(prompt, /permitted to delegate response-required requests to other subagents/);
     const restricted = subagentPrompt({ ...record, canSpawn: false }, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
     assert.match(restricted, /not permitted to send response-required requests to any other subagent/i);

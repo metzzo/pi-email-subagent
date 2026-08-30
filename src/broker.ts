@@ -146,6 +146,13 @@ class LifecycleTimeoutError extends Error {
   }
 }
 
+class FinalizedMainDeliveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FinalizedMainDeliveryError";
+  }
+}
+
 async function bounded<T>(promise: Promise<T>, timeoutMs: number, code: string): Promise<T> {
   const deadline = deadlineSignal(timeoutMs);
   try {
@@ -227,11 +234,10 @@ interface ActiveToolCall {
   toolName: string;
 }
 
-interface MainCollectionWindow {
+interface MainWaitWindow {
   requestIds: ReadonlySet<string>;
   ordinarilyPresented: Set<string>;
   highPresented: boolean;
-  notify?: () => void;
 }
 
 interface ToolLifecycleState {
@@ -283,7 +289,7 @@ export class AgentBroker {
   private readonly changeListeners = new Set<() => void>();
   private readonly collectingRequestIds = new Map<string, number>();
   private readonly collectionClaims = new Map<string, number>();
-  private readonly mainCollectionWindows = new Set<MainCollectionWindow>();
+  private readonly mainWaitWindows = new Set<MainWaitWindow>();
   private readonly pendingWorkPersists = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly watchdogs = new Map<string, WatchdogEntry>();
   private readonly toolLifecycles = new Map<string, ToolLifecycleState>();
@@ -843,7 +849,7 @@ export class AgentBroker {
   }
 
   private validateMainQueueCapacity(envelope: EmailEnvelope): void {
-    const queued = this.queuedMainMail();
+    const queued = this.queuedMainMail().filter((email) => email.priority === "low");
     const bytes = queued.reduce(
       (total, email) => total + byteLength(email.subject) + byteLength(email.message),
       0,
@@ -856,12 +862,14 @@ export class AgentBroker {
 
   private noteOrdinaryMainPresentation(envelope: EmailEnvelope): void {
     if (!envelope.inReplyTo) return;
-    for (const window of this.mainCollectionWindows) {
+    let changed = false;
+    for (const window of this.mainWaitWindows) {
       if (!window.requestIds.has(envelope.inReplyTo)) continue;
       window.ordinarilyPresented.add(envelope.inReplyTo);
       if (envelope.priority === "high") window.highPresented = true;
-      window.notify?.();
+      changed = true;
     }
+    if (changed) this.emitChange();
   }
 
   private async routeMainEnvelope(envelope: EmailEnvelope): Promise<void> {
@@ -876,7 +884,9 @@ export class AgentBroker {
             await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
           } catch (error) {
             if (this.disposed) return;
-            throw error;
+            const failure = errorMessage(error);
+            await this.failEnvelope(current, failure);
+            throw new FinalizedMainDeliveryError(failure);
           }
         }
         await this.mailStore.markDelivered([current.id]);
@@ -1541,7 +1551,8 @@ export class AgentBroker {
       // mail for later verified recovery rather than fabricating terminal loss.
       if (!(error instanceof LifecycleTimeoutError)
         && !(error instanceof CleanupQuarantineError)
-        && !(error instanceof ProviderReadinessError)) {
+        && !(error instanceof ProviderReadinessError)
+        && !(error instanceof FinalizedMainDeliveryError)) {
         await this.failEnvelope(envelope, errorMessage(error));
       }
       this.scheduleMailMaintenance();
@@ -2991,10 +3002,12 @@ export class AgentBroker {
       if (!this.isMainIdentity(request.from)) throw new Error(`${id} was not sent by the main thread.`);
     }
 
-    const collectionWindow: MainCollectionWindow | undefined = collect
-      ? { requestIds: new Set(requestIds), ordinarilyPresented: new Set(), highPresented: false }
-      : undefined;
-    if (collectionWindow) this.mainCollectionWindows.add(collectionWindow);
+    const waitWindow: MainWaitWindow = {
+      requestIds: new Set(requestIds),
+      ordinarilyPresented: new Set(),
+      highPresented: false,
+    };
+    this.mainWaitWindows.add(waitWindow);
 
     const incrementCollection = (): void => {
       if (!collect) return;
@@ -3014,6 +3027,7 @@ export class AgentBroker {
       const selected = new Set(requestIds);
       const queuedReplyIds = (): string[] => this.mailStore.list()
         .filter((email) => email.kind === "reply"
+          && email.priority === "low"
           && email.deliveryState === "queued"
           && Boolean(email.inReplyTo && selected.has(email.inReplyTo))
           && this.isMainIdentity(email.to))
@@ -3040,7 +3054,7 @@ export class AgentBroker {
         }
       } catch (error) {
         if (collectionRegistered) decrementCollection();
-        if (collectionWindow) this.mainCollectionWindows.delete(collectionWindow);
+        this.mainWaitWindows.delete(waitWindow);
         throw error;
       }
     }
@@ -3050,7 +3064,7 @@ export class AgentBroker {
         this.publish();
       } catch (error) {
         if (collectionRegistered) decrementCollection();
-        if (collectionWindow) this.mainCollectionWindows.delete(collectionWindow);
+        this.mainWaitWindows.delete(waitWindow);
         throw error;
       }
     }
@@ -3064,15 +3078,12 @@ export class AgentBroker {
         this.changeListeners.delete(check);
         signal?.removeEventListener("abort", abort);
         decrementCollection();
-        if (collectionWindow) {
-          delete collectionWindow.notify;
-          this.mainCollectionWindows.delete(collectionWindow);
-        }
+        this.mainWaitWindows.delete(waitWindow);
       };
       const finish = (timedOut: boolean): void => {
         if (settled) return;
         settled = true;
-        const items = requestIds.map((id) => this.waitItem(id, collectionWindow?.ordinarilyPresented.has(id)));
+        const items = requestIds.map((id) => this.waitItem(id, waitWindow.ordinarilyPresented.has(id)));
         cleanup();
         resolve({ complete: items.every((item) => item.state !== "pending"), timedOut, items });
       };
@@ -3082,7 +3093,7 @@ export class AgentBroker {
         // so no reply is suppressed after its collector disappears.
         if (this.hasCollectionClaim(requestIds)) return;
         const terminal = requestIds.map((id) => this.waitItem(id)).every((item) => item.state !== "pending");
-        if (collectionWindow?.highPresented) {
+        if (waitWindow.highPresented) {
           finish(false);
           return;
         }
@@ -3106,7 +3117,6 @@ export class AgentBroker {
         check();
       };
       this.changeListeners.add(check);
-      if (collectionWindow) collectionWindow.notify = check;
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) return abort();
       timer = setTimeout(() => {
