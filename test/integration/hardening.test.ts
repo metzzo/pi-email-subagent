@@ -464,7 +464,10 @@ describe("broker hardening", () => {
     class OmittedWriteWorker extends FakeWorker {
       override async start(config: WorkerStartConfig): Promise<void> {
         await super.start(config);
-        this.record!.tools = this.record!.tools.filter((tool) => tool !== "write" && tool !== "edit" && tool !== "bash");
+        // Mirror real Pi behavior: unknown/unavailable tool names (no worker
+        // extension provides compact_and_continue here) are omitted from the
+        // live set alongside the deliberately dropped mutation tools.
+        this.record!.tools = this.record!.tools.filter((tool) => tool !== "write" && tool !== "edit" && tool !== "bash" && tool !== "compact_and_continue");
       }
       override async prompt(message: string): Promise<void> {
         const durable = JSON.parse(await readFile(registryPath, "utf8")) as any;

@@ -7,7 +7,7 @@ import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from 
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
+import { DEFAULT_CONFIG, DEFAULT_LIFECYCLE, resolveAgentProfile } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
 import { WorkerSettingsSnapshot } from "../../src/settings-snapshot.ts";
 import type { AgentRecord } from "../../src/types.ts";
@@ -229,6 +229,71 @@ it("constructs and disposes an isolated real AgentSession with only explicit wor
   assert.equal(omitted.getSnapshot().activeTools.includes("compact_and_continue"), false);
   assert.equal(sessionStarts, 1, "an extension factory is not loaded when none of its tools is named in the profile");
   await omitted.dispose();
+});
+
+it("activates compact_and_continue for the default worker profile and tolerates a missing extension", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-default-compact-"));
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
+  assert.ok(model, "expected at least one built-in model");
+  const settingsSnapshot = WorkerSettingsSnapshot.capture(root, root, false);
+  const compactExtension: WorkerExtensionRegistration = {
+    protocolVersion: 2,
+    name: "compact-warning-probe",
+    tools: ["compact_and_continue"],
+    effects: { compact_and_continue: "write" },
+    factory(pi) {
+      pi.registerTool({
+        name: "compact_and_continue",
+        label: "compact_and_continue",
+        description: "Worker extension probe.",
+        parameters: Type.Object({}),
+        async execute() {
+          return { content: [{ type: "text", text: "probe" }], details: {} };
+        },
+      });
+    },
+  };
+  const startWith = async (address: string, tools: readonly string[], extensions: WorkerExtensionRegistration[]): Promise<SdkWorker> => {
+    const record = workerRecord(model, address);
+    record.tools = [...tools];
+    const worker = new SdkWorker(runtime, undefined, settingsSnapshot, extensions);
+    await worker.start({
+      record,
+      model,
+      cwd: root,
+      agentDir: root,
+      sessionDir: join(root, "sessions"),
+      projectTrusted: false,
+      systemPrompt: "MAILBOX_SENTINEL: default-profile compact tool test.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    return worker;
+  };
+
+  const workerProfile = resolveAgentProfile(DEFAULT_CONFIG, `worker.compact-default@${model.id}.com`, "worker");
+  assert.ok(workerProfile.tools.includes("compact_and_continue"), "default worker profile lists compact_and_continue");
+  const withExtension = await startWith(`worker.compact-default@${model.id}.com`, workerProfile.tools, [compactExtension]);
+  assert.equal(withExtension.getSnapshot().activeTools.includes("compact_and_continue"), true, "default worker profile activates the v2 compact tool");
+  await withExtension.dispose();
+
+  const reviewerProfile = resolveAgentProfile(DEFAULT_CONFIG, `reviewer.compact-default@${model.id}.com`, "reviewer");
+  assert.equal(reviewerProfile.tools.includes("compact_and_continue"), false, "read-only default roles stay read-only");
+  const readOnly = await startWith(`reviewer.compact-default@${model.id}.com`, reviewerProfile.tools, [compactExtension]);
+  assert.equal(readOnly.getSnapshot().activeTools.includes("compact_and_continue"), false, "an unlisted extension tool is not activated");
+  await readOnly.dispose();
+
+  const missing = await startWith(`worker.compact-missing@${model.id}.com`, workerProfile.tools, []);
+  const missingSnapshot = missing.getSnapshot();
+  assert.equal(missingSnapshot.record.state, "idle", "worker starts without the optional extension");
+  assert.equal(missingSnapshot.activeTools.includes("compact_and_continue"), false, "missing extension tool is absent");
+  assert.equal(
+    missingSnapshot.record.activity.some((item) => item.summary.includes("Unknown tools omitted") && item.summary.includes("compact_and_continue")),
+    true,
+    "the omission is visible in worker activity",
+  );
+  await missing.dispose();
 });
 
 it("guards a real session against late undeclared built-in tool overrides", async () => {

@@ -61,7 +61,7 @@ Ordinary global/project extension discovery remains disabled in worker sessions.
 
 Registration names, counts, tool counts, tool-name sizes, and exact effect declarations are bounded. Built-in/mailbox names, duplicate registration names, duplicate/colliding tools, undeclared effects/tools, and failed activation are rejected or reported with bounded diagnostics. An extension tool is activated only when that exact tool name appears in the worker's effective role/address profile; `inspect_agent` reports it and uses its declared effect for prospective writability. Tool-less lifecycle factories remain lifecycle-bound. Factories receive explicit Pi `print`-mode lifecycle binding. Public AgentSession settlement is held until the tracked prompt operation resolves, so nested continuations and overflow recovery collapse to one worker-level settlement. Cleanup emits one `session_shutdown`, aborts and rechecks compaction/streaming work, and joins the full admitted prompt before reporting quiescence.
 
-A protocol-v2 `pi-compact-warning` registration can run its warning/compaction continuation inside a worker only when that profile explicitly lists `compact_and_continue`. Older protocol-v1 registrations are rejected and must be upgraded. Both extensions are trusted code with the Pi user's permissions; opt-in is not sandboxing.
+A protocol-v2 `pi-compact-warning` registration can run its warning/compaction continuation inside a worker only when that profile explicitly lists `compact_and_continue`. The default `worker` role lists it; read-only default roles do not, because the tool's honest session-mutating `write` effect would flip their writability classification. Without the extension installed, the default entry is inert (unknown tool names are ignored and the omission is logged in worker activity). Older protocol-v1 registrations are rejected and must be upgraded. Both extensions are trusted code with the Pi user's permissions; opt-in is not sandboxing.
 
 ## Model selection
 
@@ -119,7 +119,7 @@ Trusted project override: `<Pi config dir>/subagents.json` (normally `.pi/subage
     },
     "worker": {
       "effort": "high",
-      "tools": ["read", "grep", "find", "ls", "bash", "edit", "write", "send_email", "fetch_emails"]
+      "tools": ["read", "grep", "find", "ls", "bash", "edit", "write", "send_email", "fetch_emails", "compact_and_continue"]
     }
   }
 }

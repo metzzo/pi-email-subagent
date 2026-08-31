@@ -121,7 +121,13 @@ export const DEFAULT_CONFIG: SubagentConfig = {
     },
     worker: {
       effort: "medium",
-      tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "send_email", "fetch_emails"],
+      // compact_and_continue is provided by the optional pi-compact-warning
+      // worker extension (protocol v2). Without that extension installed the
+      // name is inert: Pi ignores unknown tool names and the worker notes the
+      // omission. Read-only roles (scout/reviewer) deliberately exclude it:
+      // its honest session-mutating "write" effect would flip their writability
+      // classification and mislead delegation decisions.
+      tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "send_email", "fetch_emails", "compact_and_continue"],
       instructions: "Implement focused changes, validate them, and report exact files and test results.",
     },
   },

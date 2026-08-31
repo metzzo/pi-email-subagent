@@ -159,13 +159,15 @@ See [Provider retry visibility and recovery](provider-retry-recovery.md).
 |------|--------|-------|--------|
 | `scout` | low | read, grep, find, ls + mail | Explore and report evidence; read-only |
 | `reviewer` | high | read, grep, find, ls + mail | Review with findings and validation; read-only |
-| `worker` | medium | read, grep, find, ls, bash, edit, write + mail | Implement and validate changes |
+| `worker` | medium | read, grep, find, ls, bash, edit, write + mail + `compact_and_continue` | Implement and validate changes |
+
+`compact_and_continue` is supplied by the optional protocol-v2 `pi-compact-warning` worker extension. Without that extension installed the profile entry is inert: Pi ignores unknown tool names and the worker records the omission in its activity log. Read-only roles deliberately exclude it because its honest session-mutating `write` effect would otherwise flip their writability classification. To give a read-only role the compaction handoff anyway, define a custom role/address profile listing it and accept the writable classification.
 
 Nested delegation is not a configurable profile capability.
 
 ## Notes
 
-- A single formatted envelope and every complete batch prefix must fit `maxBatchBytes`, the context-safe tool payload budget (currently 48 KB with reserved result overhead), and a conservative selected-model budget of one quarter of `contextWindow - maxTokens`; boundaries never split an envelope. At most 1952 lines are returned by the mail tool. This ensures the same mail remains retrievable through `fetch_emails`; XML escaping counts toward the byte limit.
+- A single formatted envelope and every complete batch prefix must fit `maxBatchBytes`, the context-safe tool payload budget (currently 48 KB with reserved result overhead), and a conservative selected-model budget of one quarter of `contextWindow - maxTokens` (one quarter of `contextWindow` for providers that keep `maxTokens` equal to `contextWindow`); boundaries never split an envelope. At most 1952 lines are returned by the mail tool. This ensures the same mail remains retrievable through `fetch_emails`; XML escaping counts toward the byte limit.
 - `modelPolicy` replaces the entire model-selection policy bullet list in both the main coordinator prompt and every subagent prompt. The default policy is catalog-neutral: it chooses only from the available-model list, honors an explicitly requested available model without silent substitution, and directs exact prospective decisions to `inspect_agent`. The available-model list reflects prospective IDs routable under the current main provider; existing exact bindings can remain usable even when a different provider is preferred.
 - Live-session journal maintenance compacts after more than 8192 excess transition events. It also prunes the oldest terminal mail above `maxRetainedEmails`; queued mail, open obligations, reservations, and retained request/reply pairs remain intact. The cap is soft when protected mail alone exceeds it.
 - Provider, model catalog, and credential changes require an extension reload; worker runtimes snapshot them at session start.
