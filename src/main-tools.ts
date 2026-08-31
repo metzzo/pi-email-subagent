@@ -1,16 +1,14 @@
-import * as PiAi from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
-import * as TypeBox from "typebox";
-import { MAX_REPLY_WAIT_MS, type AgentBroker } from "./broker.ts";
+import type { AgentBroker } from "./broker.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { textResult } from "./tool-result.ts";
+import { CancelRequestSchema, InspectAgentSchema, ManageAgentSchema, WaitForRepliesSchema } from "./tool-schemas.ts";
 import type { AgentCapacitySnapshot, AgentInspection, BoundedRequestIds, EmailEnvelope, WaitForRepliesResult } from "./types.ts";
-import { byteLength } from "./util.ts";
+import { byteLength, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork } from "./work-ledger.ts";
 
 const errorMessage = safeErrorSummary;
-const { Type } = TypeBox;
 const { Text } = PiTui;
 const PENDING_WAIT_GUIDANCE = "Pending requests remain correlated in durable mail. A low-priority reply that arrives while main is busy stays broker-queued: a later collector may claim it, otherwise it is presented after Pi agent_settled. Main-idle low mail and high-priority steering remain prompt. Once ordinary presentation calls sendMessage, Pi 0.84.2 exposes no durable append acknowledgement. No immediate keepalive rejoin is needed; rejoin the stable request ID for a deliberate collection/status window or after restart/presentation uncertainty.";
 const WAIT_PRESENTATION_LIMIT = "Active wait presentation: every active wait has at most one live body surface for a reply in its live race. With collect:true, if this wait claims a queued low reply first, it returns the reply without ordinary presentation. If ordinary presentation wins, this wait returns status without that reply body; a later deliberate rejoin may recover it. Pi 0.84.2 exposes no staged tool-result append receipt, so this is not a crash-proof exactly-once guarantee.";
@@ -54,7 +52,6 @@ function formatBlocker(label: string, blocker: BoundedRequestIds): string | unde
 function inspectionRecovery(inspection: AgentInspection): string {
   const blockers = inspection.archiveBlockers.queued.count
     + inspection.archiveBlockers.incomingUnanswered.count
-    + inspection.archiveBlockers.outgoingUnanswered.count
     + inspection.archiveBlockers.pendingReplies.count;
   if (inspection.cleanup) return "Pi session/tool cleanup settlement is unknown for this exact address. Wait for its live cleanup operation to settle; restart/archive remain blocked only for this identity and queued mail is preserved.";
   if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity only for the same feature, worktree, or review-repair cycle; otherwise ask main to resolve real obligations and archive a clean identity before retrying.";
@@ -84,7 +81,6 @@ function compactWaitDetails(result: WaitForRepliesResult): WaitForRepliesResult 
 export function createMainCoordinationTools(
   getBroker: () => AgentBroker | undefined,
 ) {
-  const EffortSchema = PiAi.StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
   const inspect = PiCodingAgent.defineTool({
     name: "inspect_agent",
     label: "Inspect agent",
@@ -96,10 +92,7 @@ export function createMainCoordinationTools(
       "Role labels do not grant tools; rely on the effective tools returned by inspect_agent.",
     ],
     executionMode: "parallel" as const,
-    parameters: Type.Object({
-      address: Type.String({ description: "Subagent address to inspect or preview" }),
-      effort: Type.Optional(EffortSchema),
-    }, { additionalProperties: false }),
+    parameters: InspectAgentSchema,
     async execute(_id, params) {
       try {
         const broker = getBroker();
@@ -112,20 +105,22 @@ export function createMainCoordinationTools(
           inspection.exists
             ? `Binding: persisted exact provider/model${inspection.providerReady === "unavailable" ? " · unavailable in current catalog · no provider substitution" : " · existing identity ignores current main-provider preference"}`
             : "Selection: prospective provider/model under the current main-provider preference; the first accepted mail persists it",
-          `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"} · ${inspection.canSpawn ? "can delegate" : "delegation disabled"}`,
+          `Role: ${inspection.role} · ${inspection.writable ? "writable" : "read-only"}`,
           `Tools: ${inspection.tools.join(", ")}`,
           `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} used · this address holds a lease: ${inspection.holdsActivationLease ? "yes" : "no"} · capacity available for this address: ${inspection.capacityAvailable ? "yes" : "no"}`,
           `Run concurrency: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit} slots used`,
-          `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} incoming unanswered · ${inspection.outgoingUnanswered} outgoing unanswered · ${inspection.pendingReplies} pending replies`,
+          `Mailbox: ${inspection.queued} queued · ${inspection.unanswered} incoming unanswered · ${inspection.pendingReplies} pending replies`,
           `Archive eligible: ${inspection.archiveEligible ? "yes" : "no"}`,
           `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
         ];
+        if (inspection.budgets) {
+          lines.push(`Current run budget: ${inspection.budgets.currentRun.turns}/${inspection.budgets.limits.maxTurns} turns · ${inspection.budgets.currentRun.toolCalls}/${inspection.budgets.limits.maxToolCalls} tools · ${inspection.budgets.currentRun.tokens}/${inspection.budgets.limits.maxTokens} tokens · circuit ${broker.getSnapshot().agents.find((agent) => agent.address === inspection.address)?.consecutiveFailures ?? 0}/${inspection.budgets.limits.maxConsecutiveFailures}`);
+        }
         const blockerDetails = [
           inspection.archiveBlockers.active ? "active worker" : undefined,
           inspection.archiveBlockers.cleanupQuarantine ? "Pi session/tool cleanup unsettled" : undefined,
           formatBlocker("queued", inspection.archiveBlockers.queued),
           formatBlocker("incoming unanswered", inspection.archiveBlockers.incomingUnanswered),
-          formatBlocker("outgoing unanswered", inspection.archiveBlockers.outgoingUnanswered),
           formatBlocker("reply delivery pending", inspection.archiveBlockers.pendingReplies),
         ].filter((value): value is string => Boolean(value));
         if (blockerDetails.length) lines.push(`Archive blockers: ${blockerDetails.join(" · ")}`);
@@ -138,11 +133,7 @@ export function createMainCoordinationTools(
           lines.push(`Last failure: ${inspection.failure}`);
           const record = broker.getSnapshot().agents.find((agent) => agent.address === inspection.address);
           if (record?.activity.some((item) => item.summary === "Agent run failed")) {
-            const open = broker.mailStore.list().filter((email) => email.to === inspection.address
-              && email.kind === "request"
-              && email.requiresResponse
-              && email.deliveryState === "delivered"
-              && !email.answeredAt).length;
+            const open = broker.openDeliveredRequestCount(inspection.address);
             const obligation = open === 0
               ? "No delivered requests remain unanswered."
               : `${open} delivered request${open === 1 ? "" : "s"} remain${open === 1 ? "s" : ""} unanswered.`;
@@ -171,11 +162,7 @@ export function createMainCoordinationTools(
       "Do not immediately rejoin merely to keep pending requests alive. Rejoin for a deliberate synchronous collection/status window or after restart/presentation uncertainty.",
     ],
     executionMode: "sequential" as const,
-    parameters: Type.Object({
-      request_ids: Type.Array(Type.String(), { minItems: 1, maxItems: 32 }),
-      timeout_seconds: Type.Optional(Type.Integer({ minimum: 0, maximum: MAX_REPLY_WAIT_MS / 1_000, default: 120 })),
-      collect: Type.Optional(Type.Boolean({ default: true })),
-    }, { additionalProperties: false }),
+    parameters: WaitForRepliesSchema,
     async execute(_id, params, signal) {
       try {
         const broker = getBroker();
@@ -200,9 +187,16 @@ export function createMainCoordinationTools(
           const subject = item.reply?.subject ?? item.request?.subject ?? item.requestId;
           const suffix = item.error ? ` · ${item.error}` : "";
           const summary = `- ${item.requestId}: ${item.state} · ${subject}${suffix}`;
-          const full = `${summary}${item.reply ? `\n  ${item.reply.message}` : ""}`;
+          const completion = item.reply?.completion;
+          const completionText = completion
+            ? `\n  Completion: ${completion.status} · ${truncateText(completion.summary, 512)}`
+              + `${completion.validation.length > 0 ? `\n  Validation: ${completion.validation.slice(0, 4).map((value) => truncateText(value, 256)).join(" · ")}` : ""}`
+              + `${completion.remaining.length > 0 ? `\n  Remaining: ${completion.remaining.slice(0, 4).map((value) => truncateText(value, 256)).join(" · ")}` : ""}`
+              + `${completion.warning ? `\n  Warning: ${truncateText(completion.warning, 512)}` : ""}`
+            : "";
+          const full = `${summary}${completionText}${item.reply ? `\n  ${item.reply.message}` : ""}`;
           if (item.reply && byteLength([...lines, full].join("\n")) > broker.toolResultByteLimit) {
-            lines.push(`${summary}\n  [reply body omitted from this batch; call wait_for_replies again with only ${item.requestId}]`);
+            lines.push(`${summary}${completionText}\n  [reply body omitted from this batch; call wait_for_replies again with only ${item.requestId}]`);
             omitted.push(item.requestId);
           } else lines.push(full);
         }
@@ -230,10 +224,7 @@ export function createMainCoordinationTools(
       "Never cancel merely to hide an unanswered count; preserve the substantive reason for the audit journal.",
     ],
     executionMode: "sequential" as const,
-    parameters: Type.Object({
-      request_id: Type.String({ minLength: 1, description: "Exact request/correlation ID returned by send_email" }),
-      reason: Type.String({ minLength: 8, maxLength: 1024, description: "Why this obligation is being intentionally abandoned" }),
-    }, { additionalProperties: false }),
+    parameters: CancelRequestSchema,
     async execute(_id, params) {
       try {
         const broker = getBroker();
@@ -268,10 +259,7 @@ export function createMainCoordinationTools(
       "Before restarting a failed agent, inspect its current-batch Work and native Conversation; explicitly restart the same identity only after accounting for possible effects.",
     ],
     executionMode: "sequential" as const,
-    parameters: Type.Object({
-      address: Type.String({ description: "Exact existing subagent address" }),
-      action: PiAi.StringEnum(["stop", "restart", "archive", "clear_failure"] as const),
-    }, { additionalProperties: false }),
+    parameters: ManageAgentSchema,
     renderCall(args, theme) {
       const action = errorMessage(String(args.action ?? ""));
       const address = errorMessage(String(args.address ?? ""));

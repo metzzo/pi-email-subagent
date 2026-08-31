@@ -249,54 +249,23 @@ describe("broker hardening", () => {
     }
   });
 
-  it("restores a canonical queued legacy child reply without re-enabling delegation", async () => {
-    const { broker, workers } = await setup();
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.failed-parent@gpt-5.4.com", subject: "Parent", message: "Legacy child fixture.", priority: "low",
-      });
-      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
-      records.get(upstream.envelope.to)!.canSpawn = true;
-      const childRequest = await workers[0]!.send({
-        to: "worker.failed-child@gpt-5.4.com", subject: "Child", message: "Return a child result.", priority: "low",
-      });
-      records.get(upstream.envelope.to)!.canSpawn = false;
-      workers[0]!.fail("parent failed before child reply");
-      await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "failed"));
-
-      const childReply = await workers[1]!.send({
-        to: upstream.envelope.to,
-        subject: childRequest.expectedReplySubject!,
-        message: "Durable child result.",
-        priority: "low",
-      });
-      assert.equal(childReply.recipientDisposition, "failed");
-      assert.equal(childReply.envelope.deliveryState, "queued");
-      assert.equal(broker.mailStore.get(childRequest.envelope.id)?.replyReservedBy, childReply.envelope.id);
-      assert.equal(broker.mailStore.get(childRequest.envelope.id)?.answeredAt, undefined);
-      const pendingInspection = broker.inspectAgent(upstream.envelope.to);
-      assert.equal(pendingInspection.archiveBlockers.pendingReplies.count, 1);
-      assert.deepEqual(pendingInspection.archiveBlockers.pendingReplies.requestIds, [childRequest.envelope.id]);
-      assert.equal(
-        pendingInspection.pendingReplies,
-        pendingInspection.archiveBlockers.pendingReplies.count,
-        "inspection uses the canonical blocker classifier for outbound reservations",
-      );
-      assert.equal(workers.length, 2);
-
-      await broker.restart(upstream.envelope.to);
-      assert.equal(workers.length, 3);
-      await eventually(() => assert.equal(workers[2]!.prompts.length, 1));
-      assert.match(workers[2]!.prompts[0]!, /Durable child result/);
-      assert.equal(broker.mailStore.get(childRequest.envelope.id)?.answeredBy, childReply.envelope.id);
-      assert.equal(
-        broker.mailStore.list().filter((email) => email.id === childReply.envelope.id).length,
-        1,
-        "explicit restart delivers the same stable reply ID once",
-      );
-    } finally {
-      await broker.shutdown();
-    }
+  it("rejects unsupported pre-0.1 nested-delegation journals at startup", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-legacy-child-"));
+    const store = new MailStore(join(root, "state", "mail.jsonl"));
+    await store.init();
+    await store.accept({
+      id: "mail_legacy_child_request",
+      from: "worker.parent@gpt-5.4.com",
+      to: "worker.child@gpt-5.4.com",
+      subject: "Legacy child",
+      message: "Unsupported nested request.",
+      priority: "low",
+      kind: "request",
+      requiresResponse: true,
+      createdAt: new Date().toISOString(),
+      deliveryState: "queued",
+    });
+    await assert.rejects(setup({}, root), /Unsupported pre-0\.1 nested-delegation journal/i);
   });
 
   it("accepts mail for a known failed binding that is absent from the current catalog", async () => {
@@ -328,161 +297,6 @@ describe("broker hardening", () => {
       assert.equal(restored.broker.mailStore.get(accepted.envelope.id)?.deliveryState, "queued");
     } finally {
       await restored.broker.shutdown();
-    }
-  });
-
-  it("wakes a parked parent for an exact canonical legacy child reply", async () => {
-    const { broker, workers } = await setup();
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.parked-parent@gpt-5.4.com", subject: "Upstream", message: "Legacy child fixture.", priority: "low",
-      });
-      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
-      records.get(upstream.envelope.to)!.canSpawn = true;
-      const child = await workers[0]!.send({
-        to: "worker.parked-child@gpt-5.4.com", subject: "Child", message: "Return the dependency result.", priority: "low",
-      });
-      records.get(upstream.envelope.to)!.canSpawn = false;
-
-      workers[0]!.settle("Interim text must not answer upstream.");
-      await eventually(() => {
-        const inspection = broker.inspectAgent(upstream.envelope.to);
-        assert.equal(inspection.state, "parked");
-        assert.equal(inspection.outgoingUnanswered, 1);
-        assert.equal(inspection.capacity.runSlotsUsed, 1, "only the child still owns a run slot");
-      });
-      assert.equal(workers[0]!.prompts.length, 1, "parking consumes no mailbox-enforcement attempt");
-      assert.equal(broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined);
-
-      await assert.rejects(workers[0]!.send({
-        to: broker.mainAddress,
-        subject: upstream.expectedReplySubject!,
-        message: "Premature upstream answer.",
-        priority: "low",
-      }), /outgoing child dependency.*still open/i);
-      assert.equal(broker.mailStore.get(upstream.envelope.id)?.replyReservedBy, undefined);
-
-      const childReply = await workers[1]!.send({
-        to: upstream.envelope.to,
-        subject: child.expectedReplySubject!,
-        message: "Exact child result.",
-        priority: "low",
-      });
-      workers[1]!.settle();
-      await eventually(() => assert.equal(workers[0]!.prompts.length, 2));
-      assert.match(workers[0]!.prompts[1]!, /Exact child result/);
-      assert.equal(broker.mailStore.get(child.envelope.id)?.answeredBy, childReply.envelope.id);
-      assert.equal(broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined, "child result never answers upstream");
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
-  it("keeps namespace shutdown blocked while a detached terminal-child writer can still append", async () => {
-    const { broker, workers } = await setup({ lifecycle: { ...structuredClone(DEFAULT_CONFIG.lifecycle), brokerShutdownTimeoutMs: 2_000 } });
-    let release!: () => void;
-    const hold = new Promise<void>((resolve) => { release = resolve; });
-    let enteredResolve!: () => void;
-    const entered = new Promise<void>((resolve) => { enteredResolve = resolve; });
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.shutdown-parent@gpt-5.4.com", subject: "Parent", message: "Legacy parent fixture.", priority: "low",
-      });
-      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
-      records.get(upstream.envelope.to)!.canSpawn = true;
-      await workers[0]!.send({
-        to: "worker.shutdown-child@gpt-5.4.com", subject: "Child", message: "Legacy child fixture.", priority: "low",
-      });
-      records.get(upstream.envelope.to)!.canSpawn = false;
-      const originalReserve = broker.mailStore.reserveReply.bind(broker.mailStore);
-      broker.mailStore.reserveReply = async (...args) => {
-        enteredResolve();
-        await hold;
-        return originalReserve(...args);
-      };
-      workers[1]!.fail("terminal child failure");
-      await entered;
-      let closed = false;
-      const closing = broker.shutdown().then(() => { closed = true; });
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.equal(closed, false, "shutdown barrier retains ownership while the detached blocker writer is pending");
-      release();
-      await closing;
-      const blockers = broker.mailStore.list().filter((email) =>
-        email.kind === "reply" && /Broker-generated dependency blocker/.test(email.message));
-      assert.equal(blockers.length, 1);
-    } finally {
-      release?.();
-      await broker.shutdown().catch(() => undefined);
-    }
-  });
-
-  it("durably wakes the exact parked legacy parent when its last child is cancelled", async () => {
-    const { broker, workers } = await setup();
-    try {
-      const upstream = await broker.send(broker.mainAddress, {
-        to: "worker.cancel-parent@gpt-5.4.com", subject: "Upstream", message: "Legacy parent fixture.", priority: "low",
-      });
-      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
-      records.get(upstream.envelope.to)!.canSpawn = true; // simulate a durable child accepted by an older release
-      const child = await workers[0]!.send({
-        to: "worker.cancel-child@gpt-5.4.com", subject: "Child", message: "Legacy child fixture.", priority: "low",
-      });
-      records.get(upstream.envelope.to)!.canSpawn = false;
-      workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(upstream.envelope.to).state, "parked"));
-      await broker.stop(child.envelope.to);
-      await broker.cancelRequest(child.envelope.id, "The operator explicitly abandoned this exact legacy child request.");
-      await eventually(() => assert.equal(workers[0]!.prompts.length, 2));
-      assert.match(workers[0]!.prompts[1]!, /Terminal cancellation status.*closes only that child dependency/is);
-      assert.equal(broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined);
-      const wakeCount = () => broker.mailStore.list().filter((email) =>
-        email.kind === "reply" && email.inReplyTo === child.envelope.id && /Cancelled child request/.test(email.subject)).length;
-      assert.equal(wakeCount(), 1);
-      await broker.cancelRequest(child.envelope.id, "Idempotent cancellation retry keeps the durable wake.");
-      assert.equal(wakeCount(), 1);
-    } finally { await broker.shutdown(); }
-  });
-
-  it("recovers one terminal blocker from canonical pre-upgrade child journal state", async () => {
-    const first = await setup();
-    const upstream = await first.broker.send(first.broker.mainAddress, {
-      to: "worker.crash-parent@gpt-5.4.com", subject: "Parent", message: "Legacy child fixture.", priority: "low",
-    });
-    const records = (first.broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
-    records.get(upstream.envelope.to)!.canSpawn = true;
-    const child = await first.workers[0]!.send({
-      to: "worker.crash-child@gpt-5.4.com", subject: "Child", message: "Remain open across recovery.", priority: "low",
-    });
-    records.get(upstream.envelope.to)!.canSpawn = false;
-    await first.broker.shutdown();
-
-    const registryPath = join(first.root, "state", "registry.json");
-    const registry = JSON.parse(await readFile(registryPath, "utf8")) as { agents: Array<Record<string, unknown>> };
-    const failedChild = registry.agents.find((record) => record.address === child.envelope.to)!;
-    failedChild.state = "failed";
-    failedChild.failure = "simulated crash before blocker journal commit";
-    await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
-
-    const afterBeforeCommit = await setup({}, first.root);
-    try {
-      await eventually(() => {
-        const blockers = afterBeforeCommit.broker.mailStore.list().filter((email) =>
-          email.kind === "reply" && email.inReplyTo === child.envelope.id);
-        assert.equal(blockers.length, 1);
-      });
-      assert.equal(afterBeforeCommit.broker.mailStore.get(upstream.envelope.id)?.answeredAt, undefined);
-    } finally {
-      await afterBeforeCommit.broker.shutdown();
-    }
-
-    const afterCommittedCrash = await setup({}, first.root);
-    try {
-      const blockers = afterCommittedCrash.broker.mailStore.list().filter((email) =>
-        email.kind === "reply" && email.inReplyTo === child.envelope.id);
-      assert.equal(blockers.length, 1, "post-commit recovery never creates a replacement blocker ID");
-    } finally {
-      await afterCommittedCrash.broker.shutdown();
     }
   });
 
@@ -780,27 +594,6 @@ describe("broker hardening", () => {
     }
   });
 
-  it("keeps canonical legacy outgoing child requests as archive blockers", async () => {
-    const { broker, workers } = await setup();
-    try {
-      const parent = await broker.send(broker.mainAddress, {
-        to: "worker.outbound-owner@gpt-5.4.com", subject: "Parent", message: "Legacy child fixture.", priority: "low",
-      });
-      const owner = workers[0]!;
-      const records = (broker as unknown as { records: Map<string, { canSpawn: boolean }> }).records;
-      records.get(parent.envelope.to)!.canSpawn = true;
-      await owner.send({
-        to: "worker.outbound-peer@gpt-5.4.com", subject: "Outstanding child", message: "Do not reply yet.", priority: "low",
-      });
-      records.get(parent.envelope.to)!.canSpawn = false;
-      await broker.stop(owner.record!.address);
-      assert.equal(broker.mailStore.get(parent.envelope.id)?.answeredAt, undefined);
-      await assert.rejects(broker.archive(owner.record!.address), /queued mail or unanswered obligations/);
-    } finally {
-      await broker.shutdown();
-    }
-  });
-
   it("clears only a stopped agent's stale failure diagnostic", async () => {
     const { broker, workers } = await setup();
     try {
@@ -1036,7 +829,7 @@ describe("broker hardening", () => {
   });
 
   it("does not report failed-delivery mail as an open obligation", async () => {
-    const { broker } = await setup({ maxBatchBytes: 300 });
+    const { broker } = await setup({ maxBatchBytes: 400 });
     try {
       await assert.rejects(broker.send(broker.mainAddress, {
         to: "worker.failed-count@gpt-5.4.com", subject: "Too large", message: "&".repeat(100), priority: "low",
@@ -1091,11 +884,8 @@ describe("broker hardening", () => {
     }
   });
 
-  it("keeps all nested response-required delegation disabled even when canSpawn is configured", async () => {
-    const roles = structuredClone(DEFAULT_CONFIG.roles);
-    roles.scout!.canSpawn = false;
-    roles.worker!.canSpawn = true;
-    const { broker, workers, main } = await setup({ roles });
+  it("rejects all nested response-required delegation while preserving replies and mail to main", async () => {
+    const { broker, workers, main } = await setup();
     try {
       const scoutOne = await broker.send(broker.mainAddress, {
         to: "scout.one@gpt-5.4.com", subject: "One", message: "First.", priority: "low",
@@ -1103,15 +893,13 @@ describe("broker hardening", () => {
       await broker.send(broker.mainAddress, {
         to: "scout.two@gpt-5.4.com", subject: "Two", message: "Second.", priority: "low",
       });
-      assert.equal(workers.length, 2);
-
       await assert.rejects(workers[0]!.send({
         to: "scout.two@gpt-5.4.com", subject: "Known delegation", message: "Existing identity.", priority: "low",
-      }), /not permitted to delegate to subagents/);
+      }), /nested response-required delegation is unsupported/i);
       await assert.rejects(workers[0]!.send({
         to: "scout.three@gpt-5.4.com", subject: "Unknown delegation", message: "New identity.", priority: "low",
-      }), /not permitted to delegate to subagents/);
-      assert.equal(workers.length, 2, "disabled delegation creates no worker or envelope");
+      }), /nested response-required delegation is unsupported/i);
+      assert.equal(workers.length, 2, "rejected delegation creates no worker or envelope");
 
       const exactReply = await workers[0]!.send({
         to: broker.mainAddress,
@@ -1128,21 +916,12 @@ describe("broker hardening", () => {
       });
       assert.equal(mainMail.recipientDisposition, "main");
       assert.equal(main.deliveries.length, 2);
-
-      await broker.send(broker.mainAddress, {
-        to: "worker.three@gpt-5.4.com", subject: "Three", message: "Explicitly opted in.", priority: "low",
-      });
-      assert.equal(broker.inspectAgent("worker.three@gpt-5.4.com").canSpawn, false);
-      await assert.rejects(workers[2]!.send({
-        to: "scout.four@gpt-5.4.com", subject: "Four", message: "Fourth.", priority: "low",
-      }), /not permitted to delegate.*disabled/i);
-      assert.equal(workers.length, 3);
     } finally {
       await broker.shutdown();
     }
   });
 
-  it("disables delegation for unknown roles by default", async () => {
+  it("rejects nested delegation for unknown roles", async () => {
     const { broker, workers } = await setup();
     try {
       await broker.send(broker.mainAddress, {
@@ -1150,7 +929,7 @@ describe("broker hardening", () => {
       });
       await assert.rejects(workers[0]!.send({
         to: "analyst.child@gpt-5.4.com", subject: "Child", message: "Must be rejected.", priority: "low",
-      }), /not permitted to delegate to subagents/);
+      }), /nested response-required delegation is unsupported/i);
       assert.equal(workers.length, 1);
     } finally {
       await broker.shutdown();

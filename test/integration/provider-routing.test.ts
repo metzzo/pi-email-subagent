@@ -250,7 +250,6 @@ describe("provider-aware durable routing", () => {
     const persisted = JSON.parse(await readFile(registryPath, "utf8"));
     const persistedAlpha = persisted.agents.find((record: any) => record.address === alphaSend.envelope.to);
     persistedAlpha.tools = ["read", "legacy-tool", "send_email", "fetch_emails"];
-    persistedAlpha.canSpawn = false;
     persistedAlpha.instructions = "Preserve this unavailable profile.";
     await writeFile(registryPath, JSON.stringify(persisted, null, 2));
 
@@ -264,7 +263,6 @@ describe("provider-aware durable routing", () => {
       assert.equal(removed.providerReady, "unavailable");
       assert.equal(removed.holdsActivationLease, false);
       assert.deepEqual(removed.tools, ["read", "legacy-tool", "send_email", "fetch_emails"]);
-      assert.equal(removed.canSpawn, false);
       assert.equal(removed.instructions, "Preserve this unavailable profile.");
       assert.match(removed.failure ?? "", /bound to provider-alpha\/shared.*not rebound/is);
       assert.equal(missing.broker.inspectAgent(betaSend.envelope.to).provider, "provider-beta");

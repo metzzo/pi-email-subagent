@@ -105,12 +105,12 @@ it("returns exact bounded prospective capability details without truncating tool
     address: "worker.bound@gpt-5.6-sol.com", exists: false, wouldSpawn: true, capacityAvailable: true,
     capacity: { identitiesUsed: 0, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 }, holdsActivationLease: false,
     modelId: "gpt-5.6-sol", provider: "openai-codex", effort: "medium", role: "worker", tools, instructions,
-    writable: true, canSpawn: false, state: "new", queued: 0, unanswered: 0, outgoingUnanswered: 0, pendingReplies: 0,
+    writable: true, state: "new", queued: 0, unanswered: 0, pendingReplies: 0,
     archiveEligible: false,
     archiveBlockers: {
       active: false, cleanupQuarantine: false,
       queued: { count: 0, requestIds: [], omitted: 0 }, incomingUnanswered: { count: 0, requestIds: [], omitted: 0 },
-      outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 }, pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+      pendingReplies: { count: 0, requestIds: [], omitted: 0 },
     },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     providerReady: "unknown",
@@ -149,11 +149,9 @@ it("previews an initial effort override without spawning", async () => {
         role: "worker",
         tools: ["read", "bash", "edit", "write", "send_email", "fetch_emails"],
         writable: true,
-        canSpawn: true,
         state: "new",
         queued: 0,
         unanswered: 0,
-        outgoingUnanswered: 0,
         pendingReplies: 0,
         archiveEligible: false,
         archiveBlockers: {
@@ -161,7 +159,6 @@ it("previews an initial effort override without spawning", async () => {
           cleanupQuarantine: false,
           queued: { count: 0, requestIds: [], omitted: 0 },
           incomingUnanswered: { count: 0, requestIds: [], omitted: 0 },
-          outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 },
           pendingReplies: { count: 0, requestIds: [], omitted: 0 },
         },
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -198,7 +195,7 @@ it("previews an initial effort override without spawning", async () => {
 });
 
 it("renders derived capacity, lease, obligations, archive eligibility, and safe recovery", async () => {
-  const requestIds = ["mail_incoming", "mail_outgoing"];
+  const requestIds = ["mail_incoming"];
   const inspection = {
     address: "worker.capacity@gpt-5.4.com",
     exists: true,
@@ -212,11 +209,9 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
     role: "worker",
     tools: ["read", "send_email", "fetch_emails"],
     writable: false,
-    canSpawn: true,
     state: "stopped",
     queued: 0,
     unanswered: 1,
-    outgoingUnanswered: 1,
     pendingReplies: 0,
     archiveEligible: false,
     archiveBlockers: {
@@ -224,7 +219,6 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
       cleanupQuarantine: false,
       queued: { count: 0, requestIds: [], omitted: 0 },
       incomingUnanswered: { count: 1, requestIds: [requestIds[0]], omitted: 0 },
-      outgoingUnanswered: { count: 1, requestIds: [requestIds[1]], omitted: 0 },
       pendingReplies: { count: 0, requestIds: [], omitted: 0 },
     },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -242,7 +236,7 @@ it("renders derived capacity, lease, obligations, archive eligibility, and safe 
   assert.match(text, /Binding: persisted exact provider\/model.*ignores current main-provider preference/i);
   assert.match(text, /Identity capacity: 2\/2 used.*holds a lease: yes.*available for this address: yes/i);
   assert.match(text, /Run concurrency: 1\/1 slots used/i);
-  assert.match(text, /1 incoming unanswered.*1 outgoing unanswered/i);
+  assert.match(text, /1 incoming unanswered/i);
   assert.match(text, /Archive eligible: no/i);
   assert.match(text, /restart.*real obligations/i);
   assert.match(text, /cancel only.*explicitly abandoned.*exact request/i);
@@ -292,13 +286,12 @@ it("renders terminal recovery from existing failure, mailbox, and current-batch 
     address: "worker.failed@gpt-5.4.com", exists: true, wouldSpawn: false, capacityAvailable: true,
     capacity: { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 }, holdsActivationLease: true,
     modelId: "gpt-5.4", provider: "openai-codex", effort: "medium", role: "worker",
-    tools: ["bash", "send_email", "fetch_emails"], writable: true, canSpawn: true, state: "failed",
-    queued: 0, unanswered: 1, outgoingUnanswered: 0, pendingReplies: 0, archiveEligible: false,
+    tools: ["bash", "send_email", "fetch_emails"], writable: true, state: "failed",
+    queued: 0, unanswered: 1, pendingReplies: 0, archiveEligible: false,
     archiveBlockers: {
       active: false, cleanupQuarantine: false,
       queued: { count: 0, requestIds: [], omitted: 0 },
       incomingUnanswered: { count: 1, requestIds: ["mail_open"], omitted: 0 },
-      outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 },
       pendingReplies: { count: 0, requestIds: [], omitted: 0 },
     },
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
@@ -311,10 +304,7 @@ it("renders terminal recovery from existing failure, mailbox, and current-batch 
   };
   const broker = {
     inspectAgent: () => inspection,
-    mailStore: { list: () => [{
-      to: inspection.address, kind: "request", requiresResponse: true, deliveryState: "delivered", answeredAt: undefined,
-      subject: "PRIVATE MAIL SUBJECT", message: "PRIVATE MAIL BODY",
-    }] },
+    openDeliveredRequestCount: () => 1,
     getSnapshot: () => ({ agents: [{
       address: inspection.address,
       provider: inspection.provider,
@@ -427,6 +417,14 @@ it("omits timeout guidance for complete, terminal, and abort-partial results", a
     kind: "reply" as const,
     inReplyTo: answeredRequest.id,
     requiresResponse: false,
+    completion: {
+      status: "blocked" as const,
+      summary: "Credentials are required.",
+      artifacts: [],
+      validation: ["Confirmed missing API token"],
+      remaining: ["Provide API token"],
+      warning: "No live-provider validation was run.",
+    },
   };
   const cases: WaitForRepliesResult[] = [
     {
@@ -451,6 +449,12 @@ it("omits timeout guidance for complete, terminal, and abort-partial results", a
     assert.doesNotMatch(text, /pending requests remain correlated/i);
     assert.doesNotMatch(text, /keep.*alive/i);
     if (!result.complete) assert.match(text, /Replies: partial/);
+    if (result.items[0]?.reply?.completion) {
+      assert.match(text, /Completion: blocked.*Credentials are required/is);
+      assert.match(text, /Validation: Confirmed missing API token/);
+      assert.match(text, /Remaining: Provide API token/);
+      assert.match(text, /Warning: No live-provider validation was run/);
+    }
   }
 });
 

@@ -13,7 +13,6 @@ function record(): AgentRecord {
     modelId: "gpt-5.4",
     effort: "medium",
     tools: ["bash", "send_email", "fetch_emails"],
-    canSpawn: false,
     state: "paused",
     createdAt: "2026-08-25T00:00:00.000Z",
     updatedAt: "2026-08-25T00:00:00.000Z",

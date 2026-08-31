@@ -203,7 +203,7 @@ describe("deferred low-priority main presentation", () => {
     } finally { await restored.broker.shutdown(); }
   });
 
-  it("bounds busy-main low mail by aggregate queued count while exempting high mail", async () => {
+  it("bounds busy-main unsolicited high mail with the shared queue cap", async () => {
     const main = new FakeMainAdapter();
     main.idle = false;
     const { broker, workers } = await setup(main, undefined, { maxQueuedMessages: 1 });
@@ -216,11 +216,30 @@ describe("deferred low-priority main presentation", () => {
         workers[0]!.send({ to: broker.mainAddress, subject: "Queued two", message: "two", priority: "low" }),
         /mailbox queue.*full/i,
       );
-      const high = await workers[0]!.send({
-        to: broker.mainAddress, subject: "Urgent blocker", message: "high bypass", priority: "high",
+      await assert.rejects(workers[0]!.send({
+        to: broker.mainAddress, subject: "Urgent blocker", message: "high must queue", priority: "high",
+      }), /mailbox queue.*full/i);
+      assert.equal(main.deliveries.length, 0, "unsolicited high mail cannot steer a busy main session");
+    } finally { await broker.shutdown(); }
+  });
+
+  it("queues unsolicited high worker notifications instead of steering a busy main session", async () => {
+    const main = new FakeMainAdapter();
+    main.idle = false;
+    const { broker, workers } = await setup(main);
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.unsolicited-high@gpt-5.4.com", subject: "Start", message: "Start.", priority: "low",
       });
-      assert.equal(high.envelope.deliveryState, "delivered");
-      assert.equal(main.deliveries.at(-1)?.envelope.id, high.envelope.id);
+      const high = await workers[0]!.send({
+        to: broker.mainAddress, subject: "Urgent status", message: "Queue this safely.", priority: "high",
+      });
+      assert.equal(high.envelope.kind, "notification");
+      assert.equal(high.envelope.deliveryState, "queued");
+      assert.equal(main.deliveries.length, 0);
+      main.idle = true;
+      await broker.flushQueuedMainMail();
+      assert.equal(main.deliveries[0]?.envelope.id, high.envelope.id);
     } finally { await broker.shutdown(); }
   });
 
@@ -702,7 +721,7 @@ describe("deferred low-priority main presentation", () => {
     } finally { await broker.shutdown(); }
   });
 
-  it("does not count transient queued high mail against the low main backlog limit", async () => {
+  it("counts queued unsolicited high notifications against the main backlog limit", async () => {
     const main = new FakeMainAdapter();
     main.idle = false;
     const { broker, workers } = await setup(main, undefined, { maxQueuedMessages: 1 });
@@ -717,16 +736,15 @@ describe("deferred low-priority main presentation", () => {
         subject: "Transient high",
         message: "urgent",
         priority: "high",
-        kind: "request",
-        requiresResponse: true,
+        kind: "notification",
+        requiresResponse: false,
         createdAt: new Date().toISOString(),
         deliveryState: "queued",
       });
-      const low = await workers[0]!.send({
+      await assert.rejects(workers[0]!.send({
         to: broker.mainAddress, subject: "Bounded low", message: "ordinary", priority: "low",
-      });
-      assert.equal(low.envelope.deliveryState, "queued");
-      assert.equal(broker.mailStore.queued(broker.mainAddress).filter((email) => email.priority === "low").length, 1);
+      }), /mailbox queue.*full/i);
+      assert.equal(main.deliveries.length, 0);
     } finally { await broker.shutdown(); }
   });
 

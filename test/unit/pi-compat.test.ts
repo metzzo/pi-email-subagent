@@ -1,193 +1,37 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import * as PiAi from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import * as PiTui from "@earendil-works/pi-tui";
-import * as TypeBox from "typebox";
 import {
   assertExtensionApiFeatures,
-  assertPiRuntimeFeatures,
+  assertPiVersion,
   assertSupportedPiRuntime,
   SUPPORTED_PI_VERSION,
-  collectedReplyPresentationCapability,
-  directMutationAliasSerializationCapability,
-  sessionPresentationReceiptCapability,
 } from "../../src/pi-compat.ts";
 
-it("accepts the exact supported Pi public version and feature surface", () => {
+it("accepts the exact installed Pi version", () => {
   assert.equal(PiCodingAgent.VERSION, SUPPORTED_PI_VERSION);
   assert.doesNotThrow(() => assertSupportedPiRuntime());
+  assert.doesNotThrow(() => assertPiVersion({ VERSION: SUPPORTED_PI_VERSION }));
 });
 
-it("rejects a structurally compatible wrong Pi version with actual and supported diagnostics", () => {
-  const wrongVersion = "0.84.1";
+it("rejects wrong, missing, and hostile Pi version values without echoing unsafe text", () => {
   assert.throws(
-    () => assertPiRuntimeFeatures(
-      { ...PiCodingAgent, VERSION: wrongVersion } as unknown as Record<string, unknown>,
-      PiAi as unknown as Record<string, unknown>,
-      PiTui as unknown as Record<string, unknown>,
-      TypeBox as unknown as Record<string, unknown>,
-    ),
+    () => assertPiVersion({ VERSION: "0.84.3" }),
+    /requires exact Pi 0\.84\.2; actual 0\.84\.3/i,
+  );
+  assert.throws(
+    () => assertPiVersion({ VERSION: "bad\n<unsafe>" }),
     (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, new RegExp(`actual ${wrongVersion.replaceAll(".", "\\.")}`));
-      assert.match(error.message, new RegExp(`supported ${SUPPORTED_PI_VERSION.replaceAll(".", "\\.")}`));
+      assert.match(String(error), /actual missing or invalid/i);
+      assert.doesNotMatch(String(error), /<unsafe>/);
       return true;
     },
   );
+  assert.throws(() => assertPiVersion({}), /actual missing or invalid/i);
 });
 
-it("fails closed on collected-reply presentation without a staged Pi receipt", () => {
-  const capability = collectedReplyPresentationCapability();
-  assert.equal(capability.supported, false);
-  assert.match(capability.reason, /Pi 0\.84\.2.*no post-append acknowledgement/i);
-  assert.match(capability.requiredCoreContract, /stable request\/reply\/toolCall\/result-entry.*callback.*before Pi continues/i);
-});
-
-it("characterizes every general Pi presentation kill point as unacknowledged", () => {
-  const capability = sessionPresentationReceiptCapability();
-  assert.equal(capability.supported, false);
-  assert.equal(capability.detailCode, "PI_SESSION_PRESENTATION_RECEIPT_UNAVAILABLE");
-  for (const boundary of [/sendMessage/i, /prompt preflight/i, /steer/i, /followUp/i]) assert.match(capability.reason, boundary);
-  assert.match(capability.requiredCoreContract, /stable envelope.*post-append.*recoverable.*crash/i);
-});
-
-it("keeps mutation-alias integration disabled without a released authoritative contract", () => {
-  const mutationAliases = directMutationAliasSerializationCapability();
-  assert.equal(mutationAliases.supported, false);
-  assert.equal(mutationAliases.detailCode, "PI_MUTATION_ALIAS_IDENTITY_UNAVAILABLE");
-  for (const fact of [/Pi 0\.84\.2/i, /missing target/i, /hard-link/i, /queue key/i]) {
-    assert.match(mutationAliases.reason, fact);
-  }
-  assert.match(mutationAliases.requiredCoreContract, /missing-target symlink.*hard-link.*replacement.*concurrent create/i);
-});
-
-it("reports an actionable supported-Pi error for a missing required public feature", () => {
-  assert.throws(
-    () => assertPiRuntimeFeatures({ VERSION: SUPPORTED_PI_VERSION, SessionManager: { open() {} } }, {}, {}, {}),
-    /requires the Pi 0\.84\.2 public API surface.*@earendil-works\/pi-coding-agent\.getAgentDir.*Install Pi 0\.84\.2/s,
-  );
-});
-
-it("probes every public startup and restore method before use", () => {
-  class IncompleteSessionManager {
-    static open() {}
-    static create() {}
-  }
-  class IncompleteSettingsManager {
-    static create() {}
-    static fromStorage() {}
-    getGlobalSettings() {}
-  }
-  class IncompleteModelRuntime {
-    static create() {}
-  }
-  class IncompleteModelRegistry {}
-  class IncompleteAgentSession {}
-  const codingAgent = {
-    ...PiCodingAgent,
-    SessionManager: IncompleteSessionManager,
-    SettingsManager: IncompleteSettingsManager,
-    ModelRuntime: IncompleteModelRuntime,
-    ModelRegistry: IncompleteModelRegistry,
-    AgentSession: IncompleteAgentSession,
-  } as unknown as Record<string, unknown>;
-  assert.throws(
-    () => assertPiRuntimeFeatures(
-      codingAgent,
-      PiAi as unknown as Record<string, unknown>,
-      PiTui as unknown as Record<string, unknown>,
-      TypeBox as unknown as Record<string, unknown>,
-    ),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      for (const feature of [
-        "SessionManager.prototype.getBranch",
-        "SessionManager.prototype.getSessionId",
-        "SessionManager.prototype.appendCustomEntry",
-        "ModelRuntime.prototype.getModel",
-        "ModelRuntime.prototype.getProviderAuthStatus",
-        "ModelRuntime.prototype.registerNativeProvider",
-        "ModelRuntime.prototype.registerProvider",
-        "ModelRegistry.prototype.getRegisteredProviderIds",
-        "ModelRegistry.prototype.getRegisteredNativeProvider",
-        "ModelRegistry.prototype.getRegisteredProviderConfig",
-        "ModelRegistry.prototype.getProviderAuthStatus",
-        "ModelRegistry.prototype.getAvailable",
-        "ModelRegistry.prototype.getAll",
-        "SettingsManager.inMemory",
-        "SettingsManager.prototype.getProjectSettings",
-        "SettingsManager.prototype.drainErrors",
-        "SettingsManager.prototype.applyOverrides",
-        "AgentSession.prototype.subscribe",
-        "AgentSession.prototype.getActiveToolNames",
-        "AgentSession.prototype.prompt",
-      ]) assert.match(error.message, new RegExp(feature.replaceAll(".", "\\.")));
-      return true;
-    },
-  );
-});
-
-it("probes AgentSession steer and followUp before worker registration", () => {
-  class IncompleteAgentSession {}
-  assert.throws(
-    () => assertPiRuntimeFeatures(
-      { ...PiCodingAgent, AgentSession: IncompleteAgentSession } as unknown as Record<string, unknown>,
-      PiAi as unknown as Record<string, unknown>,
-      PiTui as unknown as Record<string, unknown>,
-      TypeBox as unknown as Record<string, unknown>,
-    ),
-    /AgentSession\.prototype\.steer.*AgentSession\.prototype\.followUp/s,
-  );
-});
-
-it("probes DefaultResourceLoader.reload before worker registration", () => {
-  class IncompleteResourceLoader {}
-  assert.throws(
-    () => assertPiRuntimeFeatures(
-      { ...PiCodingAgent, DefaultResourceLoader: IncompleteResourceLoader } as unknown as Record<string, unknown>,
-      PiAi as unknown as Record<string, unknown>,
-      PiTui as unknown as Record<string, unknown>,
-      TypeBox as unknown as Record<string, unknown>,
-    ),
-    /DefaultResourceLoader\.prototype\.reload/,
-  );
-});
-
-it("handles malformed constructors and bounds one combined missing-feature diagnostic", () => {
-  const codingAgent = {
-    ...PiCodingAgent,
-    SessionManager: { open() {}, create() {}, prototype: 42 },
-    ModelRuntime: { create() {}, prototype: null },
-    ModelRegistry: { prototype: "malformed" },
-    SettingsManager: { create() {}, fromStorage() {}, inMemory() {}, prototype: false },
-    AgentSession: { prototype: undefined },
-  } as unknown as Record<string, unknown>;
-  assert.throws(
-    () => assertPiRuntimeFeatures(codingAgent, {}, {}, {}),
-    (error: unknown) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /SessionManager\.prototype\.getBranch/);
-      assert.match(error.message, /additional required feature\(s\) omitted/);
-      assert.ok(Buffer.byteLength(error.message, "utf8") <= 4_096, `diagnostic was ${Buffer.byteLength(error.message, "utf8")} bytes`);
-      return true;
-    },
-  );
-});
-
-it("load-safely rejects an incompatible ExtensionAPI instance before registration", () => {
-  let touched = false;
-  const incomplete = {
-    registerTool() { touched = true; },
-    registerCommand() { touched = true; },
-  };
-  assert.throws(
-    () => assertExtensionApiFeatures(incomplete),
-    /ExtensionAPI\.registerMessageRenderer.*ExtensionAPI\.sendMessage.*ExtensionAPI\.getThinkingLevel.*ExtensionAPI\.on/s,
-  );
-  assert.equal(touched, false);
-
-  assert.doesNotThrow(() => assertExtensionApiFeatures({
+function extensionApi(): Record<string, unknown> {
+  return {
     registerTool() {},
     registerMessageRenderer() {},
     registerCommand() {},
@@ -195,5 +39,26 @@ it("load-safely rejects an incompatible ExtensionAPI instance before registratio
     sendMessage() {},
     getThinkingLevel() {},
     on() {},
-  }));
+    events: { emit() {} },
+  };
+}
+
+it("checks only the public ExtensionAPI facade after the exact version gate", () => {
+  assert.doesNotThrow(() => assertExtensionApiFeatures(extensionApi()));
+  const incomplete = extensionApi();
+  delete incomplete.sendMessage;
+  delete incomplete.registerTool;
+  assert.throws(
+    () => assertExtensionApiFeatures(incomplete),
+    /ExtensionAPI\.registerTool.*ExtensionAPI\.sendMessage/is,
+  );
+  const missingEmit = extensionApi();
+  missingEmit.events = {};
+  assert.throws(() => assertExtensionApiFeatures(missingEmit), /ExtensionAPI\.events\.emit/);
+});
+
+it("handles throwing ExtensionAPI accessors as missing features", () => {
+  const surface = extensionApi();
+  Object.defineProperty(surface, "on", { get() { throw new Error("hostile getter"); } });
+  assert.throws(() => assertExtensionApiFeatures(surface), /ExtensionAPI\.on/);
 });

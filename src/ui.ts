@@ -5,7 +5,7 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 import * as PiTui from "@earendil-works/pi-tui";
 import type { AgentBroker } from "./broker.ts";
 import { isConfiguredWritable } from "./capability.ts";
-import { isThinkingLevel } from "./config.ts";
+import { EFFORT_LEVELS, isThinkingLevel } from "./config.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import type { AgentInspection, AgentRecord, BrokerSnapshot, SendEmailInput, WorkItem } from "./types.ts";
 import { activePathConflicts, aggregateWork, capPatch, countWrite, currentBatchHasEffectfulWork } from "./work-ledger.ts";
@@ -33,7 +33,6 @@ function statusIcon(state: AgentRecord["state"]): string {
     case "running": return "●";
     case "queued": return "◷";
     case "idle": return "○";
-    case "parked": return "◫";
     case "failed": return "✗";
     case "spawning": return "◌";
     default: return "■";
@@ -674,11 +673,10 @@ export class DashboardComponent {
             ));
             lines.push(this.theme.fg("dim", `activation lease: ${inspection.holdsActivationLease ? "held" : "free"}`));
             lines.push(this.theme.fg("dim", `identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit} · run slots: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit}`));
-            lines.push(this.theme.fg("dim", `obligations: ${inspection.unanswered} incoming unanswered · ${inspection.outgoingUnanswered} outgoing unanswered · ${inspection.archiveBlockers.queued.count} queued · ${inspection.archiveBlockers.pendingReplies.count} reply delivery pending`));
+            lines.push(this.theme.fg("dim", `obligations: ${inspection.unanswered} incoming unanswered · ${inspection.archiveBlockers.queued.count} queued · ${inspection.archiveBlockers.pendingReplies.count} reply delivery pending`));
             lines.push(this.theme.fg(inspection.archiveEligible ? "success" : "warning", `archive eligible: ${inspection.archiveEligible ? "yes" : "no"}`));
             const obligations = inspection.archiveBlockers.queued.count
               + inspection.archiveBlockers.incomingUnanswered.count
-              + inspection.archiveBlockers.outgoingUnanswered.count
               + inspection.archiveBlockers.pendingReplies.count;
             const recovery = inspection.cleanup
               ? "wait for this exact address's live Pi session/tool cleanup to settle; unrelated agents remain schedulable"
@@ -805,7 +803,6 @@ export class UIController {
       const running = agents.filter((agent) => agent.state === "running").length;
       const queued = agents.filter((agent) => agent.state === "queued").length;
       const idle = agents.filter((agent) => agent.state === "idle").length;
-      const parked = agents.filter((agent) => agent.state === "parked").length;
       const failed = agents.filter((agent) => agent.state === "failed").length;
       const spawning = agents.filter((agent) => agent.state === "spawning").length;
       const cleanupUnknown = agents.filter((agent) => Boolean(agent.cleanup)).length;
@@ -815,7 +812,7 @@ export class UIController {
       const work = activeMutations.length ? ` · now ${activeMutations.slice(0, 2).join("; ")}${activeMutations.length > 2 ? ` +${activeMutations.length - 2}` : ""}` : "";
       const warning = conflicts.size ? ` · ⚠ ${conflicts.size} path conflict${conflicts.size === 1 ? "" : "s"}` : "";
       const capacity = ` · identity capacity ${this.snapshot.capacity.identitiesUsed}/${this.snapshot.capacity.identitiesLimit}${this.snapshot.capacity.identitiesUsed >= this.snapshot.capacity.identitiesLimit ? " FULL" : ""} · run slots ${this.snapshot.capacity.runSlotsUsed}/${this.snapshot.capacity.runSlotsLimit}`;
-      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${parked ? ` · ${parked} parked` : ""}${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${capacity}${work}${warning}`, 240);
+      const line = truncateText(`Agents: ${running} running · ${queued} queued · ${idle} idle · ${this.snapshot.unanswered} unanswered${spawning ? ` · ${spawning} spawning` : ""}${failed ? ` · ${failed} failed` : ""}${cleanupUnknown ? ` · ${cleanupUnknown} cleanup unknown` : ""}${closed ? ` · ${closed} closed` : ""}${capacity}${work}${warning}`, 240);
       // The below-editor widget is the canonical agents bar. Clear the legacy
       // footer status instead of rendering a redundant, unaligned `agents:0/1`.
       this.ctx.ui.setStatus("pi-email-subagent", undefined);
@@ -909,7 +906,7 @@ export class UIController {
   }
 
   private async changeEffort(ctx: ExtensionContext, broker: AgentBroker, address: string): Promise<void> {
-    const value = await ctx.ui.select("Agent effort", ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+    const value = await ctx.ui.select("Agent effort", [...EFFORT_LEVELS]);
     if (!value || !isThinkingLevel(value)) return;
     await broker.setEffort(address, value as ThinkingLevel);
     ctx.ui.notify(`${address} effort set to ${value}.`, "info");

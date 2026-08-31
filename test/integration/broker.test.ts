@@ -4,18 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { Check } from "typebox/value";
 import { AgentBroker, conservativeModelEnvelopeBudget, lightweightWorkItem } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
+import { EmailProtocolError } from "../../src/email-error.ts";
 import { makeReplySubject } from "../../src/reply.ts";
+import { SendEmailSchema } from "../../src/tool-schemas.ts";
 import type { SendEmailResult, SubagentConfig } from "../../src/types.ts";
 import { createWorkerFactory, eventually, FakeMainAdapter, FakeWorker, fakeModel } from "../helpers/fakes.ts";
 import { activePathConflicts, appendRecent, emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
-
-function delegatingRoles(): SubagentConfig["roles"] {
-  const roles = structuredClone(DEFAULT_CONFIG.roles);
-  roles.worker!.canSpawn = true;
-  return roles;
-}
 
 async function setup(overrides: Partial<SubagentConfig> = {}, namespace?: string) {
   const root = namespace ?? await mkdtemp(join(tmpdir(), "pi-email-broker-"));
@@ -119,6 +116,161 @@ describe("AgentBroker end-to-end routing", () => {
     } finally { await broker.shutdown(); }
   });
 
+  it("bounds new-identity runtime preflight before journal acceptance", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-preflight-timeout-"));
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config: structuredClone(DEFAULT_CONFIG),
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: new FakeMainAdapter(),
+      workerPreflight: async () => new Promise<never>(() => undefined),
+      workerFactory: () => new FakeWorker(),
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      await assert.rejects(broker.send(broker.mainAddress, {
+        to: "worker.preflight-timeout@gpt-5.4.com",
+        subject: "bounded preflight",
+        message: "must not be accepted",
+        priority: "low",
+        lifecycle: { spawnTimeoutMs: 25 },
+      }), /LIFECYCLE_SPAWN_TIMEOUT/);
+      assert.deepEqual(broker.mailStore.list(), []);
+      assert.deepEqual(broker.getSnapshot().agents, []);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("returns explicit delivery uncertainty when a batched request loses its worker generation after journaling", async () => {
+    const { broker, workers } = await setup();
+    const internal = broker as unknown as { workers: Map<string, FakeWorker> };
+    const realMarkDelivered = broker.mailStore.markDelivered.bind(broker.mailStore);
+    broker.mailStore.markDelivered = async (ids) => {
+      await realMarkDelivered(ids);
+      for (const id of ids) {
+        const address = broker.mailStore.get(id)?.to;
+        if (address) internal.workers.delete(address);
+      }
+    };
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.generation-race@gpt-5.4.com",
+        subject: "generation race",
+        message: "keep this obligation open",
+        priority: "low",
+      });
+      assert.equal(sent.envelope.deliveryState, "delivered");
+      assert.equal(sent.deliveryUncertain?.code, "POST_JOURNAL_WORKER_ADMISSION_LOST");
+      assert.equal(workers[0]?.prompts.length, 0);
+      internal.workers.set(sent.envelope.to, workers[0]!);
+    } finally {
+      broker.mailStore.markDelivered = realMarkDelivered;
+      await broker.shutdown();
+    }
+  });
+
+  it("returns delivery uncertainty instead of throwing when an accepted high steer times out", async () => {
+    const { broker, workers } = await setup({
+      lifecycle: { ...DEFAULT_CONFIG.lifecycle, promptAcceptanceTimeoutMs: 5 },
+    });
+    try {
+      await broker.send(broker.mainAddress, {
+        to: "worker.high-steer-timeout@gpt-5.4.com", subject: "Initial", message: "Keep streaming.", priority: "low",
+      });
+      const worker = workers[0]!;
+      worker.steer = async () => new Promise<void>(() => undefined);
+      const result = await broker.send(broker.mainAddress, {
+        to: worker.record!.address, subject: "Urgent", message: "Accepted but uncertain.", priority: "high",
+      });
+      assert.equal(result.envelope.deliveryState, "delivered");
+      assert.equal(result.deliveryUncertain?.code, "PROMPT_ACCEPTANCE_UNCERTAIN");
+      assert.match(result.deliveryUncertain?.detail ?? "", /high-priority steer acceptance did not settle/i);
+      await eventually(() => assert.match(broker.inspectAgent(worker.record!.address).failure ?? "", /LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT/));
+    } finally { await broker.shutdown(); }
+  });
+
+  it("returns explicit delivery uncertainty when a high-priority request loses steering admission after journaling", async () => {
+    const { broker, workers } = await setup();
+    const initial = await broker.send(broker.mainAddress, {
+      to: "worker.high-generation-race@gpt-5.4.com",
+      subject: "initial run",
+      message: "remain streaming",
+      priority: "low",
+    });
+    const internal = broker as unknown as { workers: Map<string, FakeWorker> };
+    const realMarkDelivered = broker.mailStore.markDelivered.bind(broker.mailStore);
+    broker.mailStore.markDelivered = async (ids) => {
+      await realMarkDelivered(ids);
+      if (ids.some((id) => broker.mailStore.get(id)?.subject === "urgent race")) {
+        internal.workers.delete(initial.envelope.to);
+      }
+    };
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: initial.envelope.to,
+        subject: "urgent race",
+        message: "do not claim steer acceptance",
+        priority: "high",
+      });
+      assert.equal(sent.envelope.deliveryState, "delivered");
+      assert.equal(sent.deliveryUncertain?.code, "POST_JOURNAL_WORKER_ADMISSION_LOST");
+      assert.equal(workers[0]!.steers.length, 0);
+      internal.workers.set(initial.envelope.to, workers[0]!);
+    } finally {
+      broker.mailStore.markDelivered = realMarkDelivered;
+      await broker.shutdown();
+    }
+  });
+
+  it("rejects mailbox calls retained by a stopped worker generation", async () => {
+    const { broker, workers } = await setup();
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.stale-mailbox@gpt-5.4.com",
+        subject: "stale mailbox",
+        message: "stop this generation",
+        priority: "low",
+      });
+      const stale = workers[0]!;
+      await broker.stop(sent.envelope.to);
+      await assert.rejects(stale.send({
+        to: broker.mainAddress,
+        subject: "stale send",
+        message: "must be rejected",
+        priority: "low",
+      }), /mailbox authority is stale/i);
+      assert.throws(() => stale.fetch(), /mailbox authority is stale/i);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("keeps a request pending while its durable reply reservation awaits delivery", async () => {
+    const { broker, workers, main } = await setup();
+    try {
+      const request = await broker.send(broker.mainAddress, {
+        to: "worker.reserved-wait@gpt-5.4.com",
+        subject: "reserved wait",
+        message: "reserve a reply",
+        priority: "low",
+      });
+      main.idle = false;
+      const reply = await workers[0]!.send({
+        to: broker.mainAddress,
+        subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+        message: "queued reserved answer",
+        priority: "low",
+      });
+      assert.equal(reply.envelope.deliveryState, "queued");
+      assert.equal(broker.mailStore.get(request.envelope.id)?.replyReservedBy, reply.envelope.id);
+      workers[0]!.fail("recipient failed after reserving its reply");
+      const waited = await broker.waitForReplies([request.envelope.id], 0, false);
+      assert.equal(waited.complete, false);
+      assert.equal(waited.timedOut, true);
+      assert.equal(waited.items[0]?.state, "pending");
+    } finally { await broker.shutdown(); }
+  });
+
   it("computes a conservative per-model envelope budget", () => {
     assert.equal(conservativeModelEnvelopeBudget({ contextWindow: 128_000, maxTokens: 32_000 }), 24_000);
     // Providers that keep maxTokens in lockstep with contextWindow (uncapped
@@ -156,8 +308,39 @@ describe("AgentBroker end-to-end routing", () => {
     } finally { await broker.shutdown(); }
   });
 
-  it("ignores unsafe nested-delegation opt-in configuration", async () => {
-    const { broker, workers } = await setup({ roles: delegatingRoles() });
+  it("includes declared worker-extension effects in prospective capability inspection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-extension-inspection-"));
+    const config = structuredClone(DEFAULT_CONFIG);
+    config.roles.reviewer!.tools = ["read", "custom_read"];
+    config.addresses["reviewer.writable@gpt-5.4.com"] = { tools: ["read", "custom_write"] };
+    const broker = new AgentBroker({
+      cwd: root,
+      agentDir: root,
+      namespaceDir: join(root, "state"),
+      config,
+      models: [fakeModel("gpt-5.4")],
+      mainAdapter: new FakeMainAdapter(),
+      workerExtensionEffects: { custom_read: "read", custom_write: "write" },
+      workerFactory: () => new FakeWorker(),
+      projectTrusted: true,
+    });
+    await broker.init();
+    try {
+      const readOnly = broker.inspectAgent("reviewer.readonly@gpt-5.4.com");
+      assert.deepEqual(readOnly.tools, ["read", "custom_read", "send_email", "fetch_emails"]);
+      assert.equal(readOnly.writable, false);
+      assert.deepEqual(readOnly.budgets, {
+        limits: DEFAULT_CONFIG.budgets,
+        currentRun: { turns: 0, toolCalls: 0, tokens: 0 },
+      });
+      const writable = broker.inspectAgent("reviewer.writable@gpt-5.4.com");
+      assert.deepEqual(writable.tools, ["read", "custom_write", "send_email", "fetch_emails"]);
+      assert.equal(writable.writable, true);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("rejects nested delegation without a configurable compatibility path", async () => {
+    const { broker, workers } = await setup();
     try {
       const upstream = await broker.send(broker.mainAddress, {
         to: "worker.nested-disabled@gpt-5.4.com",
@@ -165,13 +348,12 @@ describe("AgentBroker end-to-end routing", () => {
         message: "do not delegate",
         priority: "low",
       });
-      assert.equal(broker.inspectAgent(upstream.envelope.to).canSpawn, false);
       await assert.rejects(workers[0]!.send({
         to: "worker.child@gpt-5.4.com",
         subject: "unsafe child",
         message: "must be rejected",
         priority: "low",
-      }), /not permitted to delegate.*disabled/i);
+      }), /nested response-required delegation is unsupported/i);
       assert.equal(broker.mailStore.list().length, 1);
     } finally { await broker.shutdown(); }
   });
@@ -284,22 +466,32 @@ describe("AgentBroker end-to-end routing", () => {
 
       const response = await worker.send({
         to: broker.mainAddress,
-        subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+        reply_to: request.envelope.id,
         message: "Fixed parser.ts and tests pass.",
         priority: "low",
+        completion: {
+          status: "completed",
+          summary: "Parser fixed.",
+          artifacts: ["parser.ts"],
+          validation: ["parser tests passed"],
+          remaining: [],
+        },
       });
       assert.equal(response.answeredEmailId, request.envelope.id);
       assert.deepEqual(worker.fetch(), []);
       assert.equal(main.deliveries.length, 1);
       assert.equal(main.deliveries[0]!.envelope.kind, "reply");
+      assert.equal(main.deliveries[0]!.envelope.completion?.status, "completed");
+      assert.equal(main.deliveries[0]!.envelope.completion?.warning, undefined);
       assert.deepEqual(broker.fetchUnanswered(broker.mainAddress), []);
 
       await assert.rejects(
         worker.send({
           to: broker.mainAddress,
-          subject: makeReplySubject(request.envelope.id, request.envelope.subject),
+          reply_to: request.envelope.id,
           message: "Duplicate.",
           priority: "low",
+          completion: { status: "completed", summary: "Duplicate.", artifacts: [], validation: [], remaining: [] },
         }),
         /already answered/,
       );
@@ -309,6 +501,102 @@ describe("AgentBroker end-to-end routing", () => {
     } finally {
       await broker.shutdown();
     }
+  });
+
+  it("supports structured blocked replies, completion warnings, notifications, and typed repair fields", async () => {
+    const { broker, workers, main } = await setup();
+    try {
+      const blockedRequest = await broker.send(broker.mainAddress, {
+        to: "worker.structured-reply@gpt-5.4.com", subject: "Blocked task", message: "Try it.", priority: "low",
+      });
+      const worker = workers[0]!;
+      const blocked = await worker.send({
+        to: broker.mainAddress,
+        reply_to: blockedRequest.envelope.id,
+        message: "Cannot proceed without credentials.",
+        priority: "low",
+        completion: {
+          status: "blocked",
+          summary: "Credential access is missing.",
+          artifacts: [],
+          validation: ["Confirmed the credential source is unavailable"],
+          remaining: ["Provide the required credential source"],
+        },
+      });
+      assert.equal(blocked.envelope.subject, makeReplySubject(blockedRequest.envelope.id, blockedRequest.envelope.subject));
+      assert.equal(blocked.envelope.completion?.status, "blocked");
+
+      const warningRequest = await broker.send(broker.mainAddress, {
+        to: blockedRequest.envelope.to, subject: "Unverified task", message: "Report accurately.", priority: "high",
+      });
+      worker.record!.work = emptyWorkState();
+      worker.record!.work.currentBatchId = 2;
+      appendRecent(worker.record!.work, finishWorkItem(
+        startWorkItem("historical-write", "write", { path: "yesterday.txt", content: "old" }, 1, "/work")!,
+        {},
+        false,
+      ));
+      const warned = await worker.send({
+        to: broker.mainAddress,
+        reply_to: warningRequest.envelope.id,
+        message: "Done.",
+        priority: "low",
+        completion: { status: "completed", summary: "Done.", artifacts: [], validation: [], remaining: [] },
+      });
+      assert.match(warned.envelope.completion?.warning ?? "", /no recorded work or validation/i);
+
+      const notification = await worker.send({
+        to: broker.mainAddress,
+        subject: "Status only",
+        message: "No response needed.",
+        priority: "low",
+      });
+      assert.equal(notification.envelope.kind, "notification");
+      assert.equal(notification.envelope.requiresResponse, false);
+      assert.deepEqual(broker.fetchUnanswered(broker.mainAddress), []);
+
+      const request = await worker.send({
+        to: broker.mainAddress,
+        subject: "Decision needed",
+        message: "Please decide.",
+        priority: "low",
+        requires_response: true,
+      });
+      assert.equal(request.envelope.kind, "request");
+      assert.equal(request.envelope.requiresResponse, true);
+      assert.deepEqual(broker.fetchUnanswered(broker.mainAddress).map((email) => email.id), [request.envelope.id]);
+
+      await assert.rejects(
+        worker.send({
+          to: broker.mainAddress,
+          subject: `Re: [${request.envelope.id}] wrong subject`,
+          message: "Malformed legacy reply.",
+          priority: "low",
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof EmailProtocolError);
+          assert.equal(error.code, "REPLY_INVALID");
+          assert.equal(error.fields.reply_subject, makeReplySubject(request.envelope.id, request.envelope.subject));
+          return true;
+        },
+      );
+      assert.ok(main.deliveries.length >= 4);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("accepts multibyte completion shape at the schema boundary and enforces shared UTF-8 byte limits in the broker", async () => {
+    const { broker } = await setup();
+    try {
+      const input = {
+        to: broker.mainAddress,
+        reply_to: "mail_unknown",
+        message: "Done",
+        priority: "low" as const,
+        completion: { status: "completed" as const, summary: "界".repeat(1_500), artifacts: [], validation: [], remaining: [] },
+      };
+      assert.equal(Check(SendEmailSchema, input), true, "schema must leave UTF-8 byte enforcement to the broker");
+      await assert.rejects(broker.send("worker.multibyte@gpt-5.4.com", input), /Completion summary must contain 1 to 4096 UTF-8 bytes/);
+    } finally { await broker.shutdown(); }
   });
 
   it("never converts one final assistant text into answers for multiple requests", async () => {
@@ -532,7 +820,7 @@ describe("AgentBroker end-to-end routing", () => {
       });
       main.address = "main@kimi-for-coding.com";
       main.aliases.add(main.address);
-      await broker.updateMainAddress(main.address);
+      await broker.updateMainModel(main.address);
 
       await workers[0]!.send({
         to: oldMain,
@@ -736,7 +1024,7 @@ describe("AgentBroker end-to-end routing", () => {
           message: "Late fabricated result.",
           priority: "low",
         }),
-        /has not been delivered|cancel/i,
+        /has not been delivered|cancel|mailbox authority is stale/i,
       );
 
       await broker.cancelRequest(request.correlationId, "Idempotent retry uses the original durable reason.");
@@ -746,6 +1034,120 @@ describe("AgentBroker end-to-end routing", () => {
     } finally {
       await broker.shutdown();
     }
+  });
+
+  it("resets turn/token/tool budget baselines for every accepted enforcement cycle", async () => {
+    const { broker, workers } = await setup({
+      budgets: { ...DEFAULT_CONFIG.budgets, maxTurns: 1 },
+      responseReminderLimit: 3,
+    });
+    try {
+      const sent = await broker.send(broker.mainAddress, {
+        to: "worker.enforcement-budget@gpt-5.4.com", subject: "Answer", message: "Reply after reminders.", priority: "low",
+      });
+      const worker = workers[0]!;
+      worker.record!.usage.turns = 1;
+      worker.settle();
+      await eventually(() => assert.equal(worker.prompts.length, 2));
+      worker.record!.usage.turns = 2;
+      worker.settle();
+      await eventually(() => assert.equal(worker.prompts.length, 3));
+      assert.doesNotMatch(broker.inspectAgent(sent.envelope.to).failure ?? "", /IDENTITY_TURN_BUDGET/);
+
+      await worker.send({
+        to: broker.mainAddress,
+        reply_to: sent.envelope.id,
+        message: "Answered.",
+        priority: "low",
+        completion: { status: "completed", summary: "Answered", artifacts: [], validation: ["Reply sent"], remaining: [] },
+      });
+      worker.record!.usage.turns = 3;
+      worker.settle();
+      await eventually(() => assert.equal(broker.inspectAgent(sent.envelope.to).state, "idle"));
+      assert.equal(broker.getSnapshot().agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures ?? 0, 0);
+    } finally { await broker.shutdown(); }
+  });
+
+  it("counts prompt-rejection terminal failures consistently in resume and settlement entry paths", async () => {
+    const settlement = await setup();
+    try {
+      const sent = await settlement.broker.send(settlement.broker.mainAddress, {
+        to: "worker.settlement-reject@gpt-5.4.com", subject: "Reject reminder", message: "Remain unanswered.", priority: "low",
+      });
+      const worker = settlement.workers[0]!;
+      worker.prompt = async () => { throw new Error("enforcement prompt rejected"); };
+      worker.settle();
+      await eventually(() => assert.equal(settlement.broker.inspectAgent(sent.envelope.to).state, "failed"));
+      assert.equal(settlement.broker.getSnapshot().agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures, 1);
+    } finally { await settlement.broker.shutdown(); }
+
+    const resume = await setup();
+    try {
+      const sent = await resume.broker.send(resume.broker.mainAddress, {
+        to: "worker.resume-reject@gpt-5.4.com", subject: "Reject resume", message: "Remain unanswered.", priority: "low",
+      });
+      const worker = resume.workers[0]!;
+      worker.prompt = async () => { throw new Error("resume prompt rejected"); };
+      const internal = resume.broker as unknown as { active: Set<string>; resumeEnforcement(address: string): Promise<void> };
+      internal.active.delete(sent.envelope.to);
+      await internal.resumeEnforcement(sent.envelope.to);
+      assert.equal(resume.broker.inspectAgent(sent.envelope.to).state, "failed");
+      assert.equal(resume.broker.getSnapshot().agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures, 1);
+    } finally { await resume.broker.shutdown(); }
+  });
+
+  it("enforces per-run tool and turn budgets and opens a persistent failure circuit breaker", async () => {
+    const toolHarness = await setup({
+      budgets: { ...DEFAULT_CONFIG.budgets, maxToolCalls: 1 },
+    });
+    try {
+      await toolHarness.broker.send(toolHarness.broker.mainAddress, {
+        to: "worker.tool-budget@gpt-5.4.com", subject: "Budget", message: "Use at most one tool.", priority: "low",
+      });
+      const worker = toolHarness.workers[0]!;
+      worker.emit({ type: "tool_lifecycle", phase: "start", toolCallId: "one", toolName: "read" });
+      worker.emit({ type: "tool_lifecycle", phase: "end", toolCallId: "one", toolName: "read" });
+      worker.emit({ type: "tool_lifecycle", phase: "start", toolCallId: "two", toolName: "read" });
+      await eventually(() => assert.match(toolHarness.broker.inspectAgent(worker.record!.address).failure ?? "", /IDENTITY_TOOL_BUDGET/));
+    } finally { await toolHarness.broker.shutdown(); }
+
+    const tokenHarness = await setup({
+      budgets: { ...DEFAULT_CONFIG.budgets, maxTokens: 1 },
+    });
+    try {
+      await tokenHarness.broker.send(tokenHarness.broker.mainAddress, {
+        to: "worker.token-budget@gpt-5.4.com", subject: "Token budget", message: "Stay bounded.", priority: "low",
+      });
+      const worker = tokenHarness.workers[0]!;
+      worker.record!.usage.input = 2;
+      worker.settle();
+      await eventually(() => assert.match(tokenHarness.broker.inspectAgent(worker.record!.address).failure ?? "", /IDENTITY_TOKEN_BUDGET/));
+    } finally { await tokenHarness.broker.shutdown(); }
+
+    const turnHarness = await setup({
+      budgets: { ...DEFAULT_CONFIG.budgets, maxTurns: 1, maxConsecutiveFailures: 2 },
+    });
+    try {
+      const sent = await turnHarness.broker.send(turnHarness.broker.mainAddress, {
+        to: "worker.turn-budget@gpt-5.4.com", subject: "Turn budget", message: "Stay bounded.", priority: "low",
+      });
+      const first = turnHarness.workers[0]!;
+      first.record!.usage.turns = 2;
+      first.settle();
+      await eventually(() => assert.match(turnHarness.broker.inspectAgent(sent.envelope.to).failure ?? "", /IDENTITY_TURN_BUDGET/));
+      await eventually(() => assert.equal(turnHarness.broker.inspectAgent(sent.envelope.to).cleanup, undefined));
+
+      await turnHarness.broker.restart(sent.envelope.to);
+      const second = turnHarness.workers[1]!;
+      second.fail("second terminal failure");
+      await eventually(() => assert.equal(turnHarness.broker.inspectAgent(sent.envelope.to).cleanup, undefined));
+      await assert.rejects(turnHarness.broker.restart(sent.envelope.to), /circuit breaker is open.*2 consecutive terminal failures/is);
+
+      await turnHarness.broker.stop(sent.envelope.to);
+      await turnHarness.broker.clearFailure(sent.envelope.to);
+      await turnHarness.broker.restart(sent.envelope.to);
+      assert.equal(turnHarness.workers.length, 3, "explicit review/clear closes the identity circuit breaker");
+    } finally { await turnHarness.broker.shutdown(); }
   });
 
   it("supports idle effort changes plus stop and restart controls", async () => {

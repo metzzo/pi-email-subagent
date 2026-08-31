@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@earendil-works/pi-coding-agent";
+import { EmailProtocolError } from "../../src/email-error.ts";
 import { createWorkerMailTools } from "../../src/sdk-worker.ts";
 import type { EmailEnvelope, SendEmailInput } from "../../src/types.ts";
 
@@ -31,6 +32,7 @@ describe("worker mail tools", () => {
           recipientModel: "shared",
           recipientEffort: "xhigh",
           correlationId: envelope.id,
+          expectedReplyTo: envelope.id,
           expectedReplySubject: "Re: [mail_tool] Result",
         };
       },
@@ -53,7 +55,8 @@ describe("worker mail tools", () => {
     const text = (result.content[0] as { text: string }).text;
     assert.match(text, /Email accepted/);
     assert.match(text, /Correlation ID: mail_tool/);
-    assert.match(text, /Expected reply subject: Re: \[mail_tool\] Result/);
+    assert.match(text, /Reply with reply_to: mail_tool/);
+    assert.match(text, /Legacy expected reply subject: Re: \[mail_tool\] Result/);
     assert.match(text, /Recipient model: provider-alpha\/shared/);
     assert.match(text, /Binding: persisted for this identity/);
     assert.match(text, /Recipient effort: xhigh/);
@@ -122,6 +125,43 @@ describe("worker mail tools", () => {
         {} as never,
       ),
       /Email was not accepted: mailbox unavailable/,
+    );
+  });
+
+  it("puts typed repair fields in model-visible tool error text without misclassifying generic failures", async () => {
+    const replySubject = "Re: [mail_original] canonical subject";
+    const [typed] = createWorkerMailTools({
+      sendEmail: async () => { throw new EmailProtocolError("REPLY_INVALID", "Wrong reply subject.", { email_id: "mail_original", reply_subject: replySubject }); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    await assert.rejects(
+      typed.execute("tool-typed", { to: envelope.to, reply_to: "mail_original", message: "Done", priority: "low", completion: { status: "completed", summary: "Done", artifacts: [], validation: [], remaining: [] } }, undefined, undefined, {} as never),
+      (error: Error) => {
+        assert.match(error.message, /\[EMAIL_NOT_ACCEPTED\].*\[REPLY_INVALID\]/s);
+        assert.match(error.message, /cause_code="REPLY_INVALID"/);
+        assert.match(error.message, /reply_subject=.*canonical subject/);
+        return true;
+      },
+    );
+
+    const [generic] = createWorkerMailTools({
+      sendEmail: async () => { throw new Error("identity capacity is full"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    await assert.rejects(
+      generic.execute("tool-generic", { to: envelope.to, subject: "Capacity", message: "Try", priority: "low" }, undefined, undefined, {} as never),
+      (error: Error) => {
+        assert.match(error.message, /\[EMAIL_NOT_ACCEPTED\].*identity capacity is full/s);
+        assert.doesNotMatch(error.message, /cause_code|INVALID_INPUT/);
+        return true;
+      },
+    );
+
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      generic.execute("tool-aborted", { to: envelope.to, subject: "Abort", message: "Try", priority: "low" }, controller.signal, undefined, {} as never),
+      /\[EMAIL_NOT_ACCEPTED\] Email send aborted before acceptance/,
     );
   });
 

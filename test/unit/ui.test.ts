@@ -25,7 +25,6 @@ function record(): AgentRecord {
     modelId: "gpt-5.4-mini",
     effort: "high",
     tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
-    canSpawn: true,
     state: "running",
     createdAt: now,
     updatedAt: now,
@@ -120,7 +119,6 @@ describe("dashboard rendering", () => {
       capacity: snapshot.capacity,
       queued: 0,
       unanswered: 1,
-      outgoingUnanswered: 1,
       pendingReplies: 0,
       archiveEligible: false,
       archiveBlockers: {
@@ -128,7 +126,6 @@ describe("dashboard rendering", () => {
         cleanupQuarantine: false,
         queued: { count: 0, requestIds: [], omitted: 0 },
         incomingUnanswered: { count: 1, requestIds: ["mail_incoming"], omitted: 0 },
-        outgoingUnanswered: { count: 1, requestIds: ["mail_outgoing"], omitted: 0 },
         pendingReplies: { count: 0, requestIds: [], omitted: 0 },
       },
     };
@@ -163,7 +160,7 @@ describe("dashboard rendering", () => {
     assert.match(profile, /binding: persisted openai-codex\/gpt-5\.4.*preserved across main-provider changes/i);
     assert.match(profile, /activation lease: held/i);
     assert.match(profile, /identity capacity: 1\/1.*run slots: 0\/1/i);
-    assert.match(profile, /1 incoming unanswered.*1 outgoing unanswered/i);
+    assert.match(profile, /1 incoming unanswered/i);
     assert.match(profile, /archive eligible: no/i);
     assert.match(profile, /restart.*real obligations|cancel only.*explicitly abandoned/i);
     assert.doesNotMatch(profile, /PRIVATE SUBJECT|PRIVATE BODY|worker\.unrelated/i);
@@ -204,7 +201,6 @@ describe("dashboard rendering", () => {
       capacity: snapshot.capacity,
       queued: 0,
       unanswered: 1,
-      outgoingUnanswered: 0,
       pendingReplies: 0,
       archiveEligible: false,
       archiveBlockers: {
@@ -212,7 +208,6 @@ describe("dashboard rendering", () => {
         cleanupQuarantine: false,
         queued: { count: 0, requestIds: [], omitted: 0 },
         incomingUnanswered: { count: 1, requestIds: ["mail_open"], omitted: 0 },
-        outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 },
         pendingReplies: { count: 0, requestIds: [], omitted: 0 },
       },
     };
@@ -251,11 +246,11 @@ describe("dashboard rendering", () => {
     const snapshot = { mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY };
     const inspection = {
       state: "failed", holdsActivationLease: true, capacity: TEST_CAPACITY, queued: 0, unanswered: 0,
-      outgoingUnanswered: 0, pendingReplies: 0, archiveEligible: false,
+      pendingReplies: 0, archiveEligible: false,
       archiveBlockers: {
         active: false, cleanupQuarantine: false,
         queued: { count: 0, requestIds: [], omitted: 0 }, incomingUnanswered: { count: 0, requestIds: [], omitted: 0 },
-        outgoingUnanswered: { count: 0, requestIds: [], omitted: 0 }, pendingReplies: { count: 0, requestIds: [], omitted: 0 },
+        pendingReplies: { count: 0, requestIds: [], omitted: 0 },
       },
     };
     const component = new DashboardComponent(() => snapshot, () => [], () => undefined, () => undefined, fakeTheme, undefined, undefined, 40, () => inspection as never);

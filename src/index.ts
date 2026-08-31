@@ -5,11 +5,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import * as PiTui from "@earendil-works/pi-tui";
 import { makeMainAddress } from "./address.ts";
 import { AgentBroker } from "./broker.ts";
-import { isThinkingLevel, loadConfig } from "./config.ts";
+import { DEFAULT_MODEL_POLICY, isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
 import { assertExtensionApiFeatures, assertSupportedPiRuntime } from "./pi-compat.ts";
-import { formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
+import { budgetPromptAdditions, formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
@@ -56,6 +56,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   let generation = 0;
   let mainFlushTimer: ReturnType<typeof setTimeout> | undefined;
   const conversationSources = new Map<string, ConversationSource>();
+  const promptBudgetWarnings = new Set<string>();
 
   const cancelMainFlush = (): void => {
     if (mainFlushTimer) clearTimeout(mainFlushTimer);
@@ -103,7 +104,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     renderCall(args: any, theme) {
       const priorityColor = args.priority === "high" ? "warning" : "accent";
       const priority = sanitizeConversationLabel(String(args.priority ?? "")).toUpperCase();
-      const subject = truncateText(sanitizeConversationLabel(String(args.subject || "(no subject)")), 100);
+      const subject = truncateText(sanitizeConversationLabel(String(args.subject || (args.reply_to ? `reply to ${args.reply_to}` : "(no subject)"))), 100);
       const recipient = sanitizeConversationLabel(String(args.to ?? ""));
       return new Text(
         `${theme.fg("toolTitle", theme.bold("send_email "))}${theme.fg(priorityColor, `[${priority}]`)} ${theme.fg("accent", recipient)}\n  ${theme.fg("dim", subject)}`,
@@ -129,6 +130,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       const effort = sent.recipientEffort ? ` · effort ${sanitizeConversationLabel(sent.recipientEffort)}` : "";
       let text = `${icon} ${theme.fg("accent", recipient)} ${theme.fg("muted", envelopeId)}`;
       text += `\n${theme.fg("dim", `${disposition} · ${model}${effort}`)}`;
+      if (sent.deliveryUncertain) {
+        text += `\n${theme.fg("warning", `delivery uncertain: ${sanitizeConversationLabel(sent.deliveryUncertain.code)}`)}`;
+      }
       if (sent.expectedReplySubject) text += `\n${theme.fg("muted", `reply: ${sanitizeConversationLabel(sent.expectedReplySubject)}`)}`;
       if (sent.answeredEmailId) text += `\n${theme.fg("success", `answered ${sanitizeConversationLabel(sent.answeredEmailId)}`)}`;
       if (expanded) {
@@ -211,6 +215,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   async function showAgents(args: string, ctx: ExtensionContext): Promise<void> {
+    if (ctx.mode !== "tui") {
+      throw new Error("/agents is available only in TUI mode. Use inspect_agent and manage_agent in RPC or print mode.");
+    }
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const action = parts[0];
     try {
@@ -289,6 +296,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const workerSettings = WorkerSettingsSnapshot.capture(ctx.cwd, agentDir, projectTrusted);
     const workerExtensionCollection = collectWorkerExtensions(pi.events);
     const workerExtensions = workerExtensionCollection.registrations;
+    const workerExtensionEffects = Object.fromEntries(
+      workerExtensions.flatMap((registration) => Object.entries(registration.effects)),
+    );
     for (const issue of workerExtensionCollection.issues) ctx.ui.notify(issue, "warning");
     for (const { scope } of workerSettings.loadIssues) {
       ctx.ui.notify(`Pi ${scope} settings could not be loaded; the worker snapshot uses Pi fallback settings for that scope.`, "warning");
@@ -343,6 +353,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       models: availableModels(ctx),
       preferredProvider: ctx.model?.provider,
       mainAdapter: adapter,
+      workerExtensionEffects,
       workerPreflight: (model) => runtimeFactory.preflight(model.provider, model.id),
       workerFactory: async (model, preparation) => {
         const snapshot = preparation as WorkerRuntimeSnapshot | undefined
@@ -374,13 +385,23 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", (event, ctx) => {
     if (!broker || !ctx.model) return;
+    const additions = budgetPromptAdditions(
+      effectiveConfig?.modelPolicy ?? DEFAULT_MODEL_POLICY,
+      undefined,
+      ctx.model,
+    );
+    for (const warning of additions.warnings) {
+      if (promptBudgetWarnings.has(warning)) continue;
+      promptBudgetWarnings.add(warning);
+      ctx.ui.notify(warning, "warning");
+    }
     const prompt = mainCoordinatorPrompt(
       broker.mainAddress,
       ctx.model.id,
       pi.getThinkingLevel(),
       broker.modelIds,
       broker.fetchUnanswered(broker.mainAddress).length,
-      effectiveConfig,
+      effectiveConfig ? { ...effectiveConfig, modelPolicy: additions.modelPolicy } : undefined,
     );
     return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
   });
