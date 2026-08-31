@@ -103,7 +103,7 @@ function correlationIds(messages: readonly Message[]): string[] {
 
 interface MailPair {
   from: string;
-  replySubject: string;
+  replyTo: string;
 }
 
 function unansweredPairs(text: string): MailPair[] {
@@ -111,8 +111,8 @@ function unansweredPairs(text: string): MailPair[] {
   for (const match of text.matchAll(/<agent-email[^>]*>([\s\S]*?)<\/agent-email>/g)) {
     const body = match[1]!;
     const from = /<from>([^<]+)<\/from>/.exec(body)?.[1];
-    const replySubject = /<reply-subject>([^<]+)<\/reply-subject>/.exec(body)?.[1];
-    if (from && replySubject) pairs.push({ from, replySubject });
+    const replyTo = /<reply-to>([^<]+)<\/reply-to>/.exec(body)?.[1];
+    if (from && replyTo) pairs.push({ from, replyTo });
   }
   return pairs;
 }
@@ -219,6 +219,9 @@ function planMain(messages: readonly Message[]): Plan {
     return { text: "E2E PONG" };
   }
 
+  if (lastText.includes('<agent-email') && lastText.includes('kind="notification"') && lastText.includes("Urgent unsolicited notification")) {
+    return { text: "E2E UNSOLICITED HIGH SEEN" };
+  }
   if (lastText.includes('<agent-email') && lastText.includes('kind="reply"')) return { text: "E2E REPLY SEEN" };
   if (lastText.includes("E2E CAPACITY RECOVERY")) {
     return { toolCalls: [{
@@ -363,6 +366,8 @@ function planMain(messages: readonly Message[]): Plan {
     const ignore = lastText.includes("IGNORE") ? " IGNORE" : "";
     const message = lastText.includes("NESTED")
       ? "NESTED PARENT: delegate one response-required child request, wait for its exact result, then answer upstream."
+      : lastText.includes("UNSOLICITED HIGH")
+        ? "UNSOLICITED HIGH STRUCTURED BLOCKED: send one high notification plus one structured blocked reply."
       : lastText.includes("LATE COLLECTOR")
         ? "LATE COLLECTOR: Call fetch_emails, then immediately return the correlated reply."
         : lastText.includes("WORK")
@@ -416,9 +421,10 @@ function planWorker(messages: readonly Message[]): Plan {
           name: "send_email",
           arguments: {
             to: pair.from,
-            subject: pair.replySubject,
+            reply_to: pair.replyTo,
             message: "NESTED PARENT RESULT after exact child settlement.",
             priority: "low",
+            completion: { status: "completed", summary: "Nested parent complete.", artifacts: [], validation: ["Child result received"], remaining: [] },
           },
         })) };
       }
@@ -427,9 +433,10 @@ function planWorker(messages: readonly Message[]): Plan {
           name: "send_email",
           arguments: {
             to: pair.from,
-            subject: pair.replySubject,
+            reply_to: pair.replyTo,
             message: "NESTED CHILD RESULT",
             priority: "low",
+            completion: { status: "completed", summary: "Nested child complete.", artifacts: [], validation: [], remaining: [] },
           },
         })) };
       }
@@ -492,15 +499,32 @@ function planWorker(messages: readonly Message[]): Plan {
           { name: "bash", arguments: { command: "true" } },
         ] };
       }
-      const replies = unansweredPairs(lastText).map((pair) => ({
+      const pairs = unansweredPairs(lastText);
+      const replies: ToolCallPlan[] = pairs.map((pair) => ({
         name: "send_email",
         arguments: {
           to: pair.from,
-          subject: pair.replySubject,
-          message: "Worker result: virtual email tools are send_email and fetch_emails.",
+          reply_to: pair.replyTo,
+          message: lastText.includes("STRUCTURED BLOCKED")
+            ? "Blocked by the deterministic E2E prerequisite."
+            : "Worker result: virtual email tools are send_email and fetch_emails.",
           priority: lastText.includes("REPLY HIGH") ? "high" : "low",
+          completion: lastText.includes("STRUCTURED BLOCKED")
+            ? { status: "blocked", summary: "Deterministic prerequisite missing.", artifacts: [], validation: ["Checked prerequisite"], remaining: ["Provide prerequisite"] }
+            : { status: "completed", summary: "Mailbox work completed.", artifacts: [], validation: ["Fetched and answered the exact request"], remaining: [] },
         },
       }));
+      if (pairs.length > 0 && lastText.includes("UNSOLICITED HIGH")) {
+        replies.unshift({
+          name: "send_email",
+          arguments: {
+            to: pairs[0]!.from,
+            subject: "Urgent unsolicited notification",
+            message: "This high notification must wait until main is idle.",
+            priority: "high",
+          },
+        });
+      }
       // "IGNORE" requests deliberately return visible final text without a
       // send_email call, including after enforcement, proving that ordinary
       // assistant text never closes the durable mail obligation.

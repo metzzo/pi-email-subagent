@@ -187,6 +187,43 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("uses reply_to for a structured blocked reply and queues unsolicited high mail until main is idle", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE UNSOLICITED HIGH");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "structured delegation send", 90_000, mark));
+      assert.match(sent.expectedReplyTo, /^mail_/);
+
+      const waitEnd = await client.waitFor(toolEnd("wait_for_replies"), "structured blocked reply", 120_000, mark);
+      const waited = waitResult(waitEnd);
+      assert.equal(waited.items[0]?.state, "answered");
+      assert.equal((waited.items[0]?.reply as any)?.completion?.status, "blocked");
+      assert.deepEqual((waited.items[0]?.reply as any)?.completion?.remaining, ["Provide prerequisite"]);
+      await client.waitFor(assistantText("E2E COMPLETE"), "structured reply main completion", 90_000, mark);
+
+      const notification = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as { customType?: string; details?: { subject?: string } } | undefined)?.customType === "pi-email-subagent.email"
+          && (line.message as { details?: { subject?: string } }).details?.subject === "Urgent unsolicited notification",
+        "deferred unsolicited high notification",
+        90_000,
+        mark,
+      );
+      assert.ok(client.events().indexOf(notification) > client.events().indexOf(waitEnd), "unsolicited high mail was not steer-injected during the active wait");
+      await client.waitFor(assistantText("E2E UNSOLICITED HIGH SEEN"), "unsolicited high follow-up completion", 90_000, mark);
+      await client.waitForSettlement(mark);
+
+      const journal = await readJournal(agentDir, sessionId);
+      const created = journal.filter((event) => event.type === "email.created").map((event) => event.email);
+      assert.ok(created.some((email) => email.kind === "reply" && email.inReplyTo === sent.correlationId && email.completion?.status === "blocked"));
+      assert.ok(created.some((email) => email.kind === "notification" && email.priority === "high" && email.requiresResponse === false));
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("collects a pre-wait reply with no duplicate custom message through observed final settlement", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionFile } = await start({ persistSession: true });
     try {
@@ -827,7 +864,7 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
         (candidate) => candidate.agents?.some((agent: any) => agent.address === WORKER_ADDRESS && agent.state === "failed"),
         "with the default-disabled parent failed on its open upstream obligation",
       );
-      assert.equal(registry.agents.find((agent: any) => agent.address === WORKER_ADDRESS).canSpawn, false);
+      assert.equal(Object.hasOwn(registry.agents.find((agent: any) => agent.address === WORKER_ADDRESS), "canSpawn"), false);
       assert.equal(registry.agents.some((agent: any) => agent.address === REVIEWER_ADDRESS), false);
       const journal = await readJournal(agentDir, sessionId);
       const requests = journal.filter((event) => event.type === "email.created" && event.email?.kind === "request");

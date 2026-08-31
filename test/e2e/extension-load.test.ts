@@ -22,7 +22,14 @@ it("loads the packaged extension with tools, command, and renderers and no confl
     "wait_for_replies",
   ]);
   assert.equal(extension.commands.has("agents"), true);
-  assert.doesNotMatch(extension.commands.get("agents")!.description ?? "", /recover.cleanup|offline recovery/i);
+  const agentsCommand = extension.commands.get("agents")!;
+  assert.doesNotMatch(agentsCommand.description ?? "", /recover.cleanup|offline recovery/i);
+  for (const mode of ["rpc", "print", "json"] as const) {
+    await assert.rejects(
+      agentsCommand.handler("", { mode, ui: { notify() {} } } as never),
+      /\/agents is available only in TUI mode.*inspect_agent and manage_agent/i,
+    );
+  }
   assert.equal(extension.shortcuts.size, 1);
   assert.equal(extension.messageRenderers.has("pi-email-subagent.email"), true);
   assert.equal(extension.messageRenderers.has("pi-email-subagent.alert"), true);
