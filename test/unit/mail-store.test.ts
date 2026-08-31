@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -9,6 +9,19 @@ import type { EmailEnvelope } from "../../src/types.ts";
 class FaultInjectedMailStore extends MailStore {
   protected override async beforeJournalReplace(): Promise<void> {
     throw new Error("injected before rename");
+  }
+}
+
+class TornAppendMailStore extends MailStore {
+  constructor(path: string, private readonly boundary: "first" | "second") { super(path); }
+
+  protected override async appendJournalPayload(handle: FileHandle, payload: string): Promise<void> {
+    const firstNewline = payload.indexOf("\n");
+    const cutoff = this.boundary === "first"
+      ? Math.max(1, Math.floor(firstNewline / 2))
+      : firstNewline + Math.min(12, payload.length - firstNewline - 1);
+    await handle.writeFile(payload.slice(0, cutoff), { encoding: "utf8" });
+    throw new Error(`injected torn ${this.boundary} line`);
   }
 }
 
@@ -42,6 +55,13 @@ describe("durable mail store", () => {
       subject: "Re: [mail_first] mail_first",
       kind: "reply",
       inReplyTo: "mail_first",
+      completion: {
+        status: "blocked",
+        summary: "Dependency missing.",
+        artifacts: [],
+        validation: ["Checked dependency availability"],
+        remaining: ["Install the dependency"],
+      },
       requiresResponse: false,
     };
     await store.reserveReply(reply, "mail_first");
@@ -55,6 +75,7 @@ describe("durable mail store", () => {
     await restored.init();
     assert.equal(restored.get("mail_first")?.deliveryState, "delivered");
     assert.equal(restored.get("mail_first")?.answeredBy, "mail_reply");
+    assert.equal(restored.get("mail_reply")?.completion?.status, "blocked");
   });
 
   it("persists, compacts, and validates durable model binding intent", async () => {
@@ -107,7 +128,7 @@ describe("durable mail store", () => {
     })}\n`);
     await assert.rejects(
       new MailStore(replyIntentPath).init(),
-      /modelBindingIntent is allowed only on a response-required creation request/i,
+      /modelBindingIntent is not allowed on a reply/i,
     );
   });
 
@@ -326,7 +347,7 @@ describe("durable mail store", () => {
     await store.markDelivered(["mail_reply"]);
     const before = store.list();
 
-    assert.equal(await store.compactIfNeeded(1), true);
+    assert.equal(await store.maintainIfNeeded(1), true);
     await store.flush();
     const lines = (await readFile(path, "utf8")).trim().split("\n");
     assert.equal(lines.length, before.length);
@@ -341,7 +362,7 @@ describe("durable mail store", () => {
     assert.equal(restored.get("mail_one")?.answeredBy, "mail_reply");
     assert.equal(restored.get("mail_two")?.deliveryState, "delivered");
     assert.equal(restored.get("mail_three")?.deliveryState, "queued");
-    assert.equal(await restored.compactIfNeeded(1), false, "an already minimal snapshot is not rewritten repeatedly");
+    assert.equal(await restored.maintainIfNeeded(1), false, "an already minimal snapshot is not rewritten repeatedly");
   });
 
   it("prunes oldest terminal mail while preserving every open obligation", async () => {
@@ -426,6 +447,42 @@ describe("durable mail store", () => {
     assert.deepEqual(restored.list().map((item) => item.id), ["mail_before", "mail_after"]);
     assert.doesNotMatch(await readFile(path, "utf8"), /\"email\":$/m);
   });
+
+  for (const boundary of ["first", "second"] as const) {
+    it(`rolls back a torn ${boundary} reserveReply line and poisons later writes until restart`, async () => {
+      const root = await mkdtemp(join(tmpdir(), `pi-email-mail-torn-${boundary}-`));
+      const path = join(root, "mail.jsonl");
+      const seeded = new MailStore(path);
+      await seeded.init();
+      const original = email(`mail_torn_original_${boundary}`);
+      await seeded.accept(original);
+      await seeded.markDelivered([original.id]);
+      const before = await readFile(path, "utf8");
+
+      const faulted = new TornAppendMailStore(path, boundary);
+      await faulted.init();
+      const reply: EmailEnvelope = {
+        ...email(`mail_torn_reply_${boundary}`),
+        from: original.to,
+        to: original.from,
+        kind: "reply",
+        inReplyTo: original.id,
+        requiresResponse: false,
+      };
+      await assert.rejects(faulted.reserveReply(reply, original.id), /append failed.*poisoned.*rolled back/i);
+      await assert.rejects(faulted.accept(email(`mail_after_fault_${boundary}`)), /append failed.*poisoned/i);
+      assert.equal(await readFile(path, "utf8"), before, "failed append is rolled back to its exact pre-write offset");
+
+      const restarted = new MailStore(path);
+      await restarted.init();
+      assert.equal(restarted.get(original.id)?.replyReservedBy, undefined);
+      assert.equal(restarted.get(reply.id), undefined);
+      await restarted.accept(email(`mail_after_restart_${boundary}`));
+      const verified = new MailStore(path);
+      await verified.init();
+      assert.ok(verified.get(`mail_after_restart_${boundary}`));
+    });
+  }
 
   it("leaves the original journal intact when atomic tail repair fails before rename", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-repair-fault-"));

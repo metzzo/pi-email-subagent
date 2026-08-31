@@ -14,10 +14,11 @@ const PROCESS_START_PATTERN = /^[1-9][0-9]{0,31}$/;
 const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface NamespaceLockHooks {
-  /** Narrow characterization seam; production callers leave this unset. */
+  /** Narrow characterization seams; production callers leave these unset. */
   beforePriorOwnerIdentityRead?: () => void | Promise<void>;
   afterFilesystemLockAcquired?: () => void | Promise<void>;
   afterFilesystemLockReleased?: () => void | Promise<void>;
+  removeTransitionGuard?: (path: string) => Promise<void>;
 }
 
 export interface NamespaceOwner {
@@ -191,11 +192,35 @@ export class NamespaceLock {
       }
       throw error;
     }
+    let acquired: NamespaceLock | undefined;
+    let acquisitionError: unknown;
     try {
-      return await NamespaceLock.acquireUnderTransitionGuard(namespaceDir, onCompromised, hooks);
-    } finally {
-      await rm(transitionGuard, { recursive: true, force: true }).catch(() => undefined);
+      acquired = await NamespaceLock.acquireUnderTransitionGuard(namespaceDir, onCompromised, hooks);
+    } catch (error) {
+      acquisitionError = error;
     }
+
+    const removeGuard = hooks.removeTransitionGuard
+      ?? ((path: string) => rm(path, { recursive: true, force: true }));
+    try {
+      await removeGuard(transitionGuard);
+    } catch (removeError) {
+      const failures: unknown[] = [removeError];
+      // A broker must never become active while its transition guard may still
+      // exist. Release any newly published lease, retry the transient removal,
+      // and fail initialization with every cleanup diagnostic preserved.
+      if (acquired) {
+        try { await acquired.release(); } catch (releaseError) { failures.push(releaseError); }
+      }
+      try { await removeGuard(transitionGuard); } catch (retryError) { failures.push(retryError); }
+      if (acquisitionError !== undefined) failures.unshift(acquisitionError);
+      throw new AggregateError(
+        failures,
+        `Subagent namespace owner-transition guard removal failed; initialization was released and blocked: ${namespaceDir}.`,
+      );
+    }
+    if (acquisitionError !== undefined) throw acquisitionError;
+    return acquired!;
   }
 
   private static async acquireUnderTransitionGuard(

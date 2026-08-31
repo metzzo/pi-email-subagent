@@ -1,9 +1,10 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
   DEFAULT_LIFECYCLE,
+  EFFORT_LEVELS,
   isSafeConfigSemanticText,
   LIFECYCLE_FIELDS,
   MAX_CONFIG_INSTRUCTIONS_BYTES,
@@ -15,8 +16,8 @@ import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegi
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
 import { clone, nowIso } from "./util.ts";
 
-const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const STATES = new Set<AgentStatus>(["queued", "spawning", "running", "idle", "parked", "failed", "stopped", "paused", "archived"]);
+const EFFORTS = new Set<ThinkingLevel>(EFFORT_LEVELS);
+const STATES = new Set<AgentStatus>(["queued", "spawning", "running", "idle", "failed", "stopped", "paused", "archived"]);
 const ACTIVITY_KINDS = new Set<ActivityItem["kind"]>(["status", "tool", "text", "error"]);
 const WORK_KINDS = new Set<WorkItem["kind"]>(["edit", "write", "shell", "custom"]);
 const WORK_STATUSES = new Set<WorkItem["status"]>(["running", "succeeded", "failed", "interrupted", "unknown"]);
@@ -342,14 +343,19 @@ function parseRecord(value: unknown, index: number): AgentRecord {
   const label = `registry.agents[${index}]`;
   const raw = object(value, label);
   const effort = string(raw.effort, `${label}.effort`) as ThinkingLevel;
-  const state = string(raw.state, `${label}.state`) as AgentStatus;
+  const rawState = string(raw.state, `${label}.state`);
+  if (rawState === "parked") {
+    throw new Error(`${label}.state uses the unsupported pre-0.1 nested-delegation journal state "parked"; remove or migrate this development namespace.`);
+  }
+  const state = rawState as AgentStatus;
   if (!EFFORTS.has(effort)) throw new Error(`${label}.effort is invalid.`);
   if (!STATES.has(state)) throw new Error(`${label}.state is invalid.`);
   if (!Number.isInteger(raw.enforcementAttempts) || (raw.enforcementAttempts as number) < 0) {
     throw new Error(`${label}.enforcementAttempts must be a non-negative integer.`);
   }
-  if (raw.canSpawn !== undefined && typeof raw.canSpawn !== "boolean") {
-    throw new Error(`${label}.canSpawn must be a boolean.`);
+  if (raw.consecutiveFailures !== undefined
+    && (!Number.isInteger(raw.consecutiveFailures) || (raw.consecutiveFailures as number) < 0)) {
+    throw new Error(`${label}.consecutiveFailures must be a non-negative integer.`);
   }
   const record: AgentRecord = {
     address: string(raw.address, `${label}.address`).toLowerCase(),
@@ -359,11 +365,10 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     modelId: string(raw.modelId, `${label}.modelId`),
     effort,
     tools: parseProfileTools(raw.tools, `${label}.tools`),
-    // Legacy registries without an explicit delegation grant fail closed.
-    canSpawn: raw.canSpawn === undefined ? false : (raw.canSpawn as boolean),
     state,
     createdAt: string(raw.createdAt, `${label}.createdAt`),
     updatedAt: string(raw.updatedAt, `${label}.updatedAt`),
+    ...(raw.consecutiveFailures === undefined ? {} : { consecutiveFailures: raw.consecutiveFailures as number }),
     enforcementAttempts: raw.enforcementAttempts as number,
     // Registries from before lifecycle watchdogs receive the finite shipped defaults.
     lifecycle: parseLifecycle(raw.lifecycle, `${label}.lifecycle`),
@@ -459,9 +464,14 @@ export class RegistryStore {
     const snapshot = clone({ ...parseRegistry(registry), updatedAt: nowIso() });
     const operation = this.writeChain.catch(() => undefined).then(async () => {
       const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
-      await writeFile(temp, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temp, this.path);
-      try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+      try {
+        await writeFile(temp, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+        await rename(temp, this.path);
+        try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+      } catch (error) {
+        await unlink(temp).catch(() => undefined);
+        throw error;
+      }
     });
     this.writeChain = operation;
     await operation;

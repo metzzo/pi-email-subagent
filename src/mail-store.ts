@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, unlink, writeFile, type FileHandle } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseSubagentAddressShape } from "./address.ts";
 import { isThinkingLevel, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
-import type { EmailEnvelope, LifecyclePolicy, ModelBinding } from "./types.ts";
+import type { EmailEnvelope, LifecyclePolicy, ModelBinding, ReplyCompletion, ReplyStatus } from "./types.ts";
 import { byteLength, clone, nowIso } from "./util.ts";
 
 export type MailEvent =
@@ -64,13 +64,37 @@ function parseLifecycle(value: unknown, label: string): LifecyclePolicy | undefi
   return result;
 }
 
+function parseReplyCompletion(value: unknown): ReplyCompletion | undefined {
+  if (value === undefined) return undefined;
+  const raw = object(value, "email.completion");
+  const status = raw.status as ReplyStatus;
+  if (status !== "completed" && status !== "partial" && status !== "blocked") {
+    throw new Error("email.completion.status is invalid.");
+  }
+  const list = (key: "artifacts" | "validation" | "remaining"): string[] => {
+    const value = raw[key];
+    if (!Array.isArray(value) || value.length > 32 || value.some((item) => typeof item !== "string" || item.length === 0)) {
+      throw new Error(`email.completion.${key} is invalid.`);
+    }
+    return [...value];
+  };
+  return {
+    status,
+    summary: string(raw.summary, "email.completion.summary"),
+    artifacts: list("artifacts"),
+    validation: list("validation"),
+    remaining: list("remaining"),
+    ...(raw.warning === undefined ? {} : { warning: string(raw.warning, "email.completion.warning") }),
+  };
+}
+
 function parseEmail(value: unknown): EmailEnvelope {
   const raw = object(value, "email");
   const priority = raw.priority;
   const kind = raw.kind;
   const deliveryState = raw.deliveryState;
   if (priority !== "high" && priority !== "low") throw new Error("email.priority is invalid.");
-  if (kind !== "request" && kind !== "reply") throw new Error("email.kind is invalid.");
+  if (kind !== "request" && kind !== "reply" && kind !== "notification") throw new Error("email.kind is invalid.");
   if (deliveryState !== "queued" && deliveryState !== "delivered" && deliveryState !== "failed" && deliveryState !== "cancelled") {
     throw new Error("email.deliveryState is invalid.");
   }
@@ -102,12 +126,14 @@ function parseEmail(value: unknown): EmailEnvelope {
     const parsed = optionalString(raw[key], label);
     if (parsed !== undefined) (email as unknown as Record<string, unknown>)[key] = parsed;
   }
+  const completion = parseReplyCompletion(raw.completion);
+  if (completion) email.completion = completion;
   const lifecycleIntent = parseLifecycle(raw.lifecycleIntent, "email.lifecycleIntent");
   if (lifecycleIntent) email.lifecycleIntent = lifecycleIntent;
   const modelBindingIntent = parseModelBinding(raw.modelBindingIntent, email.to);
   if (modelBindingIntent) {
-    if (email.kind !== "request" || !email.requiresResponse) {
-      throw new Error("email.modelBindingIntent is allowed only on a response-required creation request.");
+    if (email.kind === "reply") {
+      throw new Error("email.modelBindingIntent is not allowed on a reply.");
     }
     email.modelBindingIntent = modelBindingIntent;
   }
@@ -118,6 +144,8 @@ function parseEmail(value: unknown): EmailEnvelope {
   }
   if (email.kind === "reply" && !email.inReplyTo) throw new Error("reply email is missing inReplyTo.");
   if (email.kind === "reply" && email.requiresResponse) throw new Error("reply email cannot require a response.");
+  if (email.kind !== "reply" && email.completion) throw new Error("only a reply email can contain completion metadata.");
+  if (email.kind === "notification" && email.requiresResponse) throw new Error("notification email cannot require a response.");
   if (email.deliveryState === "cancelled"
     && (!email.cancelledAt || !email.cancelledBy || !email.cancellationReason)) {
     throw new Error("cancelled email is missing cancellation audit metadata.");
@@ -178,6 +206,7 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && left.priority === right.priority
     && left.kind === right.kind
     && left.inReplyTo === right.inReplyTo
+    && JSON.stringify(left.completion) === JSON.stringify(right.completion)
     && left.requiresResponse === right.requiresResponse
     && left.createdAt === right.createdAt
     && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent)
@@ -189,9 +218,17 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
 // Rewrite the journal as a snapshot once it grows past this many events.
 export const MAIL_JOURNAL_COMPACT_THRESHOLD = 8192;
 
+class MailJournalPoisonError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "MailJournalPoisonError";
+  }
+}
+
 export class MailStore {
   private readonly emails = new Map<string, EmailEnvelope>();
   private writeChain: Promise<void> = Promise.resolve();
+  private poison?: MailJournalPoisonError;
   private maintenancePromise?: Promise<boolean>;
   private eventCount = 0;
 
@@ -361,16 +398,64 @@ export class MailStore {
     delete email.replyReservedAt;
   }
 
+  /** Narrow append boundary for durability fault tests; production uses one open file descriptor. */
+  protected async appendJournalPayload(handle: FileHandle, payload: string): Promise<void> {
+    await handle.writeFile(payload, { encoding: "utf8" });
+  }
+
+  private async appendJournal(payload: string): Promise<void> {
+    let handle: FileHandle;
+    try {
+      handle = await open(this.path, "a+", 0o600);
+    } catch (error) {
+      throw new MailJournalPoisonError("Mail journal append could not open its file; this store is poisoned until restart.", { cause: error });
+    }
+    let offset: number | undefined;
+    try {
+      offset = (await handle.stat()).size;
+      await this.appendJournalPayload(handle, payload);
+    } catch (error) {
+      let rollbackError: unknown;
+      if (offset !== undefined) {
+        try {
+          await handle.truncate(offset);
+        } catch (rollbackFailure) {
+          rollbackError = rollbackFailure;
+        }
+      }
+      const detail = offset === undefined
+        ? " The pre-append offset could not be established."
+        : rollbackError
+          ? ` Append rollback to byte ${offset} also failed: ${String(rollbackError)}`
+          : ` The journal was rolled back to byte ${offset}.`;
+      throw new MailJournalPoisonError(`Mail journal append failed; this store is poisoned until restart.${detail}`, { cause: error });
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+    try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+  }
+
+  private preserveAppendPoison(operation: Promise<void>): Promise<void> {
+    return operation.catch((error: unknown) => {
+      if (error instanceof MailJournalPoisonError) this.poison = error;
+      // Validation and atomic-replacement failures do not imply a torn append.
+      // Their individual caller still receives the rejection. The serialization
+      // tail stays handled; poison is checked explicitly by every later caller.
+    });
+  }
+
   private async transact(build: () => MailEvent[]): Promise<void> {
-    const operation = this.writeChain.catch(() => undefined).then(async () => {
+    const operation = this.writeChain.then(async () => {
+      if (this.poison) throw this.poison;
       const events = build();
       if (events.length === 0) return;
       const payload = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
-      await appendFile(this.path, payload, { encoding: "utf8", mode: 0o600 });
-      try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }
+      await this.appendJournal(payload);
       for (const event of events) this.apply(event);
     });
-    this.writeChain = operation;
+    // Only an append failure remains the head of the chain. No later operation
+    // may follow a possibly torn append or mutate memory until restart.
+    this.writeChain = this.preserveAppendPoison(operation);
     await operation;
   }
 
@@ -509,6 +594,7 @@ export class MailStore {
 
   async flush(): Promise<void> {
     await this.writeChain;
+    if (this.poison) throw this.poison;
   }
 
   private retainedSnapshot(maxRetainedEmails: number): EmailEnvelope[] {
@@ -573,10 +659,11 @@ export class MailStore {
 
   /** Rewrite the journal as one full-state `email.created` snapshot per retained envelope. */
   async compact(): Promise<void> {
-    const operation = this.writeChain.catch(() => undefined).then(async () => {
+    const operation = this.writeChain.then(async () => {
+      if (this.poison) throw this.poison;
       await this.rewriteSnapshot([...this.emails.values()]);
     });
-    this.writeChain = operation;
+    this.writeChain = this.preserveAppendPoison(operation);
     await operation;
   }
 
@@ -584,25 +671,23 @@ export class MailStore {
     threshold = MAIL_JOURNAL_COMPACT_THRESHOLD,
     maxRetainedEmails = Number.MAX_SAFE_INTEGER,
   ): Promise<boolean> {
+    if (this.poison) throw this.poison;
     if (this.maintenancePromise) return this.maintenancePromise;
     const excessEvents = this.eventCount - this.emails.size;
     if (excessEvents <= threshold && this.emails.size <= maxRetainedEmails) return false;
-    const operation = this.writeChain.catch(() => undefined).then(async () => {
+    const operation = this.writeChain.then(async () => {
+      if (this.poison) throw this.poison;
       const currentExcess = this.eventCount - this.emails.size;
       if (currentExcess <= threshold && this.emails.size <= maxRetainedEmails) return false;
       await this.rewriteSnapshot(this.retainedSnapshot(maxRetainedEmails));
       return true;
     });
     const write = operation.then(() => undefined);
-    this.writeChain = write;
+    this.writeChain = this.preserveAppendPoison(write);
     const tracked = operation.finally(() => {
       if (this.maintenancePromise === tracked) this.maintenancePromise = undefined;
     });
     this.maintenancePromise = tracked;
     return tracked;
-  }
-
-  async compactIfNeeded(threshold = MAIL_JOURNAL_COMPACT_THRESHOLD): Promise<boolean> {
-    return this.maintainIfNeeded(threshold);
   }
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -29,7 +29,6 @@ function record(address = "worker.registry@gpt-5.4.com"): AgentRecord {
     modelId: "gpt-5.4",
     effort: "medium",
     tools: ["read", "send_email", "fetch_emails"],
-    canSpawn: true,
     state: "archived",
     createdAt: now,
     updatedAt: now,
@@ -60,11 +59,19 @@ describe("registry schema", () => {
     assert.equal(restored.agents[0]?.state, "archived");
   });
 
-  it("fails closed when legacy registries omit delegation permission", () => {
+  it("removes its temporary file when a save rename fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-registry-save-failure-"));
+    const path = join(root, "registry-target");
+    await mkdir(path);
+    await assert.rejects(new RegistryStore(path).save(registry()));
+    assert.deepEqual(await readdir(root), ["registry-target"]);
+  });
+
+  it("ignores the removed legacy delegation field while preserving safe migration", () => {
     const legacy = registry() as unknown as { agents: Record<string, unknown>[] };
-    delete legacy.agents[0]!.canSpawn;
+    legacy.agents[0]!.canSpawn = true;
     const parsed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
-    assert.equal(parsed.agents[0]?.canSpawn, false);
+    assert.equal(Object.hasOwn(parsed.agents[0]!, "canSpawn"), false);
     assert.deepEqual(parsed.agents[0]?.work, emptyWorkState());
     legacy.agents[0]!.currentActivity = 'write {"content":"SENTINEL_SECRET"}';
     legacy.agents[0]!.activity = [{ at: new Date().toISOString(), kind: "tool", summary: 'edit {"newText":"SENTINEL_SECRET"}' }];
@@ -73,9 +80,6 @@ describe("registry schema", () => {
     delete legacy.agents[0]!.lifecycle;
     const lifecycleLegacy = parseRegistry(JSON.parse(JSON.stringify(legacy)));
     assert.deepEqual(lifecycleLegacy.agents[0]?.lifecycle, DEFAULT_LIFECYCLE);
-
-    legacy.agents[0]!.canSpawn = "yes";
-    assert.throws(() => parseRegistry(JSON.parse(JSON.stringify(legacy))), /canSpawn must be a boolean/);
   });
 
   it("rejects restored semantic and display fields that bypass configured bounds", () => {

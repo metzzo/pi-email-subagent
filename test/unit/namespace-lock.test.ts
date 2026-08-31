@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, readdir, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
@@ -101,6 +101,25 @@ it("blocks contenders on both controlled owner-publication and release gaps", as
   await releasing;
   const next = await NamespaceLock.acquire(namespace, () => undefined);
   await next.release();
+});
+
+it("releases a new lease and fails initialization when transition-guard removal fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-transition-remove-failure-"));
+  const namespace = join(root, "state");
+  let removals = 0;
+  await assert.rejects(
+    NamespaceLock.acquire(namespace, () => undefined, {
+      removeTransitionGuard: async (path) => {
+        removals += 1;
+        if (removals === 1) throw new Error("injected transition rm failure");
+        await rm(path, { recursive: true, force: true });
+      },
+    }),
+    /transition guard removal failed.*initialization was released and blocked/i,
+  );
+  assert.equal(removals, 2, "the transient removal is retried only after releasing the new lease");
+  const replacement = await NamespaceLock.acquire(namespace, () => undefined);
+  await replacement.release();
 });
 
 it("fails closed on malformed owner metadata even without a lock directory", async () => {
