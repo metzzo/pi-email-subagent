@@ -2,13 +2,24 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 
 export type EmailPriority = "high" | "low";
-export type EmailKind = "request" | "reply";
+export type EmailKind = "request" | "reply" | "notification";
 export type DeliveryState = "queued" | "delivered" | "failed" | "cancelled";
-export type AgentStatus = "queued" | "spawning" | "running" | "idle" | "parked" | "failed" | "stopped" | "paused" | "archived";
+export type AgentStatus = "queued" | "spawning" | "running" | "idle" | "failed" | "stopped" | "paused" | "archived";
 
 export interface ModelBinding {
   provider: string;
   modelId: string;
+}
+
+export type ReplyStatus = "completed" | "partial" | "blocked";
+
+export interface ReplyCompletion {
+  status: ReplyStatus;
+  summary: string;
+  artifacts: string[];
+  validation: string[];
+  remaining: string[];
+  warning?: string;
 }
 
 export interface EmailEnvelope {
@@ -20,6 +31,7 @@ export interface EmailEnvelope {
   priority: EmailPriority;
   kind: EmailKind;
   inReplyTo?: string;
+  completion?: ReplyCompletion;
   requiresResponse: boolean;
   createdAt: string;
   deliveredAt?: string;
@@ -64,11 +76,17 @@ export interface RoleConfig {
   effort?: ThinkingLevel;
   tools?: string[];
   instructions?: string;
-  canSpawn?: boolean;
   lifecycle?: LifecycleOverride;
 }
 
 export interface AddressConfig extends RoleConfig {}
+
+export interface IdentityBudgetPolicy {
+  maxTurns: number;
+  maxToolCalls: number;
+  maxTokens: number;
+  maxConsecutiveFailures: number;
+}
 
 export interface SubagentConfig {
   defaultEffort: ThinkingLevel;
@@ -85,6 +103,7 @@ export interface SubagentConfig {
   maxBatchBytes: number;
   maxRetainedEmails: number;
   responseReminderLimit: number;
+  budgets: IdentityBudgetPolicy;
   lifecycle: LifecyclePolicy;
   lifecycleMaxima: LifecyclePolicy;
   roles: Record<string, RoleConfig>;
@@ -205,7 +224,6 @@ export interface AgentRecord {
   activeTools?: string[];
   /** Durable capability evidence for one exact worker generation. */
   workerEpoch?: WorkerCapabilityEpoch;
-  canSpawn: boolean;
   instructions?: string;
   state: AgentStatus;
   sessionFile?: string;
@@ -215,6 +233,8 @@ export interface AgentRecord {
   currentActivity?: string;
   failure?: string;
   cleanup?: CleanupDiagnostic;
+  /** Persisted terminal-run count used by the identity circuit breaker. */
+  consecutiveFailures?: number;
   enforcementAttempts: number;
   lifecycle: LifecyclePolicy;
   usage: UsageSnapshot;
@@ -233,9 +253,16 @@ export interface BrokerRegistry {
 
 export interface SendEmailInput {
   to: string;
-  subject: string;
+  /** Required for new mail; omitted when reply_to is used. */
+  subject?: string;
+  /** Preferred reply correlation. The broker derives the canonical subject. */
+  reply_to?: string;
   message: string;
   priority: EmailPriority;
+  /** New worker-to-main mail defaults to a notification unless explicitly true. */
+  requires_response?: boolean;
+  /** Required on the preferred reply_to path; legacy subject replies migrate to partial. */
+  completion?: ReplyCompletion;
   /** Initial effort override, accepted only when this send creates an unknown identity. */
   effort?: ThinkingLevel;
   lifecycle?: LifecycleOverride;
@@ -243,9 +270,16 @@ export interface SendEmailInput {
 
 export type RecipientDisposition = "main" | "spawned" | "reused" | "restored" | "stopped" | "failed";
 
+export interface DeliveryUncertainty {
+  code: "POST_JOURNAL_WORKER_ADMISSION_LOST" | "PROMPT_ACCEPTANCE_UNCERTAIN";
+  detail: string;
+}
+
 export interface SendEmailResult {
   envelope: EmailEnvelope;
   spawned: boolean;
+  /** Present when journal delivery advanced but no exact worker admission was confirmed. */
+  deliveryUncertain?: DeliveryUncertainty;
   recipientModel?: string;
   /** Exact provider selected for or preserved by the recipient identity. */
   recipientProvider?: string;
@@ -256,6 +290,9 @@ export interface SendEmailResult {
   recipientLifecycle?: LifecyclePolicy;
   recipientCleanup?: CleanupDiagnostic;
   recipientDisposition: RecipientDisposition;
+  /** Preferred correlation value for a reply's reply_to field. */
+  expectedReplyTo?: string;
+  /** Legacy copy-compatible reply subject. */
   expectedReplySubject?: string;
   correlationId: string;
   answeredEmailId?: string;
@@ -279,8 +316,12 @@ export interface AgentArchiveBlockers {
   cleanupQuarantine: boolean;
   queued: BoundedRequestIds;
   incomingUnanswered: BoundedRequestIds;
-  outgoingUnanswered: BoundedRequestIds;
   pendingReplies: BoundedRequestIds;
+}
+
+export interface AgentBudgetSnapshot {
+  limits: IdentityBudgetPolicy;
+  currentRun: { turns: number; toolCalls: number; tokens: number };
 }
 
 export interface AgentInspection {
@@ -300,16 +341,15 @@ export interface AgentInspection {
   activeTools?: string[];
   instructions?: string;
   writable: boolean;
-  canSpawn: boolean;
   state: AgentStatus | "new";
   currentActivity?: string;
   queued: number;
   unanswered: number;
-  outgoingUnanswered: number;
   pendingReplies: number;
   archiveEligible: boolean;
   archiveBlockers: AgentArchiveBlockers;
   usage: UsageSnapshot;
+  budgets: AgentBudgetSnapshot;
   failure?: string;
   cleanup?: CleanupDiagnostic;
   providerReady: "available" | "unavailable" | "unknown";
@@ -442,6 +482,8 @@ export interface BrokerOptions {
   models: Model<any>[];
   preferredProvider?: string;
   mainAdapter: MainAdapter;
+  /** Effect declarations for opt-in worker-extension tools available to profiles. */
+  workerExtensionEffects?: Readonly<Record<string, "read" | "write">>;
   /** Prepares the exact new-identity runtime request object before email.created. */
   workerPreflight?: (model: Model<any>) => unknown | Promise<unknown>;
   /** Must consume the exact preparation returned above when one is supplied. */
