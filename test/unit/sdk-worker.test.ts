@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { awaitPromptAcceptance, effectiveWorkerModel, SdkWorker, terminalAgentError } from "../../src/sdk-worker.ts";
+import { awaitPromptAcceptance, SdkWorker, terminalAgentError } from "../../src/sdk-worker.ts";
 import { SAFE_SUMMARY_MAX_BYTES } from "../../src/safe-summary.ts";
 import { emptyWorkState } from "../../src/work-ledger.ts";
 
@@ -147,13 +147,6 @@ describe("SDK worker failures", () => {
     assert.equal(record.activity.length, 40);
     assert.ok(record.activity.every((item: any) => item.summary.length <= 500));
     assert.match(record.activity[0]?.summary ?? "", /retry 6\/45/);
-  });
-
-  it("uses the exact model object resolved by the worker runtime snapshot", () => {
-    const parent = { provider: "custom", id: "model", baseUrl: "https://parent.invalid" } as never;
-    const snapshot = { provider: "custom", id: "model", baseUrl: "https://worker.invalid" } as never;
-    assert.equal(effectiveWorkerModel(parent, snapshot), snapshot);
-    assert.equal(effectiveWorkerModel(parent), parent);
   });
 
   it("reuses one cleanup operation and settles active tools at the real AgentSession abort boundary", async () => {
@@ -381,6 +374,7 @@ describe("SDK worker failures", () => {
     let disposals = 0;
     const session = {
       isStreaming: true,
+      isIdle: false,
       abort: async () => abort,
       dispose: () => { disposals += 1; throw new Error("dispose failed first"); },
     };
@@ -388,12 +382,14 @@ describe("SDK worker failures", () => {
     const cleanup = worker.cleanup();
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(disposals, 0, "disposal cannot precede abort settlement");
+    session.isStreaming = false;
+    session.isIdle = true;
     rejectAbort(new Error("late abort failed"));
     const report = await cleanup;
     assert.equal(disposals, 1);
     assert.equal(report.abort, "failed");
     assert.equal(report.dispose, "failed");
-    assert.equal(report.sessionIdle, false);
+    assert.equal(report.sessionIdle, true, "the session eventually reached idle even though abort itself rejected");
     assert.equal(report.quiescence, "unknown");
     assert.match(report.detail ?? "", /abort failed|dispose failed/);
     assert.equal(disposals, 1);
@@ -440,12 +436,13 @@ describe("SDK worker failures", () => {
     assert.doesNotMatch(JSON.stringify(report), /PRIVATE/);
   });
 
-  it("always unsubscribes and disposes a session when abort rejects", async () => {
+  it("does not dispose or unsubscribe after abort rejection until the session becomes quiescent", async () => {
     const worker = new SdkWorker({} as never);
     let unsubscribed = false;
     let sessionDisposed = false;
     const session = {
       isStreaming: true,
+      isIdle: false,
       abort: async () => { throw new Error("abort failed"); },
       dispose: () => { sessionDisposed = true; },
     };
@@ -458,7 +455,13 @@ describe("SDK worker failures", () => {
     internal.unsubscribeSession = () => { unsubscribed = true; };
     internal.listeners.add(() => undefined);
 
-    await assert.rejects(worker.dispose(), /abort failed/);
+    const disposal = worker.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    assert.equal(unsubscribed, false);
+    assert.equal(sessionDisposed, false, "non-quiescent Pi work retains the exact session");
+    session.isStreaming = false;
+    session.isIdle = true;
+    await assert.rejects(disposal, /abort failed/);
     assert.equal(unsubscribed, true);
     assert.equal(sessionDisposed, true);
     assert.equal(internal.listeners.size, 0);

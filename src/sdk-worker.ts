@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import * as PiAi from "@earendil-works/pi-ai";
 import type { Model } from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { AgentSession, AgentSessionEvent, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import * as TypeBox from "typebox";
 import { MAX_TIMER_DELAY_MS } from "./config.ts";
+import { EmailProtocolError, emailErrorDetails } from "./email-error.ts";
 import type {
   ActivityItem,
   AgentRecord,
@@ -22,7 +22,8 @@ import { formatUnanswered } from "./prompts.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
 import { textResult } from "./tool-result.ts";
-import type { WorkerExtensionRegistration } from "./worker-extensions.ts";
+import { SendEmailSchema } from "./tool-schemas.ts";
+import { guardWorkerExtensionFactory, type WorkerExtensionRegistration } from "./worker-extensions.ts";
 import { clone, nowIso, truncateText } from "./util.ts";
 import { appendRecent, beginBatch, classifyTool, emptyWorkState, finishWorkItem, interruptActive, noteInspection, recoverMutationWork, startWorkItem, unknownWorkItem } from "./work-ledger.ts";
 
@@ -38,39 +39,22 @@ export interface FetchToolDetails {
 }
 
 export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail" | "fetchEmails">) {
-  const PrioritySchema = PiAi.StringEnum(["high", "low"] as const);
-  const EffortSchema = PiAi.StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const);
-  const LifecycleSchema = Type.Object({
-    spawnTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-    promptAcceptanceTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-    runTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-    idleTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-    abortTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-    disposeTimeoutMs: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMER_DELAY_MS })),
-  }, { additionalProperties: false, description: "Optional finite deadlines for a newly created recipient only; configured administrative maxima apply" });
   const send = PiCodingAgent.defineTool({
     name: "send_email",
     label: "Send email",
     description:
-      "Send virtual email to another Pi agent. Sender identity is automatic. Unknown valid recipients spawn; optional effort applies only to that initial creation. Use low normally and high only for blockers. To answer, copy the exact `Re: [mail-id] subject` from fetch_emails().",
+      "Send virtual email to another Pi agent. Sender identity is automatic. Use reply_to plus structured completion to answer. Worker-to-main new mail defaults to a notification; set requires_response only for a real request. Unknown valid recipients spawn; optional effort applies only to that initial creation.",
     promptSnippet: "Send internal mail to persistent subagents; unknown valid addresses spawn.",
     promptGuidelines: [
       "Use low-priority email by default; high is only for blockers that should change ongoing work.",
-      "Answer received requests with the exact reply subject returned by fetch_emails().",
+      "Answer received requests with reply_to and a structured completed, partial, or blocked completion report.",
       "Use send_email effort only on the first request that creates an unknown identity; later mail cannot mutate persisted effort.",
     ],
     executionMode: "parallel" as const,
-    parameters: Type.Object({
-      to: Type.String({ description: "Recipient `<name>.<task-slug>@<registered-model>.com` or a main address" }),
-      subject: Type.String({ description: "New subject, or exact reply subject from fetch_emails()" }),
-      message: Type.String({ description: "Self-contained request or substantive response" }),
-      priority: PrioritySchema,
-      effort: Type.Optional(EffortSchema),
-      lifecycle: Type.Optional(LifecycleSchema),
-    }, { additionalProperties: false }),
+    parameters: SendEmailSchema,
     async execute(_id, params, signal) {
-      if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
       try {
+        if (signal?.aborted) throw new EmailProtocolError("EMAIL_NOT_ACCEPTED", "Email send aborted before acceptance.");
         const result = await config.sendEmail(params as SendEmailInput, signal);
         const lines = [
           "Email accepted.",
@@ -80,10 +64,17 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
           `Spawned recipient: ${result.spawned ? "yes" : "no"}`,
           `Recipient disposition: ${result.recipientDisposition}`,
           `Delivery state: ${result.envelope.deliveryState}`,
+          `Delivery certainty: ${result.deliveryUncertain ? `uncertain (${result.deliveryUncertain.code})` : "no post-journal uncertainty reported"}`,
           `Correlation ID: ${result.correlationId}`,
-          `Expected reply subject: ${result.expectedReplySubject ?? "none"}`,
+          `Reply with reply_to: ${result.expectedReplyTo ?? "none"}`,
+          `Legacy expected reply subject: ${result.expectedReplySubject ?? "none"}`,
           `Answered email: ${result.answeredEmailId ?? "none"}`,
         ];
+        if (result.envelope.completion) {
+          lines.push(`Completion status: ${result.envelope.completion.status}`);
+          if (result.envelope.completion.warning) lines.push(`Completion warning: ${result.envelope.completion.warning}`);
+        }
+        if (result.deliveryUncertain) lines.push(`Delivery recovery: ${result.deliveryUncertain.detail}`);
         if (result.recipientDisposition === "failed") {
           lines.push(result.recipientCleanup
             ? "Recipient recovery: mail is accepted and queued, but Pi session/tool cleanup settlement is unknown. Restart/archive are blocked only for this exact address until the live cleanup settles. Do not resend or redelegate the original scope."
@@ -101,11 +92,13 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
         if (result.recipientCleanup) lines.push(`Recipient cleanup: ${result.recipientCleanup.state} · generation ${result.recipientCleanup.workerGeneration} · Pi session/tool settlement unknown`);
         return textResult(lines.join("\n"), { result } satisfies SendToolDetails);
       } catch (error) {
-        const message = safeErrorSummary(error);
-        // The broker may report a post-journal delivery problem. Do not
-        // relabel a durable email.created commit as rejection.
-        if (/^Email\s+\S+\s+was persisted\b/.test(message)) throw new Error(message);
-        throw new Error(`Email was not accepted: ${message}`);
+        const details = emailErrorDetails(error);
+        if (details.code === "EMAIL_DELIVERY_FAILED" || details.code === "EMAIL_NOT_ACCEPTED") throw error;
+        throw new EmailProtocolError(
+          "EMAIL_NOT_ACCEPTED",
+          `Email was not accepted: ${details.message}`,
+          { ...details.fields, ...(details.code ? { cause_code: details.code } : {}) },
+        );
       }
     },
   });
@@ -114,7 +107,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     name: "fetch_emails",
     label: "Fetch unanswered emails",
     description:
-      "Return response-required emails in your mailbox that do not yet have a successful reply. Call at the beginning of mailbox work and before stopping; use each exact Reply subject with send_email.",
+      "Return response-required emails in your mailbox that do not yet have a successful reply. Call at the beginning of mailbox work and before stopping; answer with reply_to and structured completion.",
     promptSnippet: "List your unanswered response-required virtual emails.",
     promptGuidelines: ["Before becoming idle, call fetch_emails() and substantively answer every returned request."],
     executionMode: "sequential" as const,
@@ -175,10 +168,6 @@ export function terminalAgentError(messages: readonly AgentMessage[], willRetry:
     }
   }
   return undefined;
-}
-
-export function effectiveWorkerModel(configModel: Model<any>, runtimeModel?: Model<any>): Model<any> {
-  return runtimeModel ?? configModel;
 }
 
 export class SdkWorker implements WorkerTransport {
@@ -283,6 +272,9 @@ export class SdkWorker implements WorkerTransport {
     const generation = ++this.startGeneration;
     this.record = clone(config.record);
     this.record.work ??= emptyWorkState();
+    const requestedTools = [...this.record.tools];
+    const enabledWorkerExtensions = this.workerExtensions.filter((registration) =>
+      registration.tools.length === 0 || registration.tools.some((tool) => requestedTools.includes(tool)));
     this.cwd = config.cwd;
     this.setState("spawning");
 
@@ -297,7 +289,10 @@ export class SdkWorker implements WorkerTransport {
       agentDir: config.agentDir,
       settingsManager: settings,
       noExtensions: true,
-      extensionFactories: this.workerExtensions.map(({ name, factory }) => ({ name, factory })),
+      extensionFactories: enabledWorkerExtensions.map((registration) => ({
+        name: registration.name,
+        factory: guardWorkerExtensionFactory(registration),
+      })),
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -329,18 +324,12 @@ export class SdkWorker implements WorkerTransport {
       interruptActive(this.record.work);
     }
 
-    const requestedTools = [...this.record.tools];
     const workerTools = [...requestedTools];
-    for (const registration of this.workerExtensions) {
-      for (const tool of registration.tools) {
-        if (!workerTools.includes(tool)) workerTools.push(tool);
-      }
-    }
     const { session, extensionsResult } = await PiCodingAgent.createAgentSession({
       cwd: config.cwd,
       agentDir: config.agentDir,
       modelRuntime: this.modelRuntime,
-      model: effectiveWorkerModel(config.model, this.runtimeModel),
+      model: this.runtimeModel ?? config.model,
       thinkingLevel: this.record.effort,
       tools: workerTools,
       customTools: [...createWorkerMailTools(config)],
@@ -353,7 +342,7 @@ export class SdkWorker implements WorkerTransport {
       session.dispose();
       throw new Error("A registered worker extension failed to load.");
     }
-    for (const registration of this.workerExtensions) {
+    for (const registration of enabledWorkerExtensions) {
       const extension = extensionsResult.extensions.find((candidate) => candidate.path === `<inline:${registration.name}>`);
       const registeredTools = extension ? [...extension.tools.keys()] : [];
       if (!extension || registeredTools.length !== registration.tools.length || registeredTools.some((tool) => !registration.tools.includes(tool))) {
@@ -380,9 +369,17 @@ export class SdkWorker implements WorkerTransport {
       await shutdownAndDisposeBoundSession();
       throw new Error("Worker start was cancelled.");
     }
+    for (const registration of enabledWorkerExtensions) {
+      const extension = extensionsResult.extensions.find((candidate) => candidate.path === `<inline:${registration.name}>`);
+      const registeredTools = extension ? [...extension.tools.keys()] : [];
+      if (!extension || registeredTools.length !== registration.tools.length || registeredTools.some((tool) => !registration.tools.includes(tool))) {
+        await shutdownAndDisposeBoundSession();
+        throw new Error(`Worker extension ${registration.name} changed its declared tools during session startup.`);
+      }
+    }
     const activeTools = session.getActiveToolNames();
-    for (const registration of this.workerExtensions) {
-      const missing = registration.tools.filter((tool) => !activeTools.includes(tool));
+    for (const registration of enabledWorkerExtensions) {
+      const missing = registration.tools.filter((tool) => requestedTools.includes(tool) && !activeTools.includes(tool));
       if (missing.length > 0) {
         await shutdownAndDisposeBoundSession();
         throw new Error(`Worker extension ${registration.name} did not activate its declared tool ${missing[0]}.`);
@@ -675,8 +672,15 @@ export class SdkWorker implements WorkerTransport {
       }
       let compactionAbortAttempted = false;
       let streamingAbortAttempted = false;
-      for (let attempt = 0; session && attempt < 3; attempt += 1) {
-        if (session.isCompacting && !compactionAbortAttempted) {
+      const quiescent = (): boolean => !session
+        ? this.promptOperations.size === 0 && this.activeToolCalls.size === 0
+        : session.isIdle !== false
+          && !session.isCompacting
+          && !session.isStreaming
+          && this.promptOperations.size === 0
+          && this.activeToolCalls.size === 0;
+      while (!quiescent()) {
+        if (session?.isCompacting && !compactionAbortAttempted) {
           compactionAbortAttempted = true;
           try {
             session.abortCompaction();
@@ -685,7 +689,7 @@ export class SdkWorker implements WorkerTransport {
             details.push(safeErrorSummary(error));
           }
         }
-        if (session.isStreaming && !streamingAbortAttempted) {
+        if (session?.isStreaming && !streamingAbortAttempted) {
           streamingAbortAttempted = true;
           const outcome = await Promise.resolve().then(() => session.abort()).then(
             () => ({ state: "succeeded" as const }),
@@ -697,18 +701,17 @@ export class SdkWorker implements WorkerTransport {
           }
         }
         await Promise.allSettled([...this.promptOperations]);
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        if (!session.isCompacting) compactionAbortAttempted = false;
-        if (!session.isStreaming) streamingAbortAttempted = false;
-        if (!session.isCompacting && !session.isStreaming && this.promptOperations.size === 0) break;
+        if (quiescent()) break;
+        // The broker's cleanup deadline quarantines this address; it does not
+        // cancel this authoritative observation. Poll slowly until Pi reaches
+        // its real idle/compaction/tool boundary, however long that takes.
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+        if (!session?.isCompacting) compactionAbortAttempted = false;
+        if (!session?.isStreaming) streamingAbortAttempted = false;
       }
-      if (session && (session.isCompacting || session.isStreaming || this.promptOperations.size > 0)) {
-        abort = "failed";
-        details.push("Worker session did not become quiescent after shutdown and abort.");
-      }
-      const sessionIdle = abort === "succeeded" && (!session || (session.isIdle !== false && !session.isCompacting && this.promptOperations.size === 0));
+      const sessionIdle = quiescent();
 
-      // Disposal follows, and never bypasses, the real prompt/compaction/idle boundary.
+      // Disposal follows, and never bypasses, the real prompt/compaction/tool/idle boundary.
       try {
         session?.dispose();
       } catch (error) {
@@ -739,6 +742,7 @@ export class SdkWorker implements WorkerTransport {
       }
       this.activeToolCalls.clear();
       const quiescence = sessionIdle
+        && abort === "succeeded"
         && dispose === "succeeded"
         && tools.every((tool) => tool.quiescence === "verified")
         ? "verified" as const
