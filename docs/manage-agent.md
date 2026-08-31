@@ -27,7 +27,7 @@ A live Pi-managed retry is not a reason to restart. Before restarting a terminal
 
 ### `archive`
 
-Frees the activation lease while keeping the record, session, and mail. The identity must have no live worker, unsettled exact-address cleanup, queued mail, incoming/outgoing unanswered request, or reply delivery pending. Refusal reports bounded blocker counts/IDs without mail bodies. Use [`cancel_request`](cancel-request.md) only for an explicitly abandoned exact obligation after its recipient is inactive.
+Frees the activation lease while keeping the record, session, and mail. The identity must have no live worker, unsettled exact-address cleanup, queued mail, incoming unanswered request, or reply delivery pending. Refusal reports bounded blocker counts/IDs without mail bodies. Use [`cancel_request`](cancel-request.md) only for an explicitly abandoned exact obligation after its recipient is inactive.
 
 A live worker is cleaned through the same Pi session/tool settlement boundary before archival. Already archived is a no-op. Sending mail to an archived address restores only its persisted exact provider/model binding.
 

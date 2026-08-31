@@ -7,9 +7,12 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 | Parameter | Type | Required | Description |
 |-----------|------|:--------:|-------------|
 | `to` | string | ✓ | Recipient `<name>.<task-slug>@<model>.com`, or a main address `main@<model>.com` |
-| `subject` | string | ✓ | New subject, or the exact reply subject `Re: [mail-id] original subject` from `fetch_emails` |
-| `message` | string | ✓ | Self-contained request or substantive response |
+| `subject` | string |  | Required for new mail; omit when using `reply_to`. Legacy exact reply subjects remain readable. |
+| `reply_to` | string |  | Preferred reply correlation ID. The broker generates the canonical subject. |
+| `message` | string | ✓ | Self-contained request, notification, or response |
 | `priority` | `"high" \| "low"` | ✓ | Use `low` by default; `high` only for blockers that should change ongoing work |
+| `requires_response` | boolean |  | Explicitly create an obligation. New worker→main mail otherwise defaults to a notification. |
+| `completion` | object |  | Required with `reply_to`: `status`, `summary`, `artifacts`, `validation`, and `remaining` |
 | `effort` | `off`…`max` |  | Initial thinking level, accepted only for the first send to an unknown address |
 | `lifecycle` | object |  | Partial finite lifecycle policy, accepted only for the first send to an unknown address |
 
@@ -17,7 +20,7 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 
 ### New mail
 
-- An unknown valid recipient **spawns** a persistent agent (subject to `maxAgents`, default 8). Before acceptance, the broker prepares the exact isolated runtime plus a detached, deeply frozen model clone worker execution will consume and matches all non-secret request fields, including nested sampling parameters. Provider/runtime-owned catalog models remain untouched. Header-bearing models and dynamic catalog (refresh) provider routes fail closed on Pi 0.84.2; configured-provider OAuth login/refresh configuration is supported through the same-process worker runtime and shared credential storage. A native public provider with provider-wide headers, OAuth, refresh hooks, or filter hooks is rejected before isolated runtime creation/registration. Demonstrably static registrations reuse the exact public object/config, then use public `getAvailable(providerId)` for a post-registration availability/auth check that must contain the exact provider/model. Otherwise the send fails with no envelope. An existing address reuses its persistent session and exact durable provider/model without consulting current main preference.
+- An unknown valid recipient **spawns** a persistent agent (subject to `maxAgents`, default 8). Before acceptance, the broker prepares the exact isolated runtime within the new identity's finite `spawnTimeoutMs`; a timeout accepts no envelope or identity intent. The resulting detached, deeply frozen model clone is what worker execution consumes and matches all non-secret request fields, including nested sampling parameters. Provider/runtime-owned catalog models remain untouched. Header-bearing models and dynamic catalog (refresh) provider routes fail closed on Pi 0.84.2; configured-provider OAuth login/refresh configuration is supported through the same-process worker runtime and shared credential storage. A native public provider with provider-wide headers, OAuth, refresh hooks, or filter hooks is rejected before isolated runtime creation/registration. Demonstrably static registrations reuse the exact public object/config, then use public `getAvailable(providerId)` for a post-registration availability/auth check that must contain the exact provider/model. Otherwise the send fails with no envelope. An existing address reuses its persistent session and exact durable provider/model without consulting current main preference.
 - The first accepted request stores the selected provider/model in `modelBindingIntent` alongside effort/lifecycle intent. A crash before registry persistence reconstructs that exact binding rather than selecting again. Later mail carries no new binding intent and cannot rebind an identity.
 - The first send may provide `effort` as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. It overrides exact-address, role, and default effort for the new identity. The accepted value is copied into durable spawn intent before worker creation; the runtime may clamp it only if the selected model lacks that level.
 - The first send may provide any of `spawnTimeoutMs`, `promptAcceptanceTimeoutMs`, `runTimeoutMs`, `idleTimeoutMs`, `abortTimeoutMs`, and `disposeTimeoutMs` under `lifecycle`. Missing fields resolve from exact address → role → global finite defaults; configured administrative maxima reject oversized values. Broker shutdown is administrator-controlled global configuration and cannot be delegated.
@@ -25,29 +28,30 @@ Send virtual email to another Pi agent. Available to the main thread and to ever
 - Sending to a `stopped` agent is accepted but stays queued (disposition `stopped`) until the agent is restarted. Sending to a known `failed` agent is also accepted and queued (disposition `failed`) without consulting current catalog/provider readiness and without routing to an attached worker or creating a replacement. Only an explicit `manage_agent restart` may recover the same failed identity; restart revalidates exact-address Pi session/tool cleanup and the persisted provider/model before delivering stable queued IDs. Sending to an `archived` agent restores it.
 - Mail to an address whose cleanup is unsettled is accepted under its stable ID and remains queued. That cleanup does not globally quarantine unrelated mutable identities; normal identity/run capacity limits still apply. A late successful cleanup settlement releases the exact-address hold without creating a second envelope or hidden replacement.
 - Sending to yourself (including main → main aliases) is rejected.
-- `low` mail is queued; `high` mail steers a streaming recipient immediately (and bypasses the queue cap), otherwise it queues ahead of low mail. Low mail to busy main stays in the durable broker queue rather than becoming a Pi `followUp`: a correlated collector can claim it, otherwise a one-shot macrotask after main `agent_settled` rechecks the same session/broker/idle state before presenting. A backlog may drain one low per settlement. Low main mail arriving while idle presents promptly. Main high steering is queue-limit exempt and remains immediate; queued high mail does not consume the bounded low-main backlog capacity.
-- Replies are recognized solely by the subject shape `Re: [mail-id] …`. Subjects starting with `Re: [` that do not parse are rejected as malformed; plain subjects that merely start with `Re:` are valid new mail.
+- `low` mail is queued; `high` mail steers a streaming worker recipient immediately (and bypasses its queue cap), otherwise it queues ahead of low mail. For main, only a high reply correlated to a delivered open main request may interrupt a busy turn. Unsolicited high worker notifications/requests stay in the bounded durable main queue until main is idle; they neither steer nor bypass capacity. A correlated collector can claim queued low replies, otherwise a one-shot macrotask after main `agent_settled` rechecks the same session/broker/idle state before presenting.
+- `reply_to` is the preferred reply path. The broker validates the referenced obligation and generates `Re: [mail-id] original subject`, avoiding transcription and XML-copy mismatches. The legacy exact-subject parser remains read-compatible; malformed `Re: [` attempts are rejected, while plain subjects starting with `Re:` remain valid new mail.
+- New worker→main mail is `kind: "notification"` and `requiresResponse: false` unless `requires_response: true` is explicit. Main→worker delegation retains its response-required default. Main can inspect its explicit incoming obligations with `fetch_emails`.
 
 ### Reply validation
 
-Reply subjects are checked strictly, in order: the referenced email must exist, require a response, be unanswered and not administratively cancelled, have no other reply pending delivery, and be delivered; the sender/recipient pair must match the original exactly; the original subject text must match byte-for-byte. A successful reply atomically reserves the obligation, and the original is marked answered when the reply is delivered. If reply delivery fails, the reservation is released and the requester is re-prompted.
+Reply references are checked strictly, in order: the referenced email must exist, require a response, be unanswered and not administratively cancelled, have no other reply pending delivery, and be delivered; the sender/recipient pair must match the original exactly. `reply_to` needs no copied subject. The legacy path additionally compares the original subject byte-for-byte. A successful reply atomically reserves the obligation, and the original is marked answered when the reply is delivered. If reply delivery fails, the reservation is released and the requester is re-prompted. Repair errors use typed code `REPLY_INVALID` and include bounded `email_id` and canonical `reply_subject` fields when the original exists.
 
 Once Pi accepts ordinary presentation to main, that accepted route finishes its delivered/answered commit or failure finalization even if orderly shutdown starts. A delivered reply whose original is canonically answered is reported as send success despite a stale ancillary error. If both the delivered commit and failure append reject after Pi acceptance, send reports failure and the queued/reserved journal state remains explicit presentation uncertainty; recovery may observe the prior visible presentation because Pi 0.84.2 supplies no durable append acknowledgement. This is not an exactly-once guarantee.
 
 ### Completion ownership
 
-Only a valid exact `send_email` reply closes a response obligation. Visible final assistant text stays in the worker session and is never copied to one or more request IDs, because the broker cannot prove which request that text substantively answers. A worker that settles with delivered unanswered mail receives bounded mailbox-enforcement prompts. Exhausting those prompts marks the worker failed while leaving every request unanswered and recoverable; no generic terminal notice is created.
+Only a valid `send_email` reply closes a response obligation. Preferred replies provide `completion.status` (`completed`, `partial`, or `blocked`), a non-empty `summary`, and bounded `artifacts`, `validation`, and `remaining` lists. Prose alone is not credible completion: a legacy unstructured reply is migrated as `partial`, and `completed` with neither recorded work nor validation is surfaced with a warning. Visible final assistant text stays session-local and is never copied to request IDs. A worker that settles with delivered unanswered mail receives bounded enforcement prompts; exhaustion leaves requests open and recoverable.
 
 ### Nested delegation
 
-Nested response-required delegation is fail-closed disabled for all subagents on Pi 0.84.2, including profiles with legacy `canSpawn: true`. Prompt preflight, steer, and follow-up do not provide a durable recoverable child-reply presentation receipt; no unsafe explicit opt-in remains. Exact replies to requests a worker owns and ordinary mail to main remain allowed. Legacy journals containing an already-accepted child request are still recovered conservatively. Cancelling their last child creates one bounded broker-generated parent wake while leaving the upstream request open; terminal blocker envelopes are explicitly broker-generated status, not worker-authored completion.
+Nested response-required delegation is unsupported. A subagent cannot send a request to another subagent; there is no configuration opt-in, parked-parent lifecycle, child blocker, or cancellation-wake path. Exact replies to requests a worker owns and ordinary mail to main remain allowed. Startup rejects pre-0.1 development journals containing nested response-required requests instead of interpreting obsolete dependency state.
 
 ### Limits (defaults; see [configuration.md](configuration.md))
 
 - Subject: 512 bytes (+64 allowance for the reply prefix); no line breaks or control characters.
 - Message: 32 KB. After XML escaping, a single envelope must fit the context-safe tool payload budget (currently 48 KB and 1952 lines, or a lower configured `maxBatchBytes`) so it remains retrievable without truncating the task.
 - Rate: 60 mails/minute global, 30 mails/minute per sender (sliding window). Validation and abort-before-append failures are not charged. The tool AbortSignal is rechecked at the synchronous append/reservation boundary; after append begins, broker ownership continues.
-- Queue per worker recipient: 256 messages / 4 MB. Deferred low main mail uses the same limits over one deduplicated aggregate of all current and historical main aliases; high main mail is exempt. Count/byte validation and append are serialized, including parallel sends through different aliases.
+- Queue per worker recipient: 256 messages / 4 MB. Deferred main mail uses the same limits over one deduplicated aggregate of all current and historical main aliases. Only correlated high replies are immediate and exempt; unsolicited high mail consumes the bounded queue. Count/byte validation and append are serialized, including parallel sends through different aliases.
 
 ### Identity-capacity rejection and recovery
 
@@ -67,8 +71,10 @@ Priority: low
 Spawned recipient: no
 Recipient disposition: reused
 Delivery state: queued
+Delivery certainty: no post-journal uncertainty reported
 Correlation ID: mail_…
-Expected reply subject: Re: [mail_…] Audit token handling
+Reply with reply_to: mail_…
+Legacy expected reply subject: Re: [mail_…] Audit token handling
 Answered email: none
 Recipient model: openai-codex/gpt-5.6-sol
 Binding: persisted for this identity
@@ -85,22 +91,24 @@ Recipient lifecycle: {"spawnTimeoutMs":30000,...}
 |-------|---------|
 | `envelope` | The stored envelope (id, from, to, subject, priority, kind, deliveryState, timestamps) |
 | `spawned` | `true` when this send created the recipient |
+| `deliveryUncertain` | Present only when delivery was journaled but the exact worker prompt/steer admission was not confirmed; contains a bounded code/detail and requires same-identity recovery without resending |
 | `recipientDisposition` | `main` \| `spawned` \| `reused` \| `restored` \| `stopped` \| `failed` |
 | `correlationId` | Equals the envelope ID; use it with `wait_for_replies` |
-| `expectedReplySubject` | Present for requests; the exact subject the recipient must answer with |
+| `expectedReplyTo` | Present for requests; preferred value for the recipient's `reply_to` field |
+| `expectedReplySubject` | Legacy compatibility subject for requests |
 | `answeredEmailId` | Present when this send answered an earlier request |
 | `recipientProvider`, `recipientModel` | Exact selected/preserved provider and compatible model ID (agents only) |
 | `recipientEffort/Role/Tools/State` | Effective recipient profile after model capability clamping (agents only) |
 | `recipientLifecycle` | Exact persisted and enforced lifecycle policy (agents only) |
 
-Pre-acceptance failures are thrown from the tool with `Email was not accepted: <reason>`, so Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, identity/activation capacity full (with separate run-slot use and safe recovery), mailbox queue full, subject/message or formatted delivery too large, invalid effort, effort/lifecycle override on an existing identity or main mail, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model/address shape, prospective duplicate model not uniquely selected by current main provider, or an existing non-failed exact binding absent from the current catalog (`not rebound`). A known failed recipient is different: the tool returns accepted/queued/failed with `spawned: false` and explicit-restart guidance, without catalog/auth readiness work. Unsupported runtime/command/fallback or mismatched/indeterminate credential-source status is also a pre-accept failure for a new identity; diagnostics name only provider/source class and never credential material. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …` and is never relabeled as not accepted.
+Pre-acceptance failures are typed as `EMAIL_NOT_ACCEPTED`; the model-visible native tool error includes `[EMAIL_NOT_ACCEPTED]` plus bounded classified cause/repair fields when known (including canonical `reply_subject`). Unclassified capacity/lifecycle/storage text deliberately omits `cause_code` rather than claiming `INVALID_INPUT`. Pi records a native failed tool execution (`isError: true`). Notable reasons: rate limit exceeded, identity/activation capacity full (with separate run-slot use and safe recovery), mailbox queue full, subject/message or formatted delivery too large, invalid effort, effort/lifecycle override on an existing identity or main mail, malformed reply subject, reply reference errors (unknown / already answered / pending / not delivered / wrong pair / subject mismatch), self-send, spawn-disabled sender role (`not permitted to spawn new agents`; reuse an existing address), unknown model/address shape, prospective duplicate model not uniquely selected by current main provider, or an existing non-failed exact binding absent from the current catalog (`not rebound`). A known failed recipient is different: the tool returns accepted/queued/failed with `spawned: false` and explicit-restart guidance, without catalog/auth readiness work. Unsupported runtime/command/fallback or mismatched/indeterminate credential-source status is also a pre-accept failure for a new identity; diagnostics name only provider/source class and never credential material. A send whose recipient-side delivery fails after journaling reports `Email <id> was persisted but delivery failed: …` and is never relabeled as not accepted.
 
-If the tool call is aborted before the actual append/reservation call, the result is `Email send aborted before acceptance.` No journal event, recipient record, activation lease, worker factory, or quota use remains. Abort after append begins does not cancel broker ownership.
+If the tool call is aborted before the actual append/reservation call, the result is `[EMAIL_NOT_ACCEPTED] Email send aborted before acceptance.` No journal event, recipient record, activation lease, worker factory, or quota use remains. Abort after append begins does not cancel broker ownership. If a request is marked delivered but its exact worker generation loses admission before prompt/steer acceptance (or acceptance times out), send succeeds with `deliveryUncertain`; the original response obligation stays open for same-identity recovery and must not be resent.
 
 ## Usage guidance
 
 - Make every delegation self-contained: objective, relevant paths, constraints, whether edits are allowed, expected response, and validation required.
-- To answer mail, copy the exact reply subject returned by `fetch_emails` — never hand-construct or invent mail IDs.
+- To answer mail, use the returned ID as `reply_to` with a structured completion report. Never invent mail IDs. Legacy exact reply subjects remain readable.
 - Use the returned `correlationId` with [`wait_for_replies`](wait-for-replies.md) instead of polling.
 - Do not put new requests inside a reply; send a separate email with a new subject.
 - Before stopping or finalizing, answer every response-required email returned by `fetch_emails`; never narrow mailbox obligations to the current conversational task.

@@ -24,13 +24,13 @@ Existing agent: reviewer.audit@gpt-5.6-sol.com
 State: idle
 Model: openai/gpt-5.6-sol · effort high
 Binding: persisted exact provider/model · existing identity ignores current main-provider preference
-Role: reviewer · read-only · delegation disabled
+Role: reviewer · read-only
 Tools: read, grep, find, ls, send_email, fetch_emails
 Identity capacity: 8/8 used · this address holds a lease: yes · capacity available for this address: yes
 Run concurrency: 2/4 slots used
-Mailbox: 0 queued · 1 incoming unanswered · 1 outgoing unanswered · 0 pending replies
+Mailbox: 0 queued · 1 incoming unanswered · 0 pending replies
 Archive eligible: no
-Archive blockers: incoming unanswered 1 (mail_…) · outgoing unanswered 1 (mail_…)
+Archive blockers: incoming unanswered 1 (mail_…)
 Recovery: restart this inactive identity to finish real obligations; cancel only an explicitly abandoned exact request; archive only after blockers are clear.
 Lifecycle: {"spawnTimeoutMs":30000,...}
 Cleanup: unknown · Pi session/tool settlement unknown · exact address held · restart/archive blocked · queued mail preserved
@@ -53,12 +53,11 @@ The terminal recovery lines appear only when the existing activity/failure state
 | `holdsActivationLease` | Whether this exact address currently consumes identity capacity |
 | `modelId`, `provider`, `effort`, `role`, `tools`, `instructions` | Effective profile (record if live, resolved config otherwise) |
 | `writable` | Effective tools include a known mutation tool or any unknown/custom tool (fail-closed) |
-| `canSpawn` | Always `false` on Pi 0.84.2; nested response-required delegation lacks a durable child-reply presentation receipt |
 | `state` | `new` for prospective addresses, otherwise the lifecycle state |
 | `currentActivity` | Latest activity summary, when present |
-| `queued` / `unanswered` / `outgoingUnanswered` / `pendingReplies` | Queued inbound, incoming open requests, requests sent by this identity that remain open, and replies reserved but not yet delivered |
+| `queued` / `unanswered` / `pendingReplies` | Queued inbound, incoming open requests, and replies reserved but not yet delivered |
 | `archiveEligible` | Current derived result of the same active/queued/open-blocker rules used by `archive`; the action still revalidates and cleanup can still fail closed |
-| `archiveBlockers` | Bounded counts and up to five real request/mail IDs per queued, incoming, outgoing, and pending-reply category; includes omitted counts and no subjects/bodies/counterparties |
+| `archiveBlockers` | Bounded counts and up to five real request/mail IDs per queued, incoming, and pending-reply category; includes omitted counts and no subjects/bodies/counterparties |
 | `usage` | Cumulative tokens, cost, context size, turns |
 | `failure` | Last failure diagnostic, when present |
 | `cleanup` | Optional exact-address cleanup diagnostic: pending/unknown state, worker generation, abort/dispose phases, Pi session/tool settlement unknown, exact `mutationCapableAtStart` and `heldRunSlot` facts, bounded active tool IDs/names, and non-sensitive detail |

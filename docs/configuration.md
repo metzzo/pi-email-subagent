@@ -9,6 +9,8 @@ Project values merge over global values, which merge over the defaults below. In
 
 ## Limits
 
+Most deployments should configure only `defaultEffort`, `maxAgents`, `maxConcurrent`, and the global run/idle deadlines. Rate, queue/batch, retention, and reminder values are advanced safety controls; keep their defaults unless measured deployment evidence requires a change. They remain visible here for operators upgrading existing development configurations, but are not part of the recommended 0.1 tuning surface.
+
 | Key | Default | Range | Governs |
 |-----|---------|-------|---------|
 | `defaultEffort` | `"medium"` | off…max | Effort for agents without a role/address override |
@@ -25,12 +27,20 @@ Project values merge over global values, which merge over the defaults below. In
 | `maxBatchBytes` | `524288` | 1 B–512 KB | Formatted bytes per worker delivery batch; fetch/tool output is independently capped by Pi's 50 KB / 2000-line recommendation |
 | `maxRetainedEmails` | `10000` | 1–1000000 | Soft cap for retained envelopes; open obligations are never pruned |
 | `responseReminderLimit` | `2` | 1–10 | Re-prompts before an agent settling with unanswered mail is marked failed |
+| `budgets.maxTurns` | `64` | 1–10000 | Assistant turns admitted in one worker run/enforcement cycle |
+| `budgets.maxToolCalls` | `256` | 1–100000 | Tool calls admitted in one worker run/enforcement cycle |
+| `budgets.maxTokens` | `1000000` | 1–100000000 | Cumulative input + output tokens in one worker run/enforcement cycle |
+| `budgets.maxConsecutiveFailures` | `3` | 1–100 | Terminal runs before same-identity restart opens its circuit breaker |
 
 `maxAgents` and `maxConcurrent` are intentionally separate. `maxAgents` counts current activation leases for persistent identities, including stopped identities and cleanup quarantines. `maxConcurrent` counts current run slots; work can queue for a run slot while its identity already holds a lease. Persisted cleanup records reconstruct their exact `heldRunSlot` value before ordinary admission, so lowering limits preserves inherited quarantine overcommit but does not invent holds for an idle generation or admit ordinary work over them. Waiting for run concurrency or stopping a worker does not free identity capacity. A successful clean archive is the normal explicit lease release.
 
-`inspect_agent` and `/agents` derive current used/limit values directly from the broker's authoritative lease sets. These capacity views are not written to `registry.json` and do not change either default (`8` identities, `4` runs).
+`inspect_agent` and `/agents` derive current used/limit values directly from the broker's authoritative lease sets. These capacity views are not written to `registry.json` and do not change either default (`8` identities, `4` runs). `inspect_agent` also shows the configured per-run limits and bounded current run turn/tool/token use; each worker prompt states its limits, cumulative identity usage, and circuit-breaker count so the worker can plan before calling tools.
+
+Per-run turn/tool/token budgets fail the exact worker with a bounded `IDENTITY_*_BUDGET` diagnostic while preserving its mail and possible-effect evidence. Consecutive terminal failures persist on the identity; once the circuit opens, another restart is rejected until main stops the inactive identity, reviews effects, and uses `clear_failure`. A clean completed run resets the counter.
 
 ## Lifecycle watchdogs
+
+The requested run/idle/cleanup collapse was evaluated against the concrete lifecycle race deployment. Run and idle are the ordinary tuning surface. Spawn admission, prompt acceptance, abort, disposal, and broker shutdown remain distinct fixed safety boundaries because Pi exposes separate asynchronous operations and the cleanup quarantine must report which one did not settle; combining them would either weaken an admission bound or misstate quiescence. Role/address/initial overrides are therefore retained for the existing advanced deployment path rather than silently changing their semantics before 0.1.
 
 Every identity receives finite deadlines. Global defaults (milliseconds) are:
 
@@ -72,7 +82,6 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
       "effort": "high",
       "tools": ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
       "instructions": "Review for correctness; do not modify files.",
-      "canSpawn": false,
       "lifecycle": { "runTimeoutMs": 7200000 }
     }
   },
@@ -86,8 +95,8 @@ For the six worker fields, `lifecycleMaxima` is the administrative ceiling for i
 
 - A role is selected by the address **name** segment (`<name>.<task-slug>@…`); `addresses` keys are full addresses and override role fields per key. Keys are trimmed, lowercased, syntax-validated, and canonical-key collisions produce warnings.
 - Resolution order per configured profile field: exact address → role → defaults. An initial `send_email.effort` overrides those three levels only while creating an unknown identity; the resulting effort is persisted. Default tools are read-only search plus the two mail tools; `send_email` and `fetch_emails` are always force-included.
-- `canSpawn` is parsed only for configuration compatibility. Nested response-required delegation is fail-closed disabled for every subagent on Pi 0.84.2 because child-reply presentation has no durable recoverable append receipt. Exact replies the worker owns and ordinary mail to main remain allowed.
-- An unavailable tool name is dropped at worker start and noted in the agent's activity log. Before exact activation is known, every unknown/custom configured tool is classified conservatively as writable and effect-capable; after activation, live capability uses Pi's exact active tool names. Role labels never grant safety or authority. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
+- Nested response-required delegation is unsupported. Subagents may send exact replies for requests they own and ordinary mail to main, but cannot create requests for another subagent.
+- An unavailable tool name is dropped at worker start and noted in the agent's activity log. A protocol-v2 worker-extension tool is available only when its exact name appears in this effective `tools` list; its required `read`/`write` effect declaration informs prospective inspection. Other unknown/custom configured tools remain conservatively writable and effect-capable. After activation, live capability uses Pi's exact active tool names. Role labels never grant safety or authority. [`inspect_agent`](inspect-agent.md) reports the resolved result and can preview an initial effort override without spawning.
 - Layers merge per key: a project role replaces individual fields of the same global role, so a trusted project can widen (or narrow) tools for a role.
 
 Configuration-derived prompt content is bounded without changing semantic fields:
@@ -95,7 +104,7 @@ Configuration-derived prompt content is bounded without changing semantic fields
 - each source layer accepts at most 64 raw role properties and 256 raw address properties before canonicalization (canonical collisions still count toward that raw input bound), and the merged result separately stays within 64/256 canonical keys;
 - each source tools array contains at most 128 raw items before deduplication, and its effective set contains at most 128 unique names including the always-required mail tools;
 - each complete tool name is at most 100 UTF-8 bytes;
-- `instructions` and `modelPolicy` are each at most 16 KiB of UTF-8;
+- `instructions` and `modelPolicy` are each at most 16 KiB of UTF-8 at configuration load; at prompt construction their combined complete values are also budgeted against `contextWindow - maxTokens`, capped at 32 KiB with no synthetic minimum. Because provider tokenizers are not available here, the additions allowance conservatively permits at most one UTF-8 byte per available input token. This budget covers additions only; fixed system prompt and history cost remain Pi-owned and outside it. An oversized model policy is replaced by a short fail-closed listed-model policy with a UI/activity warning (or omitted when even that addition cannot fit, while the fixed shared listed-model invariant remains), and oversized role instructions are omitted whole with a worker activity warning;
 - control and bidirectional-control characters are rejected from those semantic strings (ordinary newline/tab layout remains allowed in instructions and model policy); and
 - at most 64 fixed-size startup warnings are shown, plus one omitted-warning count. Rejected content is never echoed in a warning.
 
@@ -152,7 +161,7 @@ See [Provider retry visibility and recovery](provider-retry-recovery.md).
 | `reviewer` | high | read, grep, find, ls + mail | Review with findings and validation; read-only |
 | `worker` | medium | read, grep, find, ls, bash, edit, write + mail | Implement and validate changes |
 
-All runtime profiles report nested delegation disabled. Legacy `canSpawn` values do not create an opt-in on Pi 0.84.2.
+Nested delegation is not a configurable profile capability.
 
 ## Notes
 

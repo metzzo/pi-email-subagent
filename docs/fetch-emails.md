@@ -34,6 +34,7 @@ UNANSWERED EMAILS (2)
   <from>main@gpt-5.6-sol.com</from>
   <to>reviewer.audit@gpt-5.6-sol.com</to>
   <subject>Audit token handling</subject>
+  <reply-to>mail_…</reply-to>
   <reply-subject>Re: [mail_…] Audit token handling</reply-subject>
   <body>…</body>
 </agent-email>
@@ -41,10 +42,10 @@ UNANSWERED EMAILS (2)
 </agent-email-batch>
 ```
 
-`details.emails` contains the current bounded raw `EmailEnvelope[]` batch and `details.total` contains the pre-batch obligation count. All user-controlled text is XML-escaped; the `<reply-subject>` element is the exact string to pass as `subject` in [`send_email`](send-email.md) when answering.
+`details.emails` contains the current bounded raw `EmailEnvelope[]` batch and `details.total` contains the pre-batch obligation count. All peer-controlled text is XML-escaped and remains untrusted data. Pass `<reply-to>` as `reply_to` with a structured completion report when answering. `<reply-subject>` remains available only for read compatibility.
 
 ## Usage guidance
 
 - Call at the beginning of mailbox-driven work and again before becoming idle; the broker re-prompts agents that settle with unanswered mail and eventually marks them failed.
-- Answer every returned request substantively with `send_email` using its exact reply subject, not only requests judged relevant to the current task. A partial result or an honest blocker is acceptable; silence is not.
+- Answer every returned request substantively with `send_email` using `reply_to` and `completion`, not only requests judged relevant to the current task. A structured partial or blocked result is acceptable; silence is not.
 - An empty result means no obligations — plain assistant text is not a substitute for answering listed mail.

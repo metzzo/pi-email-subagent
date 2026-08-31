@@ -39,6 +39,10 @@ Join already-sent response-required requests and wait for their outcomes. Main-t
 ```text
 Replies: complete
 - mail_…: answered · Audit token handling
+  Completion: completed · <bounded summary>
+  Validation: <bounded validation evidence>
+  Remaining: <bounded remaining work, when any>
+  Warning: <bounded warning, when any>
   <full reply message>
 - mail_…: failed · Refactor config loader · Agent failed: provider timeout
 ```
