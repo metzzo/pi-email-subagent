@@ -15,7 +15,7 @@ export interface PackResult {
   files: PackedFile[];
 }
 
-export const PACKAGE_MAX_ENTRIES = 50;
+export const PACKAGE_MAX_ENTRIES = 51;
 export const PACKAGE_MAX_SIZE_BYTES = 200_000;
 
 const REQUIRED_PATHS = [

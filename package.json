@@ -42,12 +42,13 @@
     "test:unit": "tsx --test test/unit/**/*.test.ts",
     "test:integration": "tsx --test test/integration/**/*.test.ts",
     "test:e2e": "tsx --test test/e2e/**/*.test.ts",
+    "test:coverage": "mkdir -p .test-workspaces && tsx --test --test-concurrency=1 --experimental-test-isolation=none --experimental-test-coverage --test-reporter=spec --test-reporter-destination=.test-workspaces/coverage-tests.log --test-reporter=lcov --test-reporter-destination=.test-workspaces/coverage.lcov test/**/*.test.ts && tsx scripts/coverage-gate.ts .test-workspaces/coverage.lcov coverage-thresholds.json",
     "test:package": "tsx scripts/package-smoke.ts",
     "check:package": "tsx scripts/package-policy.ts",
     "test:live": "tsx scripts/live-e2e.ts",
     "check:secrets": "gitleaks git --config=.gitleaks.toml --redact --no-banner .",
     "check:licenses": "tsx scripts/check-dependency-licenses.ts",
-    "validate": "npm run check && npm run check:licenses && npm test && npm run test:package",
+    "validate": "npm run check && npm run check:licenses && npm run test:coverage && npm run test:package",
     "prepublishOnly": "npm run validate"
   },
   "pi": {

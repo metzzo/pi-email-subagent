@@ -40,10 +40,10 @@ describe("release contract truth", () => {
     }
   });
 
-  it("states disabled nested delegation and exact-dead-owner automatic reclaim without obsolete release claims", async () => {
+  it("states removed nested delegation and exact-dead-owner automatic reclaim without obsolete release claims", async () => {
     const changelog = await text("CHANGELOG.md");
     const unreleased = changelog.split("## [0.1.0]", 1)[0]!;
-    assert.match(unreleased, /nested response-required delegation.*fail-closed disabled/i);
+    assert.match(unreleased, /Removed the disabled nested-delegation subsystem/i);
     assert.match(unreleased, /automatically reclaim.*exact dead.*owner|exact dead.*owner.*automatically reclaim/is);
     assert.match(unreleased, /live.*SIGSTOP.*fail-closed/is);
     assert.doesNotMatch(unreleased, /explicitly opted-in child requests|opt-in parent parking|canSpawn` now means subagent delegation permission/i);
@@ -92,6 +92,8 @@ describe("release contract truth", () => {
     const script = await text("scripts/release-evidence.ts");
     assert.match(script, /\["audit", "--omit=dev", "--omit=peer"\]/);
     assert.match(script, /production-audit\.log/);
+    assert.match(script, /candidate !== originMain.*not pushed origin\/main/s);
+    assert.match(script, /status.*--porcelain=v1.*requires a clean worktree and index/s);
     assert.match(script, /productionAudit/);
   });
 

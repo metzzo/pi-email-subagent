@@ -24,6 +24,9 @@ const originMain = String(git(["rev-parse", "origin/main"])).trim();
 const mergeBase = String(git(["merge-base", base, candidate])).trim();
 if (mergeBase !== base) throw new Error(`Explicit base ${base} is not an ancestor of candidate ${candidate}.`);
 if (candidate !== head) throw new Error(`Candidate ${candidate} is not current HEAD ${head}.`);
+if (candidate !== originMain) throw new Error(`Candidate ${candidate} is not pushed origin/main ${originMain}.`);
+const porcelain = String(git(["status", "--porcelain=v1"]));
+if (porcelain.length > 0) throw new Error("Release evidence requires a clean worktree and index; commit or remove every local change first.");
 
 const statusFields = zeroFields(git(["diff", "--name-status", "-z", `${base}..${candidate}`], "buffer") as Buffer);
 const entries: Array<{ status: string; path: string; oldPath?: string }> = [];
@@ -47,7 +50,6 @@ if (JSON.stringify(canonicalPaths) !== JSON.stringify(entryPaths)) {
 }
 git(["diff", "--check", `${base}..${candidate}`]);
 
-const porcelain = String(git(["status", "--porcelain=v1"]));
 const outputDir = resolve(outputInput);
 await mkdir(outputDir, { recursive: true });
 const auditCommand = ["audit", "--omit=dev", "--omit=peer"];

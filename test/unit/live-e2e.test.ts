@@ -120,7 +120,6 @@ function registry(overrides: { provider?: string; modelId?: string; cleanup?: un
       modelId: overrides.modelId ?? expectations.modelId,
       effort: "xhigh",
       tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
-      canSpawn: false,
       state: "paused",
       createdAt: CREATED_AT,
       updatedAt: CREATED_AT,
