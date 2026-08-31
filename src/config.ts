@@ -5,7 +5,8 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { parseSubagentAddressShape } from "./address.ts";
 import type { AddressConfig, LifecycleOverride, LifecyclePolicy, RoleConfig, SubagentConfig } from "./types.ts";
 
-const EFFORTS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
+const EFFORTS = new Set<ThinkingLevel>(EFFORT_LEVELS);
 
 export const DEFAULT_MODEL_POLICY = `- Use only model IDs listed in the available-email-models section when creating an identity.
 - If the user explicitly requests a model, use that exact model when it is available; otherwise report that it is unavailable instead of silently substituting another model.
@@ -14,6 +15,7 @@ export const DEFAULT_MODEL_POLICY = `- Use only model IDs listed in the availabl
 
 /** Maximum delay Node setTimeout can represent without overflow/clamping. */
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+export const MAX_REPLY_WAIT_SECONDS = 3_600;
 
 export const MAX_CONFIG_ROLE_ENTRIES = 64;
 export const MAX_CONFIG_ADDRESS_ENTRIES = 256;
@@ -98,25 +100,28 @@ export const DEFAULT_CONFIG: SubagentConfig = {
   maxBatchBytes: 512 * 1024,
   maxRetainedEmails: 10_000,
   responseReminderLimit: 2,
+  budgets: {
+    maxTurns: 64,
+    maxToolCalls: 256,
+    maxTokens: 1_000_000,
+    maxConsecutiveFailures: 3,
+  },
   lifecycle: { ...DEFAULT_LIFECYCLE },
   lifecycleMaxima: { ...DEFAULT_LIFECYCLE_MAXIMA },
   roles: {
     scout: {
       effort: "low",
       tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
-      canSpawn: false,
       instructions: "Explore and report concise evidence with paths. Do not modify files.",
     },
     reviewer: {
       effort: "high",
       tools: ["read", "grep", "find", "ls", "send_email", "fetch_emails"],
-      canSpawn: false,
       instructions: "Review for correctness and return findings with concrete paths and validation. Do not modify files.",
     },
     worker: {
       effort: "medium",
       tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "send_email", "fetch_emails"],
-      canSpawn: false,
       instructions: "Implement focused changes, validate them, and report exact files and test results.",
     },
   },
@@ -138,6 +143,7 @@ interface RawConfig {
   maxBatchBytes?: unknown;
   maxRetainedEmails?: unknown;
   responseReminderLimit?: unknown;
+  budgets?: unknown;
   lifecycle?: unknown;
   lifecycleMaxima?: unknown;
   roles?: unknown;
@@ -252,10 +258,6 @@ function profileRecord(
         warnings.push(`${entryLabel}.instructions must not contain control or bidirectional-control characters; ignoring the entire instructions field.`);
       } else next.instructions = entry.instructions;
     }
-    if (entry.canSpawn !== undefined) {
-      if (typeof entry.canSpawn === "boolean") next.canSpawn = entry.canSpawn;
-      else warnings.push(`${entryLabel}.canSpawn must be a boolean; ignoring it.`);
-    }
     if (entry.lifecycle !== undefined) {
       const parsedLifecycle = lifecycleOverride(entry.lifecycle, `${entryLabel}.lifecycle`, warnings);
       if (parsedLifecycle.brokerShutdownTimeoutMs !== undefined) {
@@ -330,6 +332,23 @@ function lifecycleOverride(value: unknown, label: string, warnings: string[]): L
 
 function mergeLifecycle(base: LifecyclePolicy, override: LifecycleOverride): LifecyclePolicy {
   return { ...base, ...override };
+}
+
+function identityBudgets(value: unknown, base: SubagentConfig["budgets"], label: string, warnings: string[]): SubagentConfig["budgets"] {
+  if (value === undefined) return base;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    warnings.push(`${label} must be an object; ignoring it.`);
+    return base;
+  }
+  const raw = value as Record<string, unknown>;
+  const known = new Set(["maxTurns", "maxToolCalls", "maxTokens", "maxConsecutiveFailures"]);
+  if (Object.keys(raw).some((key) => !known.has(key))) warnings.push(`${label} contains unknown fields; ignoring those fields.`);
+  return {
+    maxTurns: positiveInt(raw.maxTurns, base.maxTurns, `${label}.maxTurns`, warnings, 10_000),
+    maxToolCalls: positiveInt(raw.maxToolCalls, base.maxToolCalls, `${label}.maxToolCalls`, warnings, 100_000),
+    maxTokens: positiveInt(raw.maxTokens, base.maxTokens, `${label}.maxTokens`, warnings, 100_000_000),
+    maxConsecutiveFailures: positiveInt(raw.maxConsecutiveFailures, base.maxConsecutiveFailures, `${label}.maxConsecutiveFailures`, warnings, 100),
+  };
 }
 
 function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: string, warnings: string[]): SubagentConfig {
@@ -416,6 +435,7 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
       warnings,
       10,
     ),
+    budgets: identityBudgets(raw.budgets, base.budgets, `${label}.budgets`, warnings),
     lifecycle,
     lifecycleMaxima,
     roles: mergeBoundedProfiles(
@@ -454,15 +474,14 @@ export function resolveAgentProfile(
   config: SubagentConfig,
   address: string,
   name: string,
-): Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions"> {
+): Required<Pick<RoleConfig, "effort" | "tools">> & Pick<RoleConfig, "instructions"> {
   const role = config.roles[name] ?? {};
   const exact = config.addresses[address] ?? {};
   const tools = exact.tools ?? role.tools ?? ["read", "grep", "find", "ls", ...REQUIRED_MAIL_TOOLS];
   const merged = {
     effort: exact.effort ?? role.effort ?? config.defaultEffort,
     tools: [...new Set([...tools, ...REQUIRED_MAIL_TOOLS])],
-    canSpawn: exact.canSpawn ?? role.canSpawn ?? false,
-  } as Required<Pick<RoleConfig, "effort" | "tools" | "canSpawn">> & Pick<RoleConfig, "instructions">;
+  } as Required<Pick<RoleConfig, "effort" | "tools">> & Pick<RoleConfig, "instructions">;
   const instructions = exact.instructions ?? role.instructions;
   if (instructions !== undefined) merged.instructions = instructions;
   return merged;

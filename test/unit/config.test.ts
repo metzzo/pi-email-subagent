@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  DEFAULT_CONFIG,
   DEFAULT_MODEL_POLICY,
   loadConfig,
   MAX_CONFIG_ADDRESS_ENTRIES,
@@ -109,26 +110,39 @@ describe("configuration", () => {
     assert.match(invalid.warnings[0]!, /modelPolicy/);
   });
 
-  it("resolves canSpawn exact-over-role-over-default with warnings for invalid values", async () => {
+  it("does not retain the removed canSpawn compatibility field", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
     const agentDir = join(root, "agent");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
-      roles: { scout: { canSpawn: false } },
+      roles: { scout: { canSpawn: true } },
       addresses: { "scout.privileged@gpt-5.4.com": { canSpawn: true } },
     }));
     const { config, warnings } = loadConfig(agentDir, root, false);
     assert.deepEqual(warnings, []);
-    assert.equal(resolveAgentProfile(config, "scout.a@gpt-5.4.com", "scout").canSpawn, false);
-    assert.equal(resolveAgentProfile(config, "scout.privileged@gpt-5.4.com", "scout").canSpawn, true);
-    assert.equal(resolveAgentProfile(config, "worker.a@gpt-5.4.com", "worker").canSpawn, false);
-    assert.equal(resolveAgentProfile(config, "analyst.a@gpt-5.4.com", "analyst").canSpawn, false);
+    assert.equal(Object.hasOwn(config.roles.scout!, "canSpawn"), false);
+    assert.equal(Object.hasOwn(config.addresses["scout.privileged@gpt-5.4.com"]!, "canSpawn"), false);
+    assert.equal(Object.hasOwn(resolveAgentProfile(config, "scout.privileged@gpt-5.4.com", "scout"), "canSpawn"), false);
+  });
 
-    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ roles: { scout: { canSpawn: "no" } } }));
+  it("parses finite per-identity budgets and rejects invalid values", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-config-"));
+    const agentDir = join(root, "agent");
+    await mkdir(agentDir, { recursive: true });
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
+      budgets: { maxTurns: 12, maxToolCalls: 40, maxTokens: 50000, maxConsecutiveFailures: 2 },
+    }));
+    const loaded = loadConfig(agentDir, root, false);
+    assert.deepEqual(loaded.config.budgets, {
+      maxTurns: 12, maxToolCalls: 40, maxTokens: 50000, maxConsecutiveFailures: 2,
+    });
+    assert.deepEqual(loaded.warnings, []);
+
+    await writeFile(join(agentDir, "subagents.json"), JSON.stringify({ budgets: { maxTurns: 0, maxTokens: "many" } }));
     const invalid = loadConfig(agentDir, root, false);
-    assert.equal(invalid.config.roles.scout?.canSpawn, false);
-    assert.equal(invalid.warnings.length, 1);
-    assert.match(invalid.warnings[0]!, /canSpawn/);
+    assert.equal(invalid.config.budgets.maxTurns, DEFAULT_CONFIG.budgets.maxTurns);
+    assert.equal(invalid.config.budgets.maxTokens, DEFAULT_CONFIG.budgets.maxTokens);
+    assert.equal(invalid.warnings.length, 2);
   });
 
   it("normalizes valid profile keys and rejects unusable role/address keys", async () => {
@@ -136,14 +150,14 @@ describe("configuration", () => {
     const agentDir = join(root, "agent");
     await mkdir(agentDir, { recursive: true });
     await writeFile(join(agentDir, "subagents.json"), JSON.stringify({
-      roles: { " Worker ": { canSpawn: false }, "bad.role": { tools: ["write"] } },
+      roles: { " Worker ": { effort: "low" }, "bad.role": { tools: ["write"] } },
       addresses: {
         " Worker.Release@GPT-5.4.COM ": { tools: ["read"] },
         "not-an-address": { tools: ["write"] },
       },
     }));
     const loaded = loadConfig(agentDir, root, false);
-    assert.equal(loaded.config.roles.worker?.canSpawn, false);
+    assert.equal(loaded.config.roles.worker?.effort, "low");
     assert.deepEqual(loaded.config.addresses["worker.release@gpt-5.4.com"]?.tools, ["read"]);
     assert.equal(loaded.config.roles["bad.role"], undefined);
     assert.equal(loaded.config.addresses["not-an-address"], undefined);
