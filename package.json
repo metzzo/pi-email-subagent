@@ -67,7 +67,7 @@
     "@earendil-works/pi-agent-core": "0.84.2",
     "@earendil-works/pi-ai": "0.84.2",
     "@earendil-works/pi-coding-agent": "0.84.2",
-    "@earendil-works/pi-tui": "0.84.2",
+    "@earendil-works/pi-tui": "0.84.4",
     "@types/node": "^22.15.0",
     "@types/proper-lockfile": "^4.1.4",
     "tsx": "^4.20.0",
