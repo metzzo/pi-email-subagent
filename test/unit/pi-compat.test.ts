@@ -15,10 +15,12 @@ it("accepts the exact installed Pi version", () => {
 });
 
 it("rejects wrong, missing, and hostile Pi version values without echoing unsafe text", () => {
-  assert.throws(
-    () => assertPiVersion({ VERSION: "0.84.3" }),
-    /requires exact Pi 0\.84\.2; actual 0\.84\.3/i,
-  );
+  for (const version of ["0.84.2", "0.85.1", "0.86.0"]) {
+    assert.throws(
+      () => assertPiVersion({ VERSION: version }),
+      { message: `pi-email-subagent requires exact Pi 0.85.0; actual ${version}. Install Pi 0.85.0 or use an extension release tested for your Pi version.` },
+    );
+  }
   assert.throws(
     () => assertPiVersion({ VERSION: "bad\n<unsafe>" }),
     (error: unknown) => {

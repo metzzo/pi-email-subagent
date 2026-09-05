@@ -110,4 +110,32 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   assert.match(sendOutput, /spawned · provider-alpha\/shared/);
   assert.match(sendOutput, /Conversation preview is loading.*Full transcript/s);
   assert.doesNotMatch(sendOutput, /clipboard|https:\/\/bad\.invalid|\x1b|\x07/);
+
+  // Render the empty/error paths as well as accepted mail on the pinned host.
+  for (const isError of [false, true]) {
+    const component = sendRenderer({
+      content: [{ type: "text", text: "No delivery\x1b]52;c;secret\x07" }],
+      details: undefined,
+    } as never, { expanded: false, isPartial: false }, theme, { isError } as never);
+    assert.equal(component.render(100).join("\n").trim(), "No delivery");
+  }
+  for (const args of [{}, { priority: "high", reply_to: "mail_request" }]) {
+    const output = sendDefinition.renderCall!(args as never, theme, {} as never).render(100).join("\n");
+    assert.match(output, args.priority ? /HIGH.*\n.*reply to mail_request/ : /no subject/);
+  }
+  const fetchDefinition = extension.tools.get("fetch_emails")!.definition;
+  assert.match(fetchDefinition.renderCall!({}, theme, {} as never).render(100).join("\n"), /fetch_emails/);
+  for (const emails of [[], [{ ...envelope, priority: "high" }], [envelope, envelope]]) {
+    const component = fetchDefinition.renderResult!({
+      content: [], details: { emails, total: emails.length + 1 },
+    } as never, { expanded: true, isPartial: false }, theme, {} as never);
+    const output = component.render(100).join("\n");
+    assert.match(output, emails.length ? /unanswered email.*showing/ : /no unanswered emails/);
+    assert.doesNotMatch(output, /clipboard|https:\/\/bad\.invalid|\x1b|\x07/);
+  }
+  const fallback = emailRenderer({
+    role: "custom", customType: "pi-email-subagent.email", content: "Mail without details", display: true,
+    timestamp: Date.now(),
+  }, { expanded: false, outputPad: 0 }, theme);
+  assert.equal(fallback!.render(100).join("\n").trim(), "Mail without details");
 });
