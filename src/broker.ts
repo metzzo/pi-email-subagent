@@ -1606,6 +1606,7 @@ export class AgentBroker {
     let disposition: SendEmailResult["recipientDisposition"] = toMain ? "main" : "reused";
     let recipientRecord: AgentRecord | undefined;
     let deliveryUncertain: DeliveryUncertainty | undefined;
+    let routingComplete = false;
     try {
       if (toMain) {
         await this.routeMainEnvelope(envelope);
@@ -1616,50 +1617,58 @@ export class AgentBroker {
         deliveryUncertain = ensured.deliveryUncertain;
         recipientRecord = this.records.get(to);
       }
-    } catch (error) {
-      // Lifecycle and cleanup-quarantine failures retain accepted queued/open
-      // mail for later verified recovery rather than fabricating terminal loss.
-      if (!(error instanceof LifecycleTimeoutError)
-        && !(error instanceof CleanupQuarantineError)
-        && !(error instanceof ProviderReadinessError)
-        && !(error instanceof FinalizedMainDeliveryError)) {
-        await this.failEnvelope(envelope, errorMessage(error));
-      }
+      routingComplete = true;
+
       this.scheduleMailMaintenance();
+      await this.persistRegistry();
       this.publish();
+      const stored = this.mailStore.get(envelope.id) ?? envelope;
+      return {
+        envelope: stored,
+        spawned,
+        recipientDisposition: disposition,
+        correlationId: envelope.id,
+        ...(deliveryUncertain ? { deliveryUncertain } : {}),
+        ...(envelope.requiresResponse ? {
+          expectedReplyTo: envelope.id,
+          expectedReplySubject: makeReplySubject(envelope.id, envelope.subject),
+        } : {}),
+        ...(recipientRecord ? {
+          recipientModel: recipientRecord.modelId,
+          recipientProvider: recipientRecord.provider,
+          recipientEffort: recipientRecord.effort,
+          recipientRole: recipientRecord.name,
+          recipientTools: [...(this.liveActiveTools(recipientRecord.address) ?? recipientRecord.tools)],
+          recipientState: recipientRecord.state,
+          recipientLifecycle: { ...recipientRecord.lifecycle },
+          ...(recipientRecord.cleanup ? { recipientCleanup: clone(recipientRecord.cleanup) } : {}),
+        } : {}),
+        ...(answeredEmailId ? { answeredEmailId } : {}),
+      };
+    } catch (error) {
+      let detail = errorMessage(error);
+      try {
+        // Persistence/publication failures after routing must not undo delivery.
+        // Lifecycle failures retain accepted mail for verified recovery.
+        if (!routingComplete && !(error instanceof LifecycleTimeoutError)
+          && !(error instanceof CleanupQuarantineError)
+          && !(error instanceof ProviderReadinessError)
+          && !(error instanceof FinalizedMainDeliveryError)) {
+          await this.failEnvelope(envelope, detail);
+        }
+        this.scheduleMailMaintenance();
+        this.publish();
+      } catch (finalizationError) {
+        detail += `; failure finalization also failed: ${errorMessage(finalizationError)}`;
+      }
+      // This boundary includes registry saves, publication, and failure cleanup:
+      // none may turn an accepted journal entry into EMAIL_NOT_ACCEPTED.
       throw new EmailProtocolError(
         "EMAIL_DELIVERY_FAILED",
-        `Email ${envelope.id} was persisted but delivery failed: ${errorMessage(error)}`,
+        `Email ${envelope.id} was persisted but delivery or bookkeeping failed: ${detail}. Do not resend; inspect this mail ID.`,
         { email_id: envelope.id },
       );
     }
-
-    this.scheduleMailMaintenance();
-    await this.persistRegistry();
-    this.publish();
-    const stored = this.mailStore.get(envelope.id) ?? envelope;
-    return {
-      envelope: stored,
-      spawned,
-      recipientDisposition: disposition,
-      correlationId: envelope.id,
-      ...(deliveryUncertain ? { deliveryUncertain } : {}),
-      ...(envelope.requiresResponse ? {
-        expectedReplyTo: envelope.id,
-        expectedReplySubject: makeReplySubject(envelope.id, envelope.subject),
-      } : {}),
-      ...(recipientRecord ? {
-        recipientModel: recipientRecord.modelId,
-        recipientProvider: recipientRecord.provider,
-        recipientEffort: recipientRecord.effort,
-        recipientRole: recipientRecord.name,
-        recipientTools: [...(this.liveActiveTools(recipientRecord.address) ?? recipientRecord.tools)],
-        recipientState: recipientRecord.state,
-        recipientLifecycle: { ...recipientRecord.lifecycle },
-        ...(recipientRecord.cleanup ? { recipientCleanup: clone(recipientRecord.cleanup) } : {}),
-      } : {}),
-      ...(answeredEmailId ? { answeredEmailId } : {}),
-    };
   }
 
   fetchUnanswered(addressInput: string, authority?: WorkerMailboxAuthority): EmailEnvelope[] {
