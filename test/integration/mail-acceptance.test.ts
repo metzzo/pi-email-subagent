@@ -31,7 +31,7 @@ for (const fault of ["registry", "publication", "failure-finalization"] as const
       cwd: root, agentDir: root, namespaceDir: join(root, "state"),
       config: structuredClone(DEFAULT_CONFIG), models: [model], projectTrusted: false,
       mainAdapter: {
-        getAddress: () => mainAddress, getAliases: () => [mainAddress], isIdle: () => true,
+        getAddress: () => mainAddress, getAliases: () => new Set([mainAddress]), isIdle: () => true,
         async deliver({ formatted, envelope }) {
           if (armed && fault === "failure-finalization") {
             // The accepted append is complete; now make failure journaling fail too.
@@ -67,7 +67,7 @@ for (const fault of ["registry", "publication", "failure-finalization"] as const
       await assert.rejects(send.execute("send", {
         to: fault === "failure-finalization" ? mainAddress : record.address,
         subject: "Accepted work", message: "Do not duplicate this request.", priority: "low",
-      }, new AbortController().signal), (error: unknown) => {
+      }, new AbortController().signal, undefined, undefined as never), (error: unknown) => {
         const details = emailErrorDetails(error);
         assert.equal(details.code, "EMAIL_DELIVERY_FAILED");
         const [accepted] = broker.mailStore.list();
