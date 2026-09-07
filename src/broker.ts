@@ -1946,6 +1946,11 @@ export class AgentBroker {
         sessionDir: join(this.options.namespaceDir, "sessions"),
         projectTrusted: this.options.projectTrusted,
         systemPrompt: subagentPrompt(promptRecord, this.mainAddress, this.modelIds, additions.modelPolicy, this.options.config.budgets),
+        beforeModelTurn: () => {
+          this.assertWorkerMailboxAuthority(authority);
+          const violation = this.modelBudgetViolation(record.address, worker, true);
+          if (violation) throw new Error(`${violation}: no further assistant turn admitted in this run.`);
+        },
         sendEmail: (input, signal) => this.send(record.address, input, signal, authority),
         fetchEmails: () => this.fetchUnansweredBatch(record.address, authority),
       }), remainingSpawnMs, "LIFECYCLE_SPAWN_TIMEOUT");
@@ -2078,12 +2083,15 @@ export class AgentBroker {
     ));
   }
 
-  private settledBudgetViolation(address: string, worker: WorkerTransport): string | undefined {
+  private modelBudgetViolation(address: string, worker: WorkerTransport, beforeTurn = false): string | undefined {
     const budget = this.runBudgets.get(address);
     if (!budget || budget.worker !== worker) return undefined;
     const usage = worker.getSnapshot().record.usage;
-    if (usage.turns - budget.baselineTurns > this.options.config.budgets.maxTurns) return "IDENTITY_TURN_BUDGET";
-    if (usage.input + usage.output - budget.baselineTokens > this.options.config.budgets.maxTokens) return "IDENTITY_TOKEN_BUDGET";
+    const turns = usage.turns - budget.baselineTurns;
+    const tokens = usage.input + usage.output - budget.baselineTokens;
+    const { maxTurns, maxTokens } = this.options.config.budgets;
+    if (beforeTurn ? turns >= maxTurns : turns > maxTurns) return "IDENTITY_TURN_BUDGET";
+    if (beforeTurn ? tokens >= maxTokens : tokens > maxTokens) return "IDENTITY_TOKEN_BUDGET";
     return undefined;
   }
 
@@ -2410,7 +2418,7 @@ export class AgentBroker {
     }
     record.updatedAt = nowIso();
     if (event.type === "settled") {
-      const violation = this.settledBudgetViolation(address, worker);
+      const violation = this.modelBudgetViolation(address, worker);
       if (violation) {
         this.tripRunBudget(address, worker, violation);
         return;

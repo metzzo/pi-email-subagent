@@ -869,6 +869,53 @@ it("reports settings load scope without leaking invalid file content", async () 
   }
 });
 
+it("checks turn admission on native Pi retries while preserving context hooks", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-budget-retry-"));
+  await writeFile(join(root, "settings.json"), JSON.stringify({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } }));
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  let providerCalls = 0;
+  let contextCalls = 0;
+  runtime.registerProvider("worker-budget-retry", {
+    name: "Worker Budget Retry", baseUrl: "http://127.0.0.1:9/budget-retry", apiKey: "deterministic-test-key", api: "worker-budget-retry",
+    models: [{
+      id: "budget-model", name: "Budget Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000,
+    }],
+    streamSimple: (model) => { providerCalls += 1; return retryableErrorStream(model); },
+  });
+  const model = runtime.getModel("worker-budget-retry", "budget-model")!;
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false), [{
+    protocolVersion: 2, name: "budget-context", tools: [], effects: {},
+    factory(pi) { pi.on("context", () => { contextCalls += 1; }); },
+  }]);
+  try {
+    await worker.start({
+      record: workerRecord(model), model, cwd: root, agentDir: root, sessionDir: join(root, "sessions"),
+      projectTrusted: false, systemPrompt: "Exercise native retry admission.",
+      beforeModelTurn: () => {
+        if (worker.getSnapshot().record.usage.turns >= 1) throw new Error("IDENTITY_TURN_BUDGET: no further assistant turn admitted.");
+      },
+      sendEmail: async () => { throw new Error("not called"); }, fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    let failure: string | undefined;
+    const settled = new Promise<void>((resolve) => {
+      worker.subscribe((event) => {
+        if (event.type === "failure") failure = event.error;
+        if (event.type === "settled") resolve();
+      });
+    });
+    await worker.prompt("retry within budget");
+    await settled;
+    assert.equal(providerCalls, 1);
+    assert.equal(contextCalls, 1, "the admitted call still uses Pi extension context processing");
+    assert.equal(worker.getSnapshot().record.usage.turns, 1);
+    assert.match(failure!, /IDENTITY_TURN_BUDGET/);
+  } finally {
+    await worker.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("bounds cleanup during real Pi retry backoff and suppresses every stale session update", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-retry-cleanup-"));
   await writeFile(join(root, "settings.json"), JSON.stringify({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 } }));

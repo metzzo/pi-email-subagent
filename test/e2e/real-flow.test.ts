@@ -130,6 +130,57 @@ function toolText(line: RpcLine): string {
 }
 
 describe("real end-to-end email flow", { concurrency: false }, () => {
+  for (const [budget, limit, code] of [
+    ["maxTurns", 1, "IDENTITY_TURN_BUDGET"],
+    ["maxTokens", 1, "IDENTITY_TOKEN_BUDGET"],
+    ["maxTokens", 15, "IDENTITY_TOKEN_BUDGET"],
+  ] as const) {
+    it(`blocks worker continuation at ${budget}=${limit} through real Pi RPC`, { timeout: 120_000 }, async () => {
+      const { client, agentDir, sessionId } = await start({ config: { budgets: { [budget]: limit } } });
+      try {
+        await client.prompt("E2E DELEGATE NOWAIT");
+        const registry = await eventuallyRegistry(agentDir, sessionId,
+          (value) => value.agents[0]?.state === "failed" && !value.agents[0]?.cleanup,
+          "budget failure with settled cleanup", 60_000);
+        const worker = registry.agents[0];
+        assert.match(worker.failure, new RegExp(code));
+        assert.equal(worker.usage.turns, 1, "rejected continuation is not an admitted assistant turn");
+        assert.equal(worker.usage.input + worker.usage.output, 15);
+        const entries = [...new Map((await readSessionEntries(worker.sessionFile)).map((entry) => [entry.id, entry])).values()];
+        const assistants = entries.filter((entry) => entry.type === "message" && entry.message.role === "assistant");
+        assert.equal(assistants.filter((entry) => entry.message.stopReason !== "error").length, 1);
+        assert.equal(entries.some((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "send_email"), false);
+        const store = new MailStore(join(agentDir, "subagents", sessionId, "mail.jsonl"));
+        await store.init();
+        assert.equal(store.list().length, 1);
+        assert.equal(store.list()[0]!.deliveryState, "delivered");
+        assert.equal(store.list()[0]!.answeredBy, undefined, "budget failure keeps the original obligation open");
+      } finally {
+        await client.close();
+        await rm(agentDir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("admits exact-limit completed runs and resets budgets for later delivery", { timeout: 180_000 }, async () => {
+    const { client, agentDir, sessionId } = await start({ config: { budgets: { maxTurns: 3, maxTokens: 45 } } });
+    try {
+      for (let cycle = 1; cycle <= 2; cycle += 1) {
+        const mark = client.mark();
+        await client.prompt("E2E DELEGATE");
+        const joined = await client.waitFor(toolEnd("wait_for_replies"), "completed budgeted request", 90_000, mark);
+        assert.equal(waitResult(joined).items[0]?.state, "answered");
+        await eventuallyRegistry(agentDir, sessionId,
+          (value) => value.agents[0]?.state === "idle" && value.agents[0]?.usage.turns === cycle * 3,
+          "exact-limit cycle completion");
+        await client.waitFor(assistantText("E2E COMPLETE"), "main settlement", 30_000, mark);
+      }
+    } finally {
+      await client.close();
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("delegates to a spawned worker and collects its reply in one wait", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionId } = await start();
     try {

@@ -189,6 +189,7 @@ export class SdkWorker implements WorkerTransport {
   private startGeneration = 0;
   private startOperation?: Promise<void>;
   private runFailure?: string;
+  private modelTurnRejected = false;
   private cwd = process.cwd();
 
   constructor(
@@ -392,6 +393,31 @@ export class SdkWorker implements WorkerTransport {
       await shutdownAndDisposeBoundSession();
       throw new Error("Worker mailbox tools were not activated.");
     }
+    if (config.beforeModelTurn) {
+      const admit = (): void => {
+        try { config.beforeModelTurn!(); }
+        catch (error) {
+          this.modelTurnRejected = true;
+          throw error;
+        }
+      };
+      // Compose Pi's public hooks instead of replacing its provider stream,
+      // authentication, retry policy, context handlers, or compaction refresh.
+      // The context hook covers initial turns and native retries; the refresh
+      // hook rejects exhausted continuations before Pi's between-turn compaction.
+      const transformContext = session.agent.transformContext;
+      session.agent.transformContext = async (messages, signal) => {
+        admit();
+        const transformed = await transformContext?.(messages, signal) ?? messages;
+        admit();
+        return transformed;
+      };
+      const prepareNextTurn = session.agent.prepareNextTurnWithContext;
+      session.agent.prepareNextTurnWithContext = async (turn, signal) => {
+        admit();
+        return prepareNextTurn?.(turn, signal);
+      };
+    }
     this.session = session;
     this.unsubscribeSession = session.subscribe((event) => this.onSessionEvent(event));
     this.setState("idle");
@@ -502,7 +528,11 @@ export class SdkWorker implements WorkerTransport {
           .trim();
         if (text) this.activity("text", text);
         const usage = event.message.usage;
-        if (usage) {
+        // Pi emits a zero-usage synthetic assistant error when an admission
+        // hook throws. It is evidence of rejection, not an admitted model turn.
+        const rejected = this.modelTurnRejected;
+        this.modelTurnRejected = false;
+        if (usage && !rejected) {
           this.record.usage.input += usage.input ?? 0;
           this.record.usage.output += usage.output ?? 0;
           this.record.usage.cacheRead += usage.cacheRead ?? 0;
