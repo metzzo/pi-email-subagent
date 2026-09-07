@@ -1667,7 +1667,7 @@ export class AgentBroker {
       // none may turn an accepted journal entry into EMAIL_NOT_ACCEPTED.
       throw new EmailProtocolError(
         "EMAIL_DELIVERY_FAILED",
-        `Email ${envelope.id} was persisted but delivery or bookkeeping failed: ${detail}. Do not resend; inspect this mail ID.`,
+        `Email ${envelope.id} was persisted but ${routingComplete ? "bookkeeping" : "delivery"} failed: ${detail}\nDo not resend; inspect this mail ID.`,
         { email_id: envelope.id },
       );
     }
