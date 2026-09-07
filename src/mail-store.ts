@@ -261,7 +261,9 @@ export class MailStore {
         throw new Error(`Corrupt mail journal at line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (repairedTrailingWrite) {
+    // Even a complete final event needs its delimiter before recovery or normal
+    // writes append another event. Repair atomically, just like a torn tail.
+    if (repairedTrailingWrite || (raw.length > 0 && !raw.endsWith("\n"))) {
       await this.replaceJournal(validLines.length > 0 ? `${validLines.join("\n")}\n` : "");
     }
     try { await chmod(this.path, 0o600); } catch { /* unsupported platform */ }

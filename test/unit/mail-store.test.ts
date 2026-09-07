@@ -287,6 +287,43 @@ describe("durable mail store", () => {
     assert.equal(restored.get(original.id)?.answeredBy, reply.id);
   });
 
+  it("repairs an unterminated reply creation before appending recovery events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-mail-recovery-delimiter-"));
+    const path = join(root, "mail.jsonl");
+    const original = { ...email("mail_original"), deliveryState: "delivered" as const };
+    const reply: EmailEnvelope = {
+      ...email("mail_reply"), from: original.to, to: original.from,
+      kind: "reply", inReplyTo: original.id, requiresResponse: false,
+      deliveryState: "delivered", deliveredAt: new Date().toISOString(),
+    };
+    await appendFile(path, [original, reply].map((item) => JSON.stringify({ type: "email.created", email: item })).join("\n"));
+    const recovered = new MailStore(path);
+    await recovered.init();
+    assert.equal(recovered.get(original.id)?.answeredBy, reply.id);
+    const restarted = new MailStore(path);
+    await restarted.init();
+    assert.deepEqual(restarted.list(), recovered.list());
+  });
+
+  for (const suffix of ["", "  ", "\n  "]) {
+    it(`repairs a missing final delimiter with suffix ${JSON.stringify(suffix)} before another append`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "pi-email-mail-delimiter-"));
+      const path = join(root, "mail.jsonl");
+      const original = JSON.stringify({ type: "email.created", email: email("mail_before") }) + suffix;
+      await appendFile(path, original);
+      await assert.rejects(new FaultInjectedMailStore(path).init(), /injected before rename/);
+      assert.equal(await readFile(path, "utf8"), original);
+      const recovered = new MailStore(path);
+      await recovered.init();
+      assert.ok((await readFile(path, "utf8")).endsWith("\n"));
+      await recovered.accept(email("mail_after"));
+      const restarted = new MailStore(path);
+      await restarted.init();
+      assert.deepEqual(restarted.list(), recovered.list());
+      assert.equal(restarted.list().length, 2);
+    });
+  }
+
   it("migrates legacy answers that were journaled before reply delivery", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
     const path = join(root, "mail.jsonl");
