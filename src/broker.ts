@@ -29,7 +29,7 @@ import { MailStore } from "./mail-store.ts";
 import { isCorrelatedMainReply as correlatedMainReply } from "./main-mail-routing.ts";
 import { ProviderReadinessError } from "./model-runtime.ts";
 import { NamespaceLock } from "./namespace-lock.ts";
-import { budgetPromptAdditions, enforcementPrompt, formatEmail, formatEmailBatch, subagentPrompt } from "./prompts.ts";
+import { budgetPromptAdditions, enforcementPrompt, formatEmail, formatEmailBatch, modelInputTokenBudget, subagentPrompt } from "./prompts.ts";
 import { RegistryStore } from "./registry-store.ts";
 import { looksLikeReply, makeReplySubject, parseReplySubject } from "./reply.ts";
 import { SlidingWindowRateLimiter } from "./rate-limit.ts";
@@ -81,10 +81,7 @@ export const MAX_CANCELLATION_REASON_BYTES = 1_024;
  * unknown metadata (non-positive/non-integer window) stays fail-closed at 0.
  */
 export function conservativeModelEnvelopeBudget(model: { contextWindow: number; maxTokens: number }): number {
-  if (!Number.isSafeInteger(model.contextWindow) || !Number.isSafeInteger(model.maxTokens)
-    || model.contextWindow <= 0 || model.maxTokens < 0) return 0;
-  const outputReserve = model.maxTokens >= model.contextWindow ? 0 : model.maxTokens;
-  return Math.floor((model.contextWindow - outputReserve) / 4);
+  return Math.floor(modelInputTokenBudget(model) / 4);
 }
 const ARCHIVE_BLOCKER_ID_LIMIT = 5;
 const MAX_WORKER_EPOCH_TOOLS = MAX_CONFIG_PROFILE_TOOLS;
@@ -1562,6 +1559,11 @@ export class AgentBroker {
           } : {}),
         };
         this.validateDeliverySize(envelope, parsed?.model);
+        if (!toMain && !failedKnown && parsed) {
+          budgetPromptAdditions(this.options.config.modelPolicy,
+            currentRecord ? currentRecord.instructions : resolveAgentProfile(this.options.config, to, parsed.name).instructions,
+            parsed.model);
+        }
         if (firstIdentityMail && this.options.workerPreflight) {
           workerPreparation = await bounded(
             Promise.resolve(this.options.workerPreflight(parsed!.model)),
@@ -1930,14 +1932,6 @@ export class AgentBroker {
     try {
       const remainingSpawnMs = Math.max(1, record.lifecycle.spawnTimeoutMs - (Date.now() - spawnStartedAt));
       const additions = budgetPromptAdditions(this.options.config.modelPolicy, record.instructions, parsed.model);
-      for (const warning of additions.warnings) {
-        if (!record.activity.some((item) => item.summary === warning)) {
-          record.activity.push({ at: nowIso(), kind: "status", summary: warning });
-        }
-      }
-      const promptRecord = additions.instructions === record.instructions
-        ? record
-        : { ...record, instructions: additions.instructions };
       await bounded(worker.start({
         record,
         model: parsed.model,
@@ -1945,7 +1939,7 @@ export class AgentBroker {
         agentDir: this.options.agentDir,
         sessionDir: join(this.options.namespaceDir, "sessions"),
         projectTrusted: this.options.projectTrusted,
-        systemPrompt: subagentPrompt(promptRecord, this.mainAddress, this.modelIds, additions.modelPolicy, this.options.config.budgets),
+        systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, additions.modelPolicy, this.options.config.budgets),
         beforeModelTurn: () => {
           this.assertWorkerMailboxAuthority(authority);
           const violation = this.modelBudgetViolation(record.address, worker, true);

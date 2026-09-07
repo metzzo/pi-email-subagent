@@ -56,7 +56,6 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   let generation = 0;
   let mainFlushTimer: ReturnType<typeof setTimeout> | undefined;
   const conversationSources = new Map<string, ConversationSource>();
-  const promptBudgetWarnings = new Set<string>();
 
   const cancelMainFlush = (): void => {
     if (mainFlushTimer) clearTimeout(mainFlushTimer);
@@ -91,6 +90,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   const [sendTool, fetchTool] = createWorkerMailTools({
     sendEmail: async (input, signal) => {
       if (!broker) throw new Error("Email broker is not ready.");
+      if (!currentContext?.model) throw new Error("Email delegation requires an active model.");
+      budgetPromptAdditions(effectiveConfig?.modelPolicy ?? DEFAULT_MODEL_POLICY, undefined, currentContext.model);
       return broker.send(broker.mainAddress, input, signal);
     },
     fetchEmails: () => {
@@ -306,6 +307,12 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const configResult = loadConfig(agentDir, ctx.cwd, projectTrusted);
     effectiveConfig = configResult.config;
     for (const warning of configResult.warnings) ctx.ui.notify(warning, "warning");
+    try {
+      budgetPromptAdditions(effectiveConfig.modelPolicy, undefined, ctx.model);
+    } catch (error) {
+      ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}`, "error");
+      return;
+    }
     mainAddress = makeMainAddress(ctx.model.id);
     mainAliases = new Set([mainAddress]);
 
@@ -384,17 +391,13 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    currentContext = ctx;
     if (!broker || !ctx.model) return;
     const additions = budgetPromptAdditions(
       effectiveConfig?.modelPolicy ?? DEFAULT_MODEL_POLICY,
       undefined,
       ctx.model,
     );
-    for (const warning of additions.warnings) {
-      if (promptBudgetWarnings.has(warning)) continue;
-      promptBudgetWarnings.add(warning);
-      ctx.ui.notify(warning, "warning");
-    }
     const prompt = mainCoordinatorPrompt(
       broker.mainAddress,
       ctx.model.id,

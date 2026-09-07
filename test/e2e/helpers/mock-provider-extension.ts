@@ -652,7 +652,7 @@ export default function mockE2EProvider(pi: ExtensionAPI): void {
       thinkingLevelMap: { xhigh: "xhigh", max: "max" },
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 128_000,
+      contextWindow: Number(process.env.PI_EMAIL_MOCK_CONTEXT_WINDOW ?? 128_000),
       maxTokens: 4_096,
     }],
     streamSimple: streamMock,

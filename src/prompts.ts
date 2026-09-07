@@ -85,40 +85,29 @@ export interface PromptModelBudget {
   maxTokens: number;
 }
 
+/** Shared metadata interpretation for prompt additions and mail envelopes. */
+export function modelInputTokenBudget(model: PromptModelBudget): number {
+  if (!Number.isSafeInteger(model.contextWindow) || !Number.isSafeInteger(model.maxTokens)
+    || model.contextWindow <= 0 || model.maxTokens < 0) return 0;
+  // Lockstep/uncapped output metadata is clamped per request by the provider;
+  // it does not mean the model has no input capacity.
+  const outputReserve = model.maxTokens >= model.contextWindow ? 0 : model.maxTokens;
+  return model.contextWindow - outputReserve;
+}
+
 export function budgetPromptAdditions(
   modelPolicy: string,
   instructions: string | undefined,
   model: PromptModelBudget,
-): { modelPolicy: string; instructions?: string; warnings: string[]; byteBudget: number } {
-  const contextWindow = Number.isSafeInteger(model.contextWindow) && model.contextWindow > 0 ? model.contextWindow : 0;
-  const reservedOutput = Number.isSafeInteger(model.maxTokens) && model.maxTokens > 0
-    ? Math.min(model.maxTokens, contextWindow)
-    : 0;
+): { modelPolicy: string; instructions?: string; byteBudget: number } {
   // Model metadata is token-based. Restricting additions to at most one UTF-8
   // byte per available input token is conservative without pretending to know
   // a provider tokenizer. Fixed prompt/history cost is outside this additions-only budget.
-  const byteBudget = Math.min(32 * 1024, Math.max(0, contextWindow - reservedOutput));
-  const warnings: string[] = [];
-  const fallbackPolicy = "- Use only a model ID listed in the routable model section.";
-  let effectivePolicy = modelPolicy;
-  if (Buffer.byteLength(effectivePolicy, "utf8") > byteBudget) {
-    effectivePolicy = Buffer.byteLength(fallbackPolicy, "utf8") <= byteBudget ? fallbackPolicy : "";
-    warnings.push(effectivePolicy
-      ? `Configured modelPolicy exceeded the selected model prompt-addition budget (${byteBudget} UTF-8 bytes) and was replaced by the bounded fail-closed policy.`
-      : `No modelPolicy addition fit the selected model prompt-addition budget (${byteBudget} UTF-8 bytes); the fixed shared listed-model invariant remains fail-closed.`);
+  const byteBudget = Math.min(32 * 1024, modelInputTokenBudget(model));
+  if (Buffer.byteLength(modelPolicy, "utf8") + Buffer.byteLength(instructions ?? "", "utf8") > byteBudget) {
+    throw new Error(`PROMPT_ADDITIONS_TOO_LARGE: required modelPolicy and role instructions exceed the selected model allowance (${byteBudget} UTF-8 bytes). Choose a model with more input capacity or shorten the configured instructions; no constraints were removed.`);
   }
-  const remaining = Math.max(0, byteBudget - Buffer.byteLength(effectivePolicy, "utf8"));
-  let effectiveInstructions = instructions;
-  if (effectiveInstructions && Buffer.byteLength(effectiveInstructions, "utf8") > remaining) {
-    effectiveInstructions = undefined;
-    warnings.push(`Role instructions exceeded the selected model prompt-addition budget (${byteBudget} UTF-8 bytes) and were omitted for this worker.`);
-  }
-  return {
-    modelPolicy: effectivePolicy,
-    ...(effectiveInstructions ? { instructions: effectiveInstructions } : {}),
-    warnings,
-    byteBudget,
-  };
+  return { modelPolicy, ...(instructions !== undefined ? { instructions } : {}), byteBudget };
 }
 
 export function sharedMailPrompt(

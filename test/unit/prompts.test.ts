@@ -132,20 +132,28 @@ describe("mail prompts", () => {
     const normal = budgetPromptAdditions(DEFAULT_MODEL_POLICY, "Focused role instructions.", { contextWindow: 128_000, maxTokens: 4_096 });
     assert.equal(normal.modelPolicy, DEFAULT_MODEL_POLICY);
     assert.equal(normal.instructions, "Focused role instructions.");
-    assert.deepEqual(normal.warnings, []);
-
-    const bounded = budgetPromptAdditions("p".repeat(2_000), "i".repeat(2_000), { contextWindow: 1_000, maxTokens: 800 });
-    assert.equal(bounded.byteBudget, 200, "token metadata must not create a synthetic 512-byte floor");
-    assert.match(bounded.modelPolicy, /listed in the routable model section/i);
-    assert.equal(bounded.instructions, undefined);
-    assert.equal(bounded.warnings.length, 2);
-    assert.match(bounded.warnings[0]!, /modelPolicy exceeded.*200 UTF-8 bytes/i);
-    assert.match(bounded.warnings[1]!, /Role instructions exceeded.*200 UTF-8 bytes/i);
-    const noInputCapacity = budgetPromptAdditions("policy", "instructions", { contextWindow: 4_096, maxTokens: 4_096 });
-    assert.equal(noInputCapacity.byteBudget, 0);
-    assert.equal(noInputCapacity.modelPolicy, "");
-    assert.equal(noInputCapacity.instructions, undefined);
-    assert.match(noInputCapacity.warnings[0]!, /shared listed-model invariant remains fail-closed/i);
+    assert.equal(normal.byteBudget, 32 * 1024);
+    assert.throws(() => budgetPromptAdditions("p".repeat(2_000), "i".repeat(2_000), { contextWindow: 1_000, maxTokens: 800 }), /PROMPT_ADDITIONS_TOO_LARGE.*200 UTF-8 bytes/);
+    for (const maxTokens of [4_096, 8_192]) {
+      const lockstep = budgetPromptAdditions("policy", "instructions", { contextWindow: 4_096, maxTokens });
+      assert.equal(lockstep.byteBudget, 4_096);
+      assert.equal(lockstep.modelPolicy, "policy");
+      assert.equal(lockstep.instructions, "instructions");
+    }
+    const exact = budgetPromptAdditions("é", "界", { contextWindow: 10, maxTokens: 5 });
+    assert.equal(exact.byteBudget, 5);
+    assert.equal(exact.instructions, "界");
+    assert.throws(() => budgetPromptAdditions("é", "界!", { contextWindow: 10, maxTokens: 5 }), /PROMPT_ADDITIONS_TOO_LARGE/);
+    assert.equal(budgetPromptAdditions("", undefined, { contextWindow: 10, maxTokens: 0 }).byteBudget, 10);
+    for (const metadata of [
+      { contextWindow: 0, maxTokens: 0 }, { contextWindow: -1, maxTokens: 0 },
+      { contextWindow: Number.NaN, maxTokens: 0 }, { contextWindow: 10.5, maxTokens: 0 },
+      { contextWindow: 10, maxTokens: -1 }, { contextWindow: 10, maxTokens: Number.NaN },
+      { contextWindow: 10, maxTokens: 1.5 },
+    ]) {
+      assert.equal(budgetPromptAdditions("", undefined, metadata).byteBudget, 0);
+      assert.throws(() => budgetPromptAdditions("policy", undefined, metadata), /PROMPT_ADDITIONS_TOO_LARGE/);
+    }
   });
 
   it("keeps subagent task execution and structured reporting rules short", () => {

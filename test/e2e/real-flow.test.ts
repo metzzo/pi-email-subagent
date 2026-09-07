@@ -30,6 +30,7 @@ async function start(options: {
   config?: Record<string, unknown>;
   persistSession?: boolean;
   beforeExtension?: string[];
+  env?: Record<string, string>;
 } = {}): Promise<Started> {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-e2e-agent-"));
   if (options.config) await writeFile(join(agentDir, "subagents.json"), JSON.stringify(options.config));
@@ -38,6 +39,7 @@ async function start(options: {
     agentDir,
     model: "mock-e2e/mock-e2e",
     extensions: [MOCK_EXTENSION, ...(options.beforeExtension ?? []), EXTENSION],
+    env: options.env,
     ...(options.persistSession ? { persistSession: true } : {}),
   });
   const state = await client.getState();
@@ -130,6 +132,21 @@ function toolText(line: RpcLine): string {
 }
 
 describe("real end-to-end email flow", { concurrency: false }, () => {
+  it("blocks main broker startup when required model policy cannot fit", { timeout: 60_000 }, async () => {
+    const { client, agentDir, sessionId } = await start({
+      config: { modelPolicy: "Required administrator policy. ".repeat(200) },
+      env: { PI_EMAIL_MOCK_CONTEXT_WINDOW: "5000" },
+    });
+    try {
+      await client.waitFor((line) => line.type === "extension_ui_request" && line.method === "notify"
+        && String(line.message).includes("PROMPT_ADDITIONS_TOO_LARGE"), "explicit startup rejection");
+      await assert.rejects(readRegistry(agentDir, sessionId), { code: "ENOENT" });
+    } finally {
+      await client.close();
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   for (const [budget, limit, code] of [
     ["maxTurns", 1, "IDENTITY_TURN_BUDGET"],
     ["maxTokens", 1, "IDENTITY_TOKEN_BUDGET"],
