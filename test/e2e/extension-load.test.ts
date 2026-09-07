@@ -1,10 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { it } from "node:test";
 import { discoverAndLoadExtensions, VERSION } from "@earendil-works/pi-coding-agent";
 import { SUPPORTED_PI_VERSION } from "../../src/pi-compat.ts";
+
+it("renders prompt contracts through the real Pi extension loader", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-email-prompt-loader-"));
+  const path = resolve("test/e2e/helpers/prompt-contract-extension.ts");
+  try {
+    const result = await discoverAndLoadExtensions([path], process.cwd(), agentDir);
+    assert.deepEqual(result.errors, []);
+    assert.ok(result.extensions.some((extension) => extension.path === path));
+  } finally { await rm(agentDir, { recursive: true, force: true }); }
+});
 
 it("loads the packaged extension with tools, command, and renderers and no conflicts", async () => {
   assert.equal(VERSION, SUPPORTED_PI_VERSION, "the canonical host loader uses the exact tested Pi version");
