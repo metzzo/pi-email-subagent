@@ -1,6 +1,6 @@
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 
-export const SUPPORTED_PI_VERSION = "0.85.0";
+export const SUPPORTED_PI_VERSION = "0.85.1";
 
 interface Feature {
   path: string;
