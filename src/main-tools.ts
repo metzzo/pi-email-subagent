@@ -79,7 +79,7 @@ function compactWaitDetails(result: WaitForRepliesResult): WaitForRepliesResult 
 }
 
 export function createMainCoordinationTools(
-  getBroker: () => AgentBroker | undefined,
+  getBroker: () => AgentBroker | undefined | Promise<AgentBroker | undefined>,
 ) {
   const inspect = PiCodingAgent.defineTool({
     name: "inspect_agent",
@@ -95,7 +95,7 @@ export function createMainCoordinationTools(
     parameters: InspectAgentSchema,
     async execute(_id, params) {
       try {
-        const broker = getBroker();
+        const broker = await getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
         const inspection = broker.inspectAgent(params.address, params.effort);
         const lines = [
@@ -165,7 +165,7 @@ export function createMainCoordinationTools(
     parameters: WaitForRepliesSchema,
     async execute(_id, params, signal) {
       try {
-        const broker = getBroker();
+        const broker = await getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
         const result = await broker.waitForReplies(
           params.request_ids,
@@ -227,7 +227,7 @@ export function createMainCoordinationTools(
     parameters: CancelRequestSchema,
     async execute(_id, params) {
       try {
-        const broker = getBroker();
+        const broker = await getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
         const request = await broker.cancelRequest(params.request_id, params.reason);
         const details: CancelRequestToolDetails = {
@@ -271,7 +271,7 @@ export function createMainCoordinationTools(
     },
     async execute(_id, params) {
       try {
-        const broker = getBroker();
+        const broker = await getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
         if (params.action === "stop") await broker.stop(params.address);
         else if (params.action === "restart") await broker.restart(params.address);

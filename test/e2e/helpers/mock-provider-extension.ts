@@ -23,6 +23,7 @@
  *   user "E2E SEND INVALID NOWAIT"                  → three invalid send_email calls
  *   user "E2E TOOL ERRORS"                           → invalid inspect/wait/manage calls
  *   user "E2E RATE NOWAIT"                          → four parallel send_email calls
+ *   user "E2E FETCH"                                → fetch_emails on the main mailbox
  *   user "E2E INSPECT [XHIGH]"                      → inspect_agent on the scout
  *   user "E2E STOP" / "E2E ARCHIVE"                 → manage_agent
  *   user "E2E CANCEL"                                → cancel_request on latest request

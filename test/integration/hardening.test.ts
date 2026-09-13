@@ -398,7 +398,7 @@ describe("broker hardening", () => {
       await broker.send(broker.mainAddress, {
         to: "worker.fetch-page@gpt-5.4.com", subject: "Two", message: "Second.", priority: "high",
       });
-      const batch = workers[0]!.config!.fetchEmails();
+      const batch = await workers[0]!.config!.fetchEmails();
       assert.equal(batch.total, 2);
       assert.equal(batch.emails.length, 1);
       assert.equal(batch.emails[0]?.subject, "Two");

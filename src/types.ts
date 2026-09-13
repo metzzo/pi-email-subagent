@@ -435,7 +435,7 @@ export interface WorkerStartConfig {
   /** Synchronous admission guard before each assistant provider request, including Pi retries. */
   beforeModelTurn?: () => void;
   sendEmail: (input: SendEmailInput, signal?: AbortSignal) => Promise<SendEmailResult>;
-  fetchEmails: () => { emails: EmailEnvelope[]; total: number };
+  fetchEmails: () => { emails: EmailEnvelope[]; total: number } | Promise<{ emails: EmailEnvelope[]; total: number }>;
 }
 
 export interface WorkerTransport {

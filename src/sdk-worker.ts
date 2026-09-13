@@ -113,7 +113,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     executionMode: "sequential" as const,
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute() {
-      const batch = config.fetchEmails();
+      const batch = await config.fetchEmails();
       const suffix = batch.total > batch.emails.length
         ? `\n\nShowing ${batch.emails.length} of ${batch.total}; answer this batch, then call fetch_emails again for the remainder.`
         : "";

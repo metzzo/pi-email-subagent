@@ -161,7 +161,9 @@ export class FakeWorker implements WorkerTransport {
 
   fetch(): EmailEnvelope[] {
     if (!this.config) throw new Error("not started");
-    return this.config.fetchEmails().emails;
+    const batch = this.config.fetchEmails();
+    if (batch instanceof Promise) throw new Error("FakeWorker requires a synchronous fetchEmails implementation");
+    return batch.emails;
   }
 }
 

@@ -48,6 +48,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   assertExtensionApiFeatures(pi);
   const ui = new UIController();
   let broker: AgentBroker | undefined;
+  let brokerSessionId: string | undefined;
+  let unsettledBroker: AgentBroker | undefined;
+  let brokerStartup: { sessionId: string; promise: Promise<AgentBroker> } | undefined;
   let mainAddress = "";
   let mainAliases = new Set<string>();
   let currentContext: ExtensionContext | undefined;
@@ -89,14 +92,14 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
 
   const [sendTool, fetchTool] = createWorkerMailTools({
     sendEmail: async (input, signal) => {
-      if (!broker) throw new Error("Email broker is not ready.");
+      const active = await ensureBroker(currentContext);
       if (!currentContext?.model) throw new Error("Email delegation requires an active model.");
       budgetPromptAdditions(effectiveConfig?.modelPolicy ?? DEFAULT_MODEL_POLICY, undefined, currentContext.model);
-      return broker.send(broker.mainAddress, input, signal);
+      return active.send(active.mainAddress, input, signal);
     },
-    fetchEmails: () => {
-      if (!broker) throw new Error("Email broker is not ready.");
-      return broker.fetchUnansweredBatch(broker.mainAddress);
+    fetchEmails: async () => {
+      const active = await ensureBroker(currentContext);
+      return active.fetchUnansweredBatch(active.mainAddress);
     },
   });
 
@@ -150,7 +153,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   const [inspectAgentTool, waitForRepliesTool, cancelRequestTool, manageAgentTool] = createMainCoordinationTools(
-    () => broker,
+    () => ensureBroker(currentContext),
   );
 
   pi.registerTool({
@@ -222,32 +225,29 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const action = parts[0];
     try {
-      if (!broker) {
-        ctx.ui.notify("Email subagent broker is not ready.", "warning");
-        return;
-      }
+      const active = await ensureBroker(ctx);
       if (action === "stop" && parts[1]) {
-        await broker.stop(parts[1]);
+        await active.stop(parts[1]);
         ctx.ui.notify(`Stopped ${parts[1]}.`, "info");
       } else if (action === "restart" && parts[1]) {
-        await broker.restart(parts[1]);
+        await active.restart(parts[1]);
         ctx.ui.notify(`Restarted ${parts[1]}.`, "info");
       } else if (action === "archive" && parts[1]) {
-        await broker.archive(parts[1]);
+        await active.archive(parts[1]);
         ctx.ui.notify(`Archived ${parts[1]}.`, "info");
       } else if (action === "cancel") {
         if (!parts[1] || parts.length < 3) throw new Error("Usage: /agents cancel <request-id> <reason>");
-        const cancelled = await broker.cancelRequest(parts[1], parts.slice(2).join(" "));
+        const cancelled = await active.cancelRequest(parts[1], parts.slice(2).join(" "));
         ctx.ui.notify(`Cancelled ${cancelled.id} to ${cancelled.to}.`, "info");
       } else if (action === "clear-failure" && parts[1]) {
-        await broker.clearFailure(parts[1]);
+        await active.clearFailure(parts[1]);
         ctx.ui.notify(`Cleared failure for ${parts[1]}.`, "info");
       } else if (action === "effort" && parts[1] && parts[2]) {
         if (!isThinkingLevel(parts[2])) throw new Error(`Invalid effort ${parts[2]}.`);
-        await broker.setEffort(parts[1], parts[2]);
+        await active.setEffort(parts[1], parts[2]);
         ctx.ui.notify(`${parts[1]} effort set to ${parts[2]}.`, "info");
       } else {
-        await ui.showDashboard(ctx, broker, action);
+        await ui.showDashboard(ctx, active, action);
       }
     } catch (error) {
       ctx.ui.notify(errorMessage(error), "error");
@@ -264,33 +264,28 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     handler: async (ctx) => showAgents("", ctx),
   });
 
-  pi.on("session_start", async (_event, ctx) => {
-    cancelMainFlush();
+  async function startBroker(ctx: ExtensionContext): Promise<AgentBroker> {
     generation += 1;
     const myGeneration = generation;
     currentContext = ctx;
-    effectiveConfig = undefined;
-    latestBrokerSnapshot = undefined;
-    conversationSources.clear();
     ui.bind(ctx);
-    if (broker) {
+    const prior = broker ?? unsettledBroker;
+    if (prior) {
       try {
-        await broker.shutdown();
+        await prior.shutdown();
+        unsettledBroker = undefined;
       } catch (error) {
-        broker = undefined;
-        if (generation === myGeneration) {
-          ctx.ui.notify(`Email subagent handoff blocked: prior broker Pi session/tool cleanup is unsettled: ${errorMessage(error)}`, "error");
-        }
-        return;
+        if (broker === prior) broker = undefined;
+        brokerSessionId = undefined;
+        unsettledBroker = prior;
+        throw new Error(`prior broker Pi session/tool cleanup is unsettled: ${errorMessage(error)}`);
       }
     }
-    if (generation !== myGeneration) return;
+    if (generation !== myGeneration) throw new Error("the session was replaced during broker startup");
     broker = undefined;
+    brokerSessionId = undefined;
 
-    if (!ctx.model) {
-      ctx.ui.notify("pi-email-subagent requires an active model.", "warning");
-      return;
-    }
+    if (!ctx.model) throw new Error("pi-email-subagent requires an active model");
 
     const agentDir = getAgentDir();
     const projectTrusted = ctx.isProjectTrusted();
@@ -307,12 +302,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const configResult = loadConfig(agentDir, ctx.cwd, projectTrusted);
     effectiveConfig = configResult.config;
     for (const warning of configResult.warnings) ctx.ui.notify(warning, "warning");
-    try {
-      budgetPromptAdditions(effectiveConfig.modelPolicy, undefined, ctx.model);
-    } catch (error) {
-      ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}`, "error");
-      return;
-    }
+    budgetPromptAdditions(effectiveConfig.modelPolicy, undefined, ctx.model);
     mainAddress = makeMainAddress(ctx.model.id);
     mainAliases = new Set([mainAddress]);
 
@@ -373,20 +363,61 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       projectTrusted,
     });
     broker = next;
+    brokerSessionId = ctx.sessionManager.getSessionId();
     try {
       await next.init();
       if (generation !== myGeneration) {
         if (broker === next) broker = undefined;
+        brokerSessionId = undefined;
         await next.shutdown();
+        throw new Error("the session was replaced during broker startup");
       }
+      return next;
     } catch (error) {
       if (broker === next) broker = undefined;
+      brokerSessionId = undefined;
       let cleanupError: unknown;
       try { await next.shutdown(); } catch (failure) { cleanupError = failure; }
-      if (generation === myGeneration) {
-        const suffix = cleanupError ? `; cleanup remains unsafe: ${errorMessage(cleanupError)}` : "";
-        ctx.ui.notify(`Email subagent startup failed: ${errorMessage(error)}${suffix}`, "error");
-      }
+      const suffix = cleanupError ? `; cleanup remains unsafe: ${errorMessage(cleanupError)}` : "";
+      throw new Error(`${errorMessage(error)}${suffix}`);
+    }
+  }
+
+  /**
+   * Return the live broker, transparently (re)starting it when startup
+   * previously failed or the session switched. Concurrent callers share one
+   * in-flight startup per session; a failed attempt rejects with the
+   * actionable cause and never poisons later retries.
+   */
+  function ensureBroker(ctx: ExtensionContext | undefined): Promise<AgentBroker> {
+    const sessionId = ctx?.sessionManager.getSessionId();
+    if (broker && brokerSessionId === sessionId) return Promise.resolve(broker);
+    if (!ctx || !sessionId) {
+      return Promise.reject(new Error("Email broker is not ready: no active session is available to restart it."));
+    }
+    if (!brokerStartup || brokerStartup.sessionId !== sessionId) {
+      const promise = startBroker(ctx).catch((error) => {
+        throw new Error(`Email broker startup failed: ${errorMessage(error)}`);
+      });
+      brokerStartup = { sessionId, promise };
+      void promise.catch(() => undefined).finally(() => {
+        if (brokerStartup?.promise === promise) brokerStartup = undefined;
+      });
+    }
+    return brokerStartup.promise;
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    cancelMainFlush();
+    currentContext = ctx;
+    effectiveConfig = undefined;
+    latestBrokerSnapshot = undefined;
+    conversationSources.clear();
+    ui.bind(ctx);
+    try {
+      await ensureBroker(ctx);
+    } catch (error) {
+      ctx.ui.notify(errorMessage(error), "error");
     }
   });
 
@@ -440,8 +471,11 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async () => {
     cancelMainFlush();
     generation += 1;
-    const current = broker;
+    const current = broker ?? unsettledBroker;
     broker = undefined;
+    brokerSessionId = undefined;
+    unsettledBroker = undefined;
+    brokerStartup = undefined;
     currentContext = undefined;
     effectiveConfig = undefined;
     latestBrokerSnapshot = undefined;
