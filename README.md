@@ -25,7 +25,7 @@ pi install npm:pi-email-subagent
 > profiles, delegate only to providers you trust, and review the limits in
 > [`SECURITY.md`](SECURITY.md) before enabling writable workers.
 
-For development in this repository, `.pi/extensions/pi-email-subagent.ts` loads the source directly. On Pi 0.84.2, reload changed source through a command handler that treats `await ctx.reload(); return;` as terminal. An extension tool can safely queue `/reload-runtime` after its active turn with `pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp", expandPromptTemplates: true })`; extension-command dispatch requires that explicit expansion opt-in. The supported host provenance is Pi's canonical CLI/TUI extension runtime. Direct third-party SDK embedding is outside the release contract.
+For development in this repository, load the source directly, for example with `pi -e ./src/index.ts` or by adding the absolute path of `src/index.ts` to `extensions` in `~/.pi/agent/settings.json`. Do not register it both globally and project-locally (`.pi/extensions/`): pi loads both copies and their tool registrations conflict. On Pi 0.84.2, reload changed source through a command handler that treats `await ctx.reload(); return;` as terminal. An extension tool can safely queue `/reload-runtime` after its active turn with `pi.sendUserMessage("/reload-runtime", { deliverAs: "followUp", expandPromptTemplates: true })`; extension-command dispatch requires that explicit expansion opt-in. The supported host provenance is Pi's canonical CLI/TUI extension runtime. Direct third-party SDK embedding is outside the release contract.
 
 ## Tools
 
