@@ -726,6 +726,7 @@ export class AgentBroker {
     this.scheduling.add(address); this.active.add(address);
     record.state = "spawning";
     let claimed = false;
+    let schedulingSettled = false;
     try {
       this.mechanisticProgram(address);
       const queued = this.mailStore.getJob(trigger.id);
@@ -733,14 +734,16 @@ export class AgentBroker {
       const job: MechanisticJob = { ...queued, phase: "starting", generation: ++this.nextWorkerGeneration, updatedAt: nowIso() };
       await this.mailStore.updateJob(job); claimed = true;
       if (this.disposed || record.state !== "spawning") {
-        await this.finishMechanistic(job, { result: "forced_stop", stderr: "", cleanup: { state: "confirmed", childExited: true, pipesClosed: true, boundary: "direct-child-only" } });
+        await this.finishMechanistic(this.mailStore.getJob(job.id)!, { result: "forced_stop", stderr: "", cleanup: { state: "confirmed", childExited: true, pipesClosed: true, boundary: "direct-child-only" } });
+        schedulingSettled = true;
         return;
       }
       const controller: PythonProcess = new PythonProcess({
         envelope: this.mailStore.get(trigger.id)!, job, mainAddress: this.mainAddress,
         onSpawn: async (pid) => {
           const current = this.mailStore.getJob(job.id)!;
-          if (this.disposed || current.phase !== "starting") throw new Error("Start was revoked.");
+          if (this.disposed || current.phase === "stopping") { await controller.stop(); return; }
+          if (current.phase !== "starting") throw new Error("Start was revoked.");
           await this.mailStore.updateJob({ ...current, phase: "running", pid, updatedAt: nowIso() });
           if (record.state === "spawning") record.state = "running";
           record.currentActivity = `Job ${job.id} running`; this.publish();
@@ -778,10 +781,11 @@ export class AgentBroker {
       record.state = "failed"; record.failure = errorMessage(error);
       if (claimed) record.cleanupUnknown = true;
       await this.persistRegistry(true);
+      schedulingSettled = true;
       this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
     } finally {
       this.scheduling.delete(address);
-      if (!this.pythonProcesses.has(address)) this.active.delete(address);
+      if (!this.pythonProcesses.has(address) && (!claimed || schedulingSettled)) this.active.delete(address);
       this.publish();
     }
   }
