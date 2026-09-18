@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFile, access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { appendFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { it } from "node:test";
 import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
+import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import { mergeMechanisticPrograms } from "../../src/mechanistic.ts";
 import type { MainAdapter, MechanisticJob, SubagentConfig } from "../../src/types.ts";
 
@@ -26,11 +28,12 @@ async function fixture(code: string, overrides: Partial<SubagentConfig> = {}) {
   const main: MainAdapter = {
     getAddress: () => "main@test.com", getAliases: () => new Set(["main@test.com"]), isIdle: () => true,
     deliver: async ({ envelope }) => { await appendFile(join(root, "main.jsonl"), `${JSON.stringify(envelope)}\n`); },
-    notifyFailure: (message) => { void appendFile(join(root, "alerts.log"), `${message}\n`); }, updateState: () => {},
+    notifyFailure: (message) => { appendFileSync(join(root, "alerts.log"), `${message}\n`); }, updateState: () => {},
   };
-  const broker = new AgentBroker({ cwd: root, agentDir: root, namespaceDir: join(root, "state"), config, models: [], mainAdapter: main, workerFactory: () => { throw new Error("No LLM worker may be created in real-Python tests"); }, projectTrusted: true });
+  const options = { cwd: root, agentDir: root, namespaceDir: join(root, "state"), config, models: [], mainAdapter: main, workerFactory: () => { throw new Error("No LLM worker may be created in real-Python tests"); }, projectTrusted: true };
+  let broker = new AgentBroker(options);
   await broker.init();
-  return { root, config, broker, async close() { await broker.shutdown(); await rm(root, { recursive: true, force: true }); } };
+  return { root, config, get broker() { return broker; }, async reopen() { await broker.shutdown(); broker = new AgentBroker(options); await broker.init(); }, async close() { await broker.shutdown(); await rm(root, { recursive: true, force: true }); } };
 }
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 async function file(path: string): Promise<void> {
@@ -209,3 +212,131 @@ for (const example of ["command", "status_file"]) {
   });
 }
 
+
+it("real main management tools render and manage Python identities without LLM recovery controls", async () => {
+  const f = await fixture("from pi_mechanistic import success\nsuccess('done')\n");
+  try {
+    const accepted = await send(f.broker); await terminal(f.broker, accepted.envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    const themeModule = await import(new URL("./modes/interactive/theme/theme.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
+    themeModule.initTheme("dark", false);
+    const [inspect, wait, cancel, manage] = createMainCoordinationTools(async () => f.broker);
+    const inspected = await inspect.execute("inspect", { address: accepted.envelope.to }, undefined, undefined, {} as never);
+    assert.match(JSON.stringify(inspected.content), /send-only Python|Python.*send-only/i);
+    await assert.rejects(wait.execute("wait", { request_ids: [accepted.envelope.id], timeout_seconds: 0 }, undefined, undefined, {} as never), /no response obligation/);
+    await assert.rejects(cancel.execute("cancel", { request_id: accepted.envelope.id, reason: "There is no response obligation to cancel" }, undefined, undefined, {} as never));
+    for (const action of ["stop", "clear_failure", "restart", "archive"] as const) {
+      const params = { address: accepted.envelope.to, action };
+      assert.match(manage.renderCall!(params, themeModule.theme, {} as never).render(100).join("\n"), new RegExp(action));
+      const result = await manage.execute(action, params, undefined, undefined, {} as never);
+      assert.match(JSON.stringify(result.content), new RegExp(`${action} completed`));
+      if (action === "restart") assert.match(JSON.stringify(result.content), /No interrupted job is replayed/);
+    }
+    assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, 0);
+  } finally { await f.close(); }
+});
+
+for (const allowed of [false, true]) {
+  it(`mechanistic caller kind requires explicit opt-in: allowed=${allowed}`, async () => {
+    const f = await fixture("from pi_mechanistic import *\nfrom pathlib import Path\nimport json\na=arguments()\nif a.get('send'):\n ack=send_email('worker.child@mechanistic.com','child invocation','{}')\n Path('ack.json').write_text(json.dumps(ack))\nsuccess('done')\n");
+    try {
+      f.config.mechanisticPrograms.worker!.allowedCallers = allowed ? ["main", "mechanistic"] : ["main"];
+      const parent = await send(f.broker, '{"send":true}', "parent"); await terminal(f.broker, parent.envelope.id);
+      await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+      const ack = JSON.parse(await readFile(join(f.root, "ack.json"), "utf8"));
+      assert.equal(ack.accepted, allowed); assert.equal(ack.ok, allowed);
+      assert.equal(f.broker.mailStore.listJobs().length, allowed ? 2 : 1);
+      if (allowed) { const child = f.broker.mailStore.getJob(ack.mailId)!; assert.equal(child.result, "success"); assert.equal(f.broker.mailStore.get(child.id)?.from, parent.envelope.to); }
+      else { assert.match(ack.error, /does not authorize mechanistic callers/); assert.equal(ack.mailId, undefined); }
+    } finally { await f.close(); }
+  });
+}
+
+for (const rejected of [true, false]) {
+  it(`helper preserves ${rejected ? "rejection" : "post-acceptance uncertainty"} without resending`, async () => {
+    const f = await fixture("from pi_mechanistic import *\nfrom pathlib import Path\nimport json\na=arguments()\nack=send_email(a['to'],'one-send','one-body')\nPath('ack.json').write_text(json.dumps(ack))\nsuccess('ack recorded')\n");
+    try {
+      if (!rejected) await mkdir(join(f.root, "main.jsonl")); // real EISDIR after acceptance
+      const accepted = await send(f.broker, JSON.stringify({ to: rejected ? "missing.test@mechanistic.com" : f.broker.mainAddress }));
+      const job = await terminal(f.broker, accepted.envelope.id);
+      await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+      assert.equal(job.result, "success");
+      const ack = JSON.parse(await readFile(join(f.root, "ack.json"), "utf8"));
+      assert.equal(ack.ok, false); assert.equal(ack.accepted, !rejected);
+      const outgoing = f.broker.mailStore.list().filter((entry) => entry.subject === "one-send");
+      assert.equal(outgoing.length, rejected ? 0 : 1);
+      if (rejected) assert.equal(ack.mailId, undefined);
+      else {
+        assert.equal(ack.mailId, outgoing[0]!.id); assert.equal(ack.deliveryUncertain, true);
+        assert.equal(outgoing[0]!.deliveryState, "failed");
+        assert.equal(job.cleanup?.state, "confirmed", "delivery failure does not rewrite direct-child proof");
+      }
+    } finally { await f.close(); }
+  });
+}
+
+it("an unavailable interpreter is a real post-acceptance spawn failure", async () => {
+  const f = await fixture("raise RuntimeError('must not execute')\n");
+  try {
+    const executable = join(f.root, "unavailable-interpreter");
+    await writeFile(executable, "#!/definitely-unavailable/pi-python-interpreter\n"); await chmod(executable, 0o700);
+    f.config.mechanisticPrograms.worker!.python = executable;
+    const accepted = await send(f.broker); const job = await terminal(f.broker, accepted.envelope.id);
+    assert.equal(job.result, "spawn_failure"); assert.equal(job.pid, undefined); assert.equal(job.cleanup?.state, "confirmed");
+    assert.match(job.stderr, /ENOENT|spawn/);
+  } finally { await f.close(); }
+});
+
+it("binding removal, conflicting replacement and reinstatement never silently rebind or replay", async () => {
+  const f = await fixture("from pi_mechanistic import success\nwith open('effects','a') as f: f.write('once\\n')\nsuccess('done')\n");
+  try {
+    const original = structuredClone(f.config.mechanisticPrograms.worker!);
+    const accepted = await send(f.broker); await terminal(f.broker, accepted.envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    delete f.config.mechanisticPrograms.worker; await f.reopen();
+    const unavailable = f.broker.inspectAgent(accepted.envelope.to);
+    assert.equal(unavailable.kind, "mechanistic"); if (unavailable.kind !== "mechanistic") throw new Error("wrong kind");
+    assert.equal(unavailable.bindingReady, "unavailable");
+    await assert.rejects(send(f.broker), /Unknown or removed/);
+    const replacement = join(f.root, "replacement.py"); await writeFile(replacement, "raise RuntimeError('must not run')\n");
+    f.config.mechanisticPrograms.worker = { ...original, script: replacement };
+    await assert.rejects(send(f.broker), /binding.*unavailable/);
+    assert.equal(f.broker.mailStore.listJobs().length, 1);
+    f.config.mechanisticPrograms.worker = original; await f.reopen();
+    await f.broker.clearFailure(accepted.envelope.to); await f.broker.restart(accepted.envelope.to);
+    assert.equal((await readFile(join(f.root, "effects"), "utf8")), "once\n");
+    const next = await send(f.broker); await terminal(f.broker, next.envelope.id);
+    assert.notEqual(next.envelope.id, accepted.envelope.id);
+    assert.equal(await readFile(join(f.root, "effects"), "utf8"), "once\nonce\n");
+    assert.equal(f.broker.mailStore.getJob(accepted.envelope.id)!.result, "success");
+  } finally { await f.close(); }
+});
+
+for (const operation of ["stop", "shutdown"] as const) {
+  it(`immediate ${operation} settles start races without replay or leaked children`, async () => {
+    for (let i = 0; i < 5; i++) {
+      const f = await fixture("import time\nfrom pi_mechanistic import success\ntime.sleep(2)\nsuccess('late')\n");
+      try {
+        const accepted = await send(f.broker);
+        if (operation === "stop") await f.broker.stop(accepted.envelope.to); else await f.broker.shutdown();
+        const job = await terminal(f.broker, accepted.envelope.id);
+        assert.equal(job.result, "forced_stop"); assert.equal(job.cleanup?.state, "confirmed");
+        await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+        if (job.pid) assert.throws(() => process.kill(job.pid!, 0), /ESRCH/);
+        assert.equal(f.broker.mailStore.listJobs().length, 1);
+      } finally { await f.close(); }
+    }
+  });
+}
+
+it("a SIGTERM-resistant child is finitely killed and a progress flood stays coalesced", async () => {
+  const f = await fixture("import signal,time\nfrom pathlib import Path\nfrom pi_mechanistic import progress\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nPath('ready').touch()\nfor i in range(4000): progress('latest '+str(i),i/40)\nwhile True: time.sleep(.01)\n");
+  try {
+    const accepted = await send(f.broker); await file(join(f.root, "ready"));
+    await until(() => Boolean(f.broker.mailStore.getJob(accepted.envelope.id)?.progress));
+    await f.broker.stop(accepted.envelope.to); const job = await terminal(f.broker, accepted.envelope.id);
+    assert.equal(job.result, "forced_stop"); assert.equal(job.signal, "SIGKILL"); assert.equal(job.cleanup?.state, "confirmed");
+    const events = (await readFile(join(f.root, "state/mail.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(events.filter((event) => event.type === "job.updated" && event.job?.progress).length <= 12, "progress publication is time-coalesced, not one journal write per command");
+  } finally { await f.close(); }
+});

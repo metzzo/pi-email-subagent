@@ -3686,10 +3686,6 @@ export class AgentBroker {
     const failures: unknown[] = [];
     const persistedCleanup = [...this.records.values()].find((record) => record.cleanup && !this.cleanupQuarantines.has(record.address));
     let sessionCleanupSettled = !persistedCleanup;
-    if ([...this.mechanisticRecords.keys()].some((address) => this.active.has(address) && !this.pythonProcesses.has(address))) {
-      sessionCleanupSettled = false;
-      failures.push(new Error("Mechanistic terminal/quarantine persistence did not settle; namespace ownership retained."));
-    }
     if (persistedCleanup) failures.push(this.cleanupError(persistedCleanup.address));
     const shutdownMs = this.options.config.lifecycle.brokerShutdownTimeoutMs;
     const deadline = Date.now() + shutdownMs;
@@ -3755,6 +3751,13 @@ export class AgentBroker {
     await runPhase("LIFECYCLE_BROKER_SHUTDOWN_PERSIST_TIMEOUT", () => this.persistRegistry(true));
     await runPhase("LIFECYCLE_BROKER_SHUTDOWN_FLUSH_TIMEOUT", () =>
       Promise.all([this.mailStore.flush(), this.registryStore.flush()]));
+
+    // A start claim may still be settling when shutdown begins. Judge its
+    // durability only after the tracked scheduling/finalization barriers drain.
+    if ([...this.mechanisticRecords.keys()].some((address) => this.active.has(address))) {
+      sessionCleanupSettled = false;
+      failures.push(new Error("Mechanistic terminal/quarantine persistence did not settle; namespace ownership retained."));
+    }
 
     // Namespace ownership is a safety lease, not merely cleanup. A timed-out
     // mutator may still write later, so retain ownership until process death.
