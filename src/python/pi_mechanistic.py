@@ -38,10 +38,14 @@ def invocation():
         return _invocation
 
 
+def _reject_json_constant(value):
+    raise ValueError("Non-finite JSON constant: " + value)
+
+
 def arguments():
     """Decode only after broker acceptance; reject malformed/non-object JSON."""
     try:
-        value = json.loads(invocation()["envelope"]["message"])
+        value = json.loads(invocation()["envelope"]["message"], parse_constant=_reject_json_constant)
         if not isinstance(value, dict):
             raise InvalidArguments("Email body must be a JSON object")
         return value

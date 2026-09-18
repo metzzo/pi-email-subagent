@@ -96,10 +96,10 @@ for (const [name, code, expected] of [
   });
 }
 
-it("malformed JSON is accepted and classified by the real helper without losing its ID", async () => {
+for (const body of ["{bad-json", "[]", "null", "true", '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}']) it(`invalid JSON object ${body} is accepted and classified by the real helper without losing its ID`, async () => {
   const f = await fixture("from pi_mechanistic import run, success\nrun(lambda args: success('okay'))\n");
   try {
-    const accepted = await send(f.broker, "{bad-json");
+    const accepted = await send(f.broker, body);
     assert.equal((await terminal(f.broker, accepted.envelope.id)).result, "invalid_arguments");
   } finally { await f.close(); }
 });
