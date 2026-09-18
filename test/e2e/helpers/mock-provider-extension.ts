@@ -541,6 +541,19 @@ function planWorker(messages: readonly Message[]): Plan {
     return { text: "WORKER PONG" };
   }
 
+  // This deterministic provider only chooses tool calls. Routing, acceptance,
+  // Python execution, delivery and the subsequent worker turn are all real.
+  if (lastText.includes("<agent-email") && lastText.includes("MECHANISTIC_RESULT")) {
+    const jobId = /job_id=(mail_[a-zA-Z0-9_]+)/.exec(lastText)?.[1];
+    return { toolCalls: [{ name: "send_email", arguments: { to: MOCK_MAIN_ADDRESS, subject: "MECHANISTIC_LOOP_COMPLETE", message: `Observed script result for ${jobId}`, priority: "low" } }] };
+  }
+  if (lastText.includes("<agent-email") && lastText.includes("MECHANISTIC_ROUTE")) {
+    return { toolCalls: [
+      { name: "read", arguments: { path: "status.txt" } },
+      { name: "send_email", arguments: { to: MOCK_REVIEWER_ADDRESS, subject: "Nested LLM must be rejected", message: "No child may be created", priority: "low" } },
+      { name: "send_email", arguments: { to: "monitor.route@mechanistic.com", subject: "Authorized Python notification", message: JSON.stringify({ notify_to: MOCK_WORKER_ADDRESS }), priority: "low" } },
+    ] };
+  }
   if (lastText.includes("<mailbox-enforcement") || lastText.includes("<agent-email")) {
     return { toolCalls: [{ name: "fetch_emails", arguments: {} }] };
   }

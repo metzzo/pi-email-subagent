@@ -115,3 +115,18 @@ SIGTERM/SIGKILL and pipe disposal are bounded, but the cleanup guarantee is only
 for the direct child and observed pipes. Trusted scripts may launch descendants,
 use credentials, access the network or change arbitrary files; detached effects
 are not sandboxed or automatically proven settled. Design scripts accordingly.
+
+## Validation limits
+
+Automated tests use real Python processes and disposable files. They cover
+admission and caller-kind rules, helper acknowledgments, protocol limits,
+stop/shutdown races, and fresh Pi owner loss at acceptance, start, running,
+script-effect, and terminal/outcome commit boundaries. The package smoke executes
+the installed helper and example through a fresh Pi process. LLM routing/result
+loop tests use a local deterministic provider: they prove routing, not live-model
+behavior.
+
+These tests do not simulate power loss, interrupt an individual kernel write or
+fsync, or prove detached/remote effects have settled. A stable journaled outcome
+ID does not make Pi message presentation transactionally exactly once; the
+presentation-before-delivery-mark crash window remains a host integration limit.

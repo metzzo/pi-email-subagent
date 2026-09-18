@@ -5,7 +5,7 @@ import extension from "../../../src/index.ts";
 import { AgentBroker } from "../../../src/broker.ts";
 import { MailStore } from "../../../src/mail-store.ts";
 import type { EmailEnvelope, MechanisticJob, SendEmailResult } from "../../../src/types.ts";
-import { DashboardComponent } from "../../../src/ui.ts";
+import { ConversationComponent, ConversationSource, DashboardComponent, formatConversationPreview, formatConversationTranscript } from "../../../src/ui.ts";
 
 // Instrument only real commit boundaries; no broker/process behavior is faked.
 const boundary = process.env.PI_MECHANISTIC_BOUNDARY;
@@ -79,6 +79,83 @@ export default function mechanisticProbe(pi: ExtensionAPI): void {
       const sendRendered = sendTool.renderResult!(sent, { expanded: true, isPartial: false }, ctx.ui.theme, {} as never).render(200).join("\n");
       assert.match(sendRendered, /Python|python/); assert.doesNotMatch(sendRendered, /Conversation preview|thinking|tokens/);
       if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ accepted, job, outcome, inspection, rendered, sendRendered, snapshot: broker.getSnapshot() }));
+      ctx.shutdown();
+    },
+  });
+  pi.registerCommand("mechanistic-matrix", {
+    description: "Exercise bounded real Python protocol/runtime outcomes through Pi",
+    handler: async (_args, ctx) => {
+      assert.ok(broker);
+      const cases = JSON.parse(process.env.PI_MECHANISTIC_CASES!) as Array<[string, string]>;
+      const jobs: MechanisticJob[] = [];
+      for (const [name, expected] of cases) {
+        const accepted = await broker.send(broker.mainAddress, { to: "monitor.matrix@mechanistic.com", subject: name, message: JSON.stringify({ case: name }), priority: "low" });
+        const end = Date.now() + 8000;
+        while (broker.mailStore.getJob(accepted.envelope.id)?.phase !== "terminal" || broker.getSnapshot().capacity.runSlotsUsed !== 0) {
+          if (Date.now() >= end) throw new Error(`Protocol case ${name} did not settle`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        const job: MechanisticJob = broker.mailStore.getJob(accepted.envelope.id)!;
+        assert.equal(job.result, expected, JSON.stringify(job)); assert.equal(job.cleanup?.state, "confirmed"); jobs.push(job);
+        const dashboard = new DashboardComponent(() => broker!.getSnapshot(), (address) => broker!.fetchUnanswered(address), () => {}, () => {}, ctx.ui.theme, accepted.envelope.to, undefined, 80, (address) => broker!.inspectAgent(address));
+        try {
+          dashboard.handleInput("\r");
+          const rendered = dashboard.render(200).join("\n");
+          assert.ok(rendered.includes(`Job ${job.id} · terminal · ${expected}`), rendered);
+          if (job.progress) assert.match(rendered, /progress:/);
+          if (!job.reported) assert.match(rendered, /script report: none/);
+        } finally { dashboard.dispose(); }
+      }
+      if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ jobs }));
+      ctx.shutdown();
+    },
+  });
+  pi.registerCommand("mechanistic-route", {
+    description: "Exercise the production LLM send tool and Python result loop",
+    handler: async (_args, ctx) => {
+      assert.ok(broker);
+      if (process.env.PI_MECHANISTIC_ROUTE_ALLOWED === "1") {
+        await assert.rejects(broker.send(broker.mainAddress, { to: "monitor.route@mechanistic.com", subject: "Unauthorized main", message: "{}", priority: "low" }), /does not authorize main callers/);
+        assert.equal(broker.mailStore.listJobs().length, 0);
+      }
+      const accepted = await broker.send(broker.mainAddress, { to: "scout.e2e@mock-e2e.com", subject: "MECHANISTIC_ROUTE", message: "MECHANISTIC_ROUTE", priority: "low", requires_response: false });
+      const end = Date.now() + 15_000;
+      while (true) {
+        const worker = broker.getSnapshot().agents.find((agent) => agent.address === accepted.envelope.to);
+        const finished = process.env.PI_MECHANISTIC_ROUTE_ALLOWED === "1"
+          ? broker.mailStore.list().some((mail) => mail.subject === "MECHANISTIC_LOOP_COMPLETE")
+          : worker?.state === "idle";
+        if (finished && broker.getSnapshot().capacity.runSlotsUsed === 0) break;
+        if (Date.now() >= end) throw new Error(`Routing did not settle: ${JSON.stringify(broker.getSnapshot())}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.equal(broker.getSnapshot().agents.some((agent) => agent.address === "reviewer.e2e@mock-e2e.com"), false, "ordinary LLM nested delegation remains denied");
+      const worker = broker.getSnapshot().agents.find((agent) => agent.address === accepted.envelope.to)!;
+      assert.equal(worker.kind, "llm"); if (worker.kind !== "llm") throw new Error("missing LLM identity");
+      await tools.get("inspect_agent")!.execute("inspect-worker", { address: worker.address }, undefined, undefined, ctx);
+      const dashboard = new DashboardComponent(() => broker!.getSnapshot(), (address) => broker!.fetchUnanswered(address), () => {}, () => {}, ctx.ui.theme, worker.address, undefined, 80, (address) => broker!.inspectAgent(address));
+      try {
+        assert.match(dashboard.render(200).join("\n"), /mock-e2e/);
+        dashboard.handleInput("\r");
+        for (let tab = 0; tab < 4; tab++) {
+          for (const width of [30, 80, 200]) assert.ok(dashboard.render(width).length > 0);
+          dashboard.handleInput("\t");
+        }
+        for (const key of ["i", "i", "m", "\x0f", "d", "\x1b[A", "\x1b[B"]) dashboard.handleInput(key);
+        dashboard.invalidate();
+      } finally { dashboard.dispose(); }
+      const source = new ConversationSource(worker.sessionFile!, 0, 100);
+      await source.refresh(true); assert.ok(source.blocks.length > 0);
+      assert.match(formatConversationTranscript(source.blocks), /MECHANISTIC_ROUTE/);
+      assert.ok(formatConversationPreview(source.blocks).length > 0);
+      assert.match(formatConversationTranscript([]), /no recorded/); assert.match(formatConversationPreview([]), /loading/);
+      const conversation = new ConversationComponent(worker.address, source, () => {}, () => {}, ctx.ui.theme, 20, undefined, 0);
+      try {
+        assert.ok(conversation.render(100).length > 0); conversation.invalidate();
+        for (const key of ["\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[5~", "\x1b[H", "\x1b[F", "\x1b"]) conversation.handleInput(key);
+        assert.ok(conversation.render(40).length > 0);
+      } finally { conversation.dispose(); }
+      if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ accepted, jobs: broker.mailStore.listJobs(), mail: broker.mailStore.list(), snapshot: broker.getSnapshot() }));
       ctx.shutdown();
     },
   });
