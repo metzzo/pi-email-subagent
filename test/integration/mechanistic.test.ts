@@ -56,6 +56,14 @@ for (const [name, code, expected] of [
   ["oversized frame", "print('x' * 65537, flush=True)\n", "protocol_failure"],
   ["duplicate terminal", "import json\nfor i in [1,2]: print(json.dumps(dict(v=1,id=i,op='success',summary='done')),flush=True)\n", "protocol_failure"],
   ["timeout", "import time\ntime.sleep(10)\n", "timeout"],
+  ["unknown operation", "print('{\"v\":1,\"id\":1,\"op\":\"fetch_emails\"}',flush=True)\n", "protocol_failure"],
+  ["unknown ID", "print('{\"v\":1,\"id\":2,\"op\":\"success\",\"summary\":\"done\"}',flush=True)\n", "protocol_failure"],
+  ["duplicate command ID", "print('{\"v\":1,\"id\":1,\"op\":\"progress\",\"message\":\"a\"}\\n{\"v\":1,\"id\":1,\"op\":\"progress\",\"message\":\"b\"}',flush=True)\n", "protocol_failure"],
+  ["post-terminal command", "print('{\"v\":1,\"id\":1,\"op\":\"success\",\"summary\":\"done\"}\\n{\"v\":1,\"id\":2,\"op\":\"progress\",\"message\":\"late\"}',flush=True)\n", "protocol_failure"],
+  ["oversized artifact", "import json\nprint(json.dumps(dict(v=1,id=1,op='success',summary='done',artifacts=['x'*2049])),flush=True)\n", "protocol_failure"],
+  ["excess artifacts", "import json\nprint(json.dumps(dict(v=1,id=1,op='success',summary='done',artifacts=['x']*33)),flush=True)\n", "protocol_failure"],
+  ["invalid UTF-8", "import os\nos.write(1,b'\\xff\\n')\n", "protocol_failure"],
+  ["excess unacknowledged sends", "import json\nfor i in range(1,40): print(json.dumps(dict(v=1,id=i,op='send_email',to='main@test.com',subject='evidence',message='body')),flush=True)\n", "protocol_failure"],
 ] as const) {
   it(`real Python ${name} has a separate runtime outcome and one uncorrelated notification`, async () => {
     const f = await fixture(code);
@@ -70,7 +78,14 @@ for (const [name, code, expected] of [
       const notification = f.broker.mailStore.get(job.outcomeMailId!)!;
       assert.equal(notification.kind, "notification"); assert.equal(notification.inReplyTo, undefined);
       assert.equal(notification.to, f.broker.mainAddress); assert.equal(notification.from, accepted.envelope.to);
-      assert.equal(f.broker.mailStore.list().length, 2);
+      const mail = f.broker.mailStore.list();
+      if (name === "excess unacknowledged sends") {
+        // Earlier commands can already be durably accepted when the outstanding
+        // command bound is crossed. Preserve those IDs; do not claim rollback.
+        assert.ok(mail.length >= 2 && mail.length <= 18);
+        assert.equal(new Set(mail.map((entry) => entry.id)).size, mail.length);
+        assert.equal(mail.filter((entry) => entry.id === job.outcomeMailId).length, 1);
+      } else assert.equal(mail.length, 2);
       assert.equal(f.broker.mailStore.listJobs().length, 1);
       await assert.rejects(f.broker.waitForReplies([job.id], 0), /no response obligation/);
       assert.throws(() => f.broker.fetchUnanswered(accepted.envelope.to), /send-only/);
@@ -168,6 +183,7 @@ it("unknown inherited-pipe cleanup quarantines the exact identity and explicit r
     await assert.rejects(f.broker.restart(first.envelope.to), /cleanup.*unknown/i);
     await assert.rejects(f.broker.archive(first.envelope.to), /cleanup/i);
     const queued = await send(f.broker); assert.equal(f.broker.mailStore.getJob(queued.envelope.id)?.phase, "queued");
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
     await f.broker.clearFailure(first.envelope.to);
     assert.equal(f.broker.mailStore.getJob(job.id)?.cleanup?.state, "cleanup-unknown");
     assert.equal(f.broker.inspectAgent(first.envelope.to).state, "stopped");

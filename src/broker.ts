@@ -773,7 +773,10 @@ export class AgentBroker {
         this.pythonProcesses.delete(address); this.pythonRuns.delete(address);
         if (safeRelease) this.active.delete(address);
         this.publish();
-        if (!this.disposed) { this.enqueueStart(address); this.pump(); }
+        if (!this.disposed) {
+          if (this.mailStore.queued(address).length > 0) this.enqueueStart(address);
+          this.pump();
+        }
       });
       this.pythonRuns.set(address, operation);
       this.trackInFlight(operation, `python-job:${job.id}`);
