@@ -16,6 +16,15 @@ it("renders prompt contracts through the real Pi extension loader", async () => 
   } finally { await rm(agentDir, { recursive: true, force: true }); }
 });
 
+it("strict mechanistic contracts through the real Pi extension loader", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-python-contract-loader-"));
+  try {
+    const result = await discoverAndLoadExtensions([resolve("test/e2e/helpers/mechanistic-parser-extension.ts")], process.cwd(), agentDir);
+    assert.deepEqual(result.errors, []);
+    assert.ok(result.extensions.some((extension) => extension.commands.has("contract-loaded")));
+  } finally { await rm(agentDir, { recursive: true, force: true }); }
+});
+
 it("loads the packaged extension with tools, command, and renderers and no conflicts", async () => {
   assert.equal(VERSION, SUPPORTED_PI_VERSION, "the canonical host loader uses the exact tested Pi version");
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-extension-load-"));

@@ -16,6 +16,7 @@ const model: Model<"unsafe-native-fixture-api"> = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   contextWindow: 32_000,
   maxTokens: 4_000,
+  ...(process.env.PI_EMAIL_NATIVE_MODEL_HEADERS === "1" ? { headers: { "x-native-model": UNSAFE_NATIVE_HEADER_SENTINEL } } : {}),
 };
 
 const unreachableStreams = {

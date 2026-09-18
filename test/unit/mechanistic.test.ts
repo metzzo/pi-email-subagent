@@ -11,6 +11,9 @@ import { parseRegistry } from "../../src/registry-store.ts";
 import { MailStore, parseMailEvent } from "../../src/mail-store.ts";
 import { mechanisticPrompt } from "../../src/prompts.ts";
 import type { EmailEnvelope, MechanisticJob } from "../../src/types.ts";
+import { mechanisticParserCases } from "../helpers/mechanistic-parser-cases.ts";
+
+it("strict mechanistic contracts through the direct TypeScript loader", mechanisticParserCases);
 
 it("trusted config resolves global/project path bases, defaults to main-only and rejects duplicates", async () => {
   const root = await mkdtemp(join(tmpdir(), "mechanistic-config-"));

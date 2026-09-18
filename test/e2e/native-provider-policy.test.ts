@@ -19,13 +19,14 @@ function toolText(line: RpcLine): string {
   return content?.find((part) => part.type === "text")?.text ?? "";
 }
 
-it("real Pi rejects an unsafe native public provider before email acceptance", { timeout: 180_000 }, async () => {
+for (const modelHeaders of [false, true]) it(`real Pi rejects unsafe native ${modelHeaders ? "model headers" : "public provider"} before email acceptance`, { timeout: 180_000 }, async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-native-policy-e2e-"));
   const client = PiRpcClient.launch({
     cwd: process.cwd(),
     agentDir,
     model: "mock-e2e/mock-e2e",
     extensions: [MOCK_EXTENSION, UNSAFE_NATIVE_EXTENSION, EXTENSION],
+    env: { PI_EMAIL_NATIVE_MODEL_HEADERS: modelHeaders ? "1" : "0" },
   });
   try {
     const state = await client.getState();
@@ -37,7 +38,9 @@ it("real Pi rejects an unsafe native public provider before email acceptance", {
     await client.prompt("E2E NATIVE PROVIDER REJECT NOWAIT");
     const send = await client.waitFor(sendEnd, "unsafe native provider rejection", 90_000, mark);
     assert.equal(send.isError, true);
-    assert.match(toolText(send), /native provider unsafe-native-fixture.*cannot be proven.*no email was accepted/i);
+    assert.match(toolText(send), modelHeaders
+      ? /Model unsafe-native-fixture\/unsafe-native-model.*headers.*cannot be proven.*no email was accepted/i
+      : /native provider unsafe-native-fixture.*cannot be proven.*no email was accepted/i);
     assert.doesNotMatch(`${toolText(send)}\n${client.stderr}`, new RegExp(UNSAFE_NATIVE_HEADER_SENTINEL, "i"));
     await client.waitForSettlement(mark, 90_000);
 
