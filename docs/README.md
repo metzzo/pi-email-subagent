@@ -49,6 +49,10 @@ Pi core remains the only automatic retry owner. Workers surface **Pi agent retry
 
 All limits, roles, address overrides, and the model-selection policy are configurable; see [configuration.md](configuration.md).
 
+## Proposed designs
+
+- [Mechanistic-subagents](mechanistic-subagents.md): proposed Python-backed, send-only agents; not yet implemented or runtime-tested.
+
 ## Related surfaces
 
 - [`/agents` work dashboard](agents-dashboard.md): live structured mutation intent/outcomes, exact-path warnings, inspection counters, bounded diffs, inbox/activity/profile tabs, lifecycle controls, and full conversation (`Ctrl+O`).
