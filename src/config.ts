@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { parseSubagentAddressShape } from "./address.ts";
+import { mergeMechanisticPrograms } from "./mechanistic.ts";
 import type { AddressConfig, LifecycleOverride, LifecyclePolicy, RoleConfig, SubagentConfig } from "./types.ts";
 
 export const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
@@ -132,6 +133,7 @@ export const DEFAULT_CONFIG: SubagentConfig = {
     },
   },
   addresses: {},
+  mechanisticPrograms: {},
 };
 
 interface RawConfig {
@@ -154,6 +156,7 @@ interface RawConfig {
   lifecycleMaxima?: unknown;
   roles?: unknown;
   addresses?: unknown;
+  mechanisticPrograms?: unknown;
 }
 
 export interface LoadConfigResult {
@@ -357,7 +360,7 @@ function identityBudgets(value: unknown, base: SubagentConfig["budgets"], label:
   };
 }
 
-function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: string, warnings: string[]): SubagentConfig {
+function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: string, warnings: string[], baseDir: string): SubagentConfig {
   if (!raw) return base;
   const defaultEffort = effort(raw.defaultEffort, base.defaultEffort, `${label}.defaultEffort`, warnings);
   let modelPolicy = base.modelPolicy;
@@ -385,6 +388,7 @@ function mergeLayer(base: SubagentConfig, raw: RawConfig | undefined, label: str
     }
   }
   return {
+    mechanisticPrograms: mergeMechanisticPrograms(base.mechanisticPrograms, raw.mechanisticPrograms, baseDir),
     defaultEffort,
     modelPolicy,
     maxAgents,
@@ -469,9 +473,9 @@ export function loadConfig(
 ): LoadConfigResult {
   const warnings: string[] = [];
   let config = structuredClone(DEFAULT_CONFIG);
-  config = mergeLayer(config, readJson(join(agentDir, "subagents.json"), warnings), "global", warnings);
+  config = mergeLayer(config, readJson(join(agentDir, "subagents.json"), warnings), "global", warnings, agentDir);
   if (projectTrusted) {
-    config = mergeLayer(config, readJson(join(cwd, configDirName, "subagents.json"), warnings), "project", warnings);
+    config = mergeLayer(config, readJson(join(cwd, configDirName, "subagents.json"), warnings), "project", warnings, cwd);
   }
   return { config, warnings: finalizeWarnings(warnings) };
 }

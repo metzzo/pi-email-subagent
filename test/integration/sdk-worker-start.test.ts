@@ -10,7 +10,7 @@ import { Type } from "typebox";
 import { DEFAULT_CONFIG, DEFAULT_LIFECYCLE, resolveAgentProfile } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
 import { WorkerSettingsSnapshot } from "../../src/settings-snapshot.ts";
-import type { AgentRecord } from "../../src/types.ts";
+import type { LlmAgentRecord as AgentRecord } from "../../src/types.ts";
 import type { WorkerExtensionRegistration } from "../../src/worker-extensions.ts";
 
 function successfulStream(
@@ -136,6 +136,7 @@ function retryableErrorStream(model: Model<Api>) {
 function workerRecord(model: Model<any>, address = `scout.sdk-start@${model.id}.com`): AgentRecord {
   const now = new Date().toISOString();
   return {
+    kind: "llm",
     address,
     name: "scout",
     taskSlug: "sdk-start",

@@ -1,3 +1,4 @@
+import { inspectLlm, llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -50,8 +51,8 @@ describe("initial delegation lifecycle", () => {
       });
       assert.deepEqual(sent.recipientLifecycle, lifecycle);
       assert.deepEqual(sent.envelope.lifecycleIntent, lifecycle);
-      assert.deepEqual(broker.inspectAgent(sent.envelope.to).lifecycle, lifecycle);
-      assert.deepEqual(broker.getSnapshot().agents[0]?.lifecycle, lifecycle);
+      assert.deepEqual(inspectLlm(broker, sent.envelope.to).lifecycle, lifecycle);
+      assert.deepEqual(llmSnapshot(broker).agents[0]?.lifecycle, lifecycle);
       await assert.rejects(broker.send(broker.mainAddress, {
         to: sent.envelope.to,
         subject: "Mutate",
@@ -84,7 +85,7 @@ describe("initial delegation lifecycle", () => {
     });
     const broker = await brokerWith(root, () => new FakeWorker());
     try {
-      assert.deepEqual(broker.inspectAgent("worker.intent@gpt-5.4.com").lifecycle, lifecycle);
+      assert.deepEqual(inspectLlm(broker, "worker.intent@gpt-5.4.com").lifecycle, lifecycle);
     } finally {
       await broker.shutdown();
     }
@@ -109,7 +110,7 @@ describe("initial delegation lifecycle", () => {
         lifecycle: { spawnTimeoutMs: 150 },
       }), /LIFECYCLE_SPAWN_TIMEOUT/);
       assert.ok(Date.now() - started < 500);
-      const inspection = broker.inspectAgent("worker.spawn-timeout@gpt-5.4.com");
+      const inspection = inspectLlm(broker, "worker.spawn-timeout@gpt-5.4.com");
       assert.match(inspection.failure ?? "", /LIFECYCLE_SPAWN_TIMEOUT/);
       assert.equal(inspection.cleanup?.workerGeneration, 1);
       await assert.rejects(broker.restart(inspection.address), /Pi session\/tool cleanup settlement is unknown/i);
@@ -117,11 +118,11 @@ describe("initial delegation lifecycle", () => {
 
       const late = new FakeWorker();
       resolveFactory(late);
-      await eventually(() => assert.equal(broker.inspectAgent(inspection.address).cleanup, undefined));
+      await eventually(() => assert.equal(inspectLlm(broker, inspection.address).cleanup, undefined));
       assert.equal(late.disposed, true, "the exact late generation was cleaned before quarantine release");
       await broker.restart(inspection.address);
       assert.equal(factoryCalls, 2);
-      assert.equal(broker.inspectAgent(inspection.address).state, "running", "queued accepted mail resumes only in generation 2");
+      assert.equal(inspectLlm(broker, inspection.address).state, "running", "queued accepted mail resumes only in generation 2");
     } finally {
       await broker.shutdown();
     }
@@ -142,7 +143,7 @@ describe("initial delegation lifecycle", () => {
         lifecycle: { promptAcceptanceTimeoutMs: 150 },
       });
       assert.equal(sent.envelope.deliveryState, "delivered");
-      assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT/);
+      assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT/);
       assert.equal(broker.fetchUnanswered(sent.envelope.to).length, 1);
     } finally {
       await broker.shutdown();
@@ -168,8 +169,8 @@ describe("initial delegation lifecycle", () => {
       await new Promise((resolve) => setTimeout(resolve, 200));
       workers[0]!.emit({ type: "activity", activity: { at: new Date().toISOString(), kind: "text", summary: "progress" } });
       await new Promise((resolve) => setTimeout(resolve, 200));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "activity resets the stall deadline");
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running", "activity resets the stall deadline");
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
     } finally {
       await broker.shutdown();
     }
@@ -187,15 +188,15 @@ describe("initial delegation lifecycle", () => {
         priority: "low",
         lifecycle: { runTimeoutMs: 3_000, idleTimeoutMs: 300 },
       });
-      const activityBefore = broker.getSnapshot().agents[0]!.activity.length;
+      const activityBefore = llmSnapshot(broker).agents[0]!.activity.length;
       worker.emit({ type: "run_liveness", phase: "model_start" } as never);
       for (let index = 0; index < 4; index += 1) {
         await new Promise((resolve) => setTimeout(resolve, 180));
         worker.emit({ type: "run_liveness", phase: "model_progress" } as never);
       }
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
-      assert.equal(broker.getSnapshot().agents[0]!.activity.length, activityBefore, "ephemeral pulses never enter registry activity");
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running");
+      assert.equal(llmSnapshot(broker).agents[0]!.activity.length, activityBefore, "ephemeral pulses never enter registry activity");
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
     } finally {
       await broker.shutdown().catch(() => undefined);
     }
@@ -214,7 +215,7 @@ describe("initial delegation lifecycle", () => {
         lifecycle: { runTimeoutMs: 2_000, idleTimeoutMs: 200 },
       });
       worker.emit({ type: "run_liveness", phase: "model_start" } as never);
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
     } finally {
       await broker.shutdown().catch(() => undefined);
     }
@@ -235,10 +236,10 @@ describe("initial delegation lifecycle", () => {
       worker.emit({ type: "run_liveness", phase: "retry_start", delayMs: 600 } as never);
       assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
       await new Promise((resolve) => setTimeout(resolve, 400));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "finite retry delay may outlive ordinary idle");
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running", "finite retry delay may outlive ordinary idle");
       worker.emit({ type: "run_liveness", phase: "model_start" } as never);
       assert.ok((broker as any).watchdogs.get(sent.envelope.to)?.idle, "the next exact attempt boundary clears the retry hold");
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
     } finally {
       await broker.shutdown().catch(() => undefined);
     }
@@ -258,8 +259,8 @@ describe("initial delegation lifecycle", () => {
       });
       worker.emit({ type: "run_liveness", phase: "retry_start", delayMs: 250 } as never);
       await new Promise((resolve) => setTimeout(resolve, 250));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/), 1_500);
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running");
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/), 1_500);
     } finally {
       await broker.shutdown().catch(() => undefined);
     }
@@ -281,7 +282,7 @@ describe("initial delegation lifecycle", () => {
       const pulse = setInterval(() => worker.emit({ type: "run_liveness", phase: "model_progress" } as never), 75);
       try {
         await eventually(() => {
-          const failure = broker.inspectAgent(sent.envelope.to).failure ?? "";
+          const failure = inspectLlm(broker, sent.envelope.to).failure ?? "";
           assert.match(failure, /LIFECYCLE_RUN_TIMEOUT/);
           assert.doesNotMatch(failure, /LIFECYCLE_IDLE_TIMEOUT/);
         }, 1_500);
@@ -316,7 +317,7 @@ describe("initial delegation lifecycle", () => {
       assert.ok(watchdog?.run, "absolute run timer remains armed");
       assert.equal(watchdog?.idle, undefined, "active tool disarms only idle");
       await new Promise((resolve) => setTimeout(resolve, 700));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running");
 
       const endedAt = Date.now();
       workers[0]!.emit({
@@ -324,8 +325,8 @@ describe("initial delegation lifecycle", () => {
       } as never);
       assert.ok((broker as any).watchdogs.get(sent.envelope.to)?.idle, "last tool end rearms idle");
       await new Promise((resolve) => setTimeout(resolve, 250));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "last end receives a fresh idle interval");
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running", "last end receives a fresh idle interval");
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
       assert.ok(Date.now() - endedAt >= 450, "idle expiry is measured from the last tool end");
     } finally {
       await broker.shutdown();
@@ -359,10 +360,10 @@ describe("initial delegation lifecycle", () => {
       emit("end", "call-a");
       assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
       await new Promise((resolve) => setTimeout(resolve, 650));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running", "remaining exact call keeps idle disarmed");
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running", "remaining exact call keeps idle disarmed");
       emit("end", "call-b");
       assert.ok((broker as any).watchdogs.get(sent.envelope.to)?.idle);
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
     } finally {
       await broker.shutdown();
     }
@@ -392,11 +393,11 @@ describe("initial delegation lifecycle", () => {
       assert.ok(watchdog?.run);
       assert.equal(watchdog?.idle, undefined);
       await new Promise((resolve) => setTimeout(resolve, 700));
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "running");
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "running");
       worker.emit({
         type: "tool_lifecycle", phase: "end", toolCallId: "early", toolName: "bash", at: new Date().toISOString(),
       } as never);
-      await eventually(() => assert.match(broker.inspectAgent(sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
+      await eventually(() => assert.match(inspectLlm(broker, sent.envelope.to).failure ?? "", /LIFECYCLE_IDLE_TIMEOUT/));
     } finally {
       await broker.shutdown();
     }
@@ -423,7 +424,7 @@ describe("initial delegation lifecycle", () => {
       } as never);
       assert.equal((broker as any).watchdogs.get(sent.envelope.to)?.idle, undefined);
       await eventually(() => {
-        const inspection = broker.inspectAgent(sent.envelope.to);
+        const inspection = inspectLlm(broker, sent.envelope.to);
         assert.equal(inspection.state, "failed");
         assert.match(inspection.failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
         assert.equal(inspection.cleanup, undefined);
@@ -452,7 +453,7 @@ describe("initial delegation lifecycle", () => {
         lifecycle: { runTimeoutMs: 150, idleTimeoutMs: 1_000, abortTimeoutMs: 50, disposeTimeoutMs: 50 },
       });
       await eventually(() => {
-        const failure = broker.inspectAgent(sent.envelope.to).failure ?? "";
+        const failure = inspectLlm(broker, sent.envelope.to).failure ?? "";
         assert.match(failure, /LIFECYCLE_RUN_TIMEOUT/);
         assert.match(failure, /LIFECYCLE_ABORT_TIMEOUT/);
         assert.match(failure, /LIFECYCLE_DISPOSE_TIMEOUT/);

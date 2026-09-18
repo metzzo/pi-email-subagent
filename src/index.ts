@@ -9,7 +9,7 @@ import { DEFAULT_MODEL_POLICY, isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
 import { assertExtensionApiFeatures, assertSupportedPiRuntime } from "./pi-compat.ts";
-import { budgetPromptAdditions, formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
+import { budgetPromptAdditions, formatAlert, mainCoordinatorPrompt, mechanisticPrompt } from "./prompts.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
@@ -74,7 +74,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const retained = new Set<string>();
     const refreshes: Promise<boolean>[] = [];
     for (const record of snapshot.agents) {
-      if (!record.sessionFile) continue;
+      if (record.kind !== "llm" || !record.sessionFile) continue;
       retained.add(record.address);
       let source = conversationSources.get(record.address);
       if (!source || source.sessionFile !== record.sessionFile) {
@@ -103,8 +103,9 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.registerTool({
+  const registerSend = (description: string): void => pi.registerTool({
     ...sendTool,
+    description,
     renderCall(args: any, theme) {
       const priorityColor = args.priority === "high" ? "warning" : "accent";
       const priority = sanitizeConversationLabel(String(args.priority ?? "")).toUpperCase();
@@ -129,7 +130,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       const model = sanitizeConversationLabel(
         sent.recipientProvider && sent.recipientModel
           ? `${sent.recipientProvider}/${sent.recipientModel}`
-          : (sent.recipientModel ?? "main"),
+          : (sent.recipientKind === "mechanistic" ? `Python: ${sent.recipientBinding?.script ?? "registered program"}` : sent.recipientModel ?? "main"),
       );
       const effort = sent.recipientEffort ? ` · effort ${sanitizeConversationLabel(sent.recipientEffort)}` : "";
       let text = `${icon} ${theme.fg("accent", recipient)} ${theme.fg("muted", envelopeId)}`;
@@ -144,6 +145,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
         const conversation = recordedConversationPreview(sent.envelope.to);
         if (conversation) {
           text += `\n\n${theme.fg("toolTitle", "Recent subagent conversation")}\n${theme.fg("toolOutput", conversation)}`;
+        } else if (sent.recipientKind === "mechanistic") {
+          text += `\n\n${theme.fg("dim", "Send-only Python job. Inspect /agents for progress, runtime outcome, and direct-child cleanup evidence.")}`;
         } else if (sent.envelope.to !== broker?.mainAddress) {
           text += `\n\n${theme.fg("dim", "Conversation preview is loading. Full transcript: /agents → select agent → Ctrl+O")}`;
         }
@@ -151,6 +154,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       return new Text(text, 0, 0);
     },
   });
+
+  registerSend(sendTool.description);
 
   const [inspectAgentTool, waitForRepliesTool, cancelRequestTool, manageAgentTool] = createMainCoordinationTools(
     () => ensureBroker(currentContext),
@@ -203,6 +208,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       const conversation = recordedConversationPreview(email.from);
       if (conversation) {
         text += `\n\n${theme.fg("toolTitle", "Recent subagent conversation")}\n${theme.fg("customMessageText", conversation)}`;
+      } else if (email.from.endsWith("@mechanistic.com")) {
+        text += `\n\n${theme.fg("dim", "Send-only Python status. Inspect /agents for job evidence; no conversation or inbox exists.")}`;
       } else {
         text += `\n\n${theme.fg("dim", "Conversation preview is loading. Full transcript: /agents → select agent → Ctrl+O")}`;
       }
@@ -301,6 +308,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     }
     const configResult = loadConfig(agentDir, ctx.cwd, projectTrusted);
     effectiveConfig = configResult.config;
+    registerSend(sendTool.description + mechanisticPrompt(effectiveConfig, "main"));
     for (const warning of configResult.warnings) ctx.ui.notify(warning, "warning");
     budgetPromptAdditions(effectiveConfig.modelPolicy, undefined, ctx.model);
     mainAddress = makeMainAddress(ctx.model.id);

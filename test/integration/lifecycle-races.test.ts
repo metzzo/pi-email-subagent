@@ -1,3 +1,4 @@
+import { inspectLlm } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,7 +97,7 @@ describe("broker lifecycle races", () => {
       assert.equal(stopFinished, false, "management joins the exact old settlement continuation");
       releaseEnforcement.resolve();
       await stopping;
-      assert.equal(broker.inspectAgent(request.envelope.to).state, "stopped");
+      assert.equal(inspectLlm(broker, request.envelope.to).state, "stopped");
       assert.equal((broker as any).active.has(request.envelope.to), false);
 
       await broker.restart(request.envelope.to);
@@ -170,7 +171,7 @@ describe("broker lifecycle races", () => {
       });
       workers[1]!.settle();
       await eventually(() => {
-        assert.equal(broker.inspectAgent(request.envelope.to).state, "idle");
+        assert.equal(inspectLlm(broker, request.envelope.to).state, "idle");
         assert.equal((broker as any).active.has(request.envelope.to), false);
       });
     } finally {
@@ -258,7 +259,7 @@ describe("broker lifecycle races", () => {
         priority: "low",
       });
       workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(first.envelope.to).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(broker, first.envelope.to).state, "idle"));
 
       workers[0]!.blockNext = true;
       const send = broker.send(broker.mainAddress, {
@@ -277,8 +278,8 @@ describe("broker lifecycle races", () => {
       assert.match(workers[1]!.prompts[0]!, /mailbox-enforcement/);
       assert.doesNotMatch(workers[1]!.prompts[0]!, /Delayed acceptance/);
       assert.equal(broker.mailStore.get(result.envelope.id)?.deliveryState, "delivered");
-      assert.equal(broker.inspectAgent(first.envelope.to).state, "running");
-      assert.equal(broker.inspectAgent(first.envelope.to).failure, undefined);
+      assert.equal(inspectLlm(broker, first.envelope.to).state, "running");
+      assert.equal(inspectLlm(broker, first.envelope.to).failure, undefined);
     } finally {
       releasePrompt.resolve();
       await broker.shutdown();
@@ -372,7 +373,7 @@ describe("broker lifecycle races", () => {
         worker,
         entry.idleGeneration,
       );
-      assert.equal(broker.inspectAgent(request.envelope.to).state, "running");
+      assert.equal(inspectLlm(broker, request.envelope.to).state, "running");
       assert.equal((broker as any).watchdogs.get(request.envelope.to)?.idle, undefined);
       worker.emit({
         type: "tool_lifecycle", phase: "end", toolCallId: "boundary", toolName: "bash", at: new Date().toISOString(),
@@ -419,12 +420,12 @@ describe("broker lifecycle races", () => {
       worker.emit({
         type: "tool_lifecycle", phase: "end", toolCallId: "boundary", toolName: "bash", at: new Date().toISOString(),
       } as never);
-      assert.equal(broker.inspectAgent(request.envelope.to).state, "failed");
-      assert.match(broker.inspectAgent(request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
+      assert.equal(inspectLlm(broker, request.envelope.to).state, "failed");
+      assert.match(inspectLlm(broker, request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
       releaseAbort.resolve();
       await expiring;
-      assert.match(broker.inspectAgent(request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
-      assert.equal(broker.inspectAgent(request.envelope.to).cleanup, undefined, "tool end plus abort/dispose settlement releases cleanup");
+      assert.match(inspectLlm(broker, request.envelope.to).failure ?? "", /LIFECYCLE_RUN_TIMEOUT/);
+      assert.equal(inspectLlm(broker, request.envelope.to).cleanup, undefined, "tool end plus abort/dispose settlement releases cleanup");
       assert.equal((broker as any).active.has(request.envelope.to), false);
       assert.equal((broker as any).watchdogs.has(request.envelope.to), false);
     } finally {
@@ -451,7 +452,7 @@ describe("broker lifecycle races", () => {
       });
       await assert.rejects(broker.stop(request.envelope.to), /cleanup.*quarantin|quiescence.*unknown/i);
       assert.equal(workers[0]?.disposed, true);
-      const inspection = broker.inspectAgent(request.envelope.to);
+      const inspection = inspectLlm(broker, request.envelope.to);
       assert.equal(inspection.state, "failed");
       assert.equal(inspection.cleanup?.state, "unknown");
       assert.equal((broker as any).active.has(request.envelope.to), true);
@@ -482,7 +483,7 @@ describe("broker lifecycle races", () => {
       await assert.rejects(broker.restart(request.envelope.to), /cleanup.*quarantin|quiescence.*unknown/i);
       assert.equal(workers.length, 1);
       assert.equal(workers[0]?.disposed, true);
-      const inspection = broker.inspectAgent(request.envelope.to);
+      const inspection = inspectLlm(broker, request.envelope.to);
       assert.equal(inspection.state, "failed");
       assert.equal(inspection.cleanup?.state, "unknown");
     } finally {
@@ -522,7 +523,7 @@ describe("broker lifecycle races", () => {
         priority: "low",
       });
       workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(first.envelope.to).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(broker, first.envelope.to).state, "idle"));
 
       workers[0]!.block = true;
       const restart = broker.restart(first.envelope.to);

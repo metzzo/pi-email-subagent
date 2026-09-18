@@ -306,6 +306,7 @@ it("renders terminal recovery from existing failure, mailbox, and current-batch 
     inspectAgent: () => inspection,
     openDeliveredRequestCount: () => 1,
     getSnapshot: () => ({ agents: [{
+      kind: "llm",
       address: inspection.address,
       provider: inspection.provider,
       modelId: inspection.modelId,

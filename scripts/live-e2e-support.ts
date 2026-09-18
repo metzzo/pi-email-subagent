@@ -364,7 +364,7 @@ async function inspectNamespace(
         }
         if (registry.agents.length !== 1) addReason(reasons, "registry does not contain exactly one live worker identity");
         const agent = registry.agents.find((candidate) => candidate.address === expected.recipientAddress.toLowerCase());
-        if (!agent) addReason(reasons, "registry is missing the exact live worker identity");
+        if (!agent || agent.kind !== "llm") addReason(reasons, "registry is missing the exact live LLM worker identity");
         else {
           inspection.agentState = agent.state;
           inspection.cleanupPresent = Boolean(agent.cleanup);
@@ -380,8 +380,8 @@ async function inspectNamespace(
           }
           if (agent.workerEpoch?.runSlotHeld !== false) addReason(reasons, "registry worker epoch still holds or omits its run-slot release");
         }
-        if (registry.agents.some((agent) => agent.cleanup)) addReason(reasons, "at least one registry identity has Pi session/tool cleanup settlement unknown");
-        if (registry.agents.some((agent) => agent.workerEpoch?.runSlotHeld !== false)) {
+        if (registry.agents.some((agent) => agent.kind === "mechanistic" ? agent.cleanupUnknown : agent.cleanup)) addReason(reasons, "at least one registry identity has Pi session/tool cleanup settlement unknown");
+        if (registry.agents.some((agent) => agent.kind !== "llm" || agent.workerEpoch?.runSlotHeld !== false)) {
           addReason(reasons, "at least one registry identity has a held or unverified run slot");
         }
       } catch {

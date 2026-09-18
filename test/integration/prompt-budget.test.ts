@@ -1,3 +1,4 @@
+import { llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -67,8 +68,8 @@ for (const contextWindow of [128_000, 5_000]) {
         await assert.rejects(send, /PROMPT_ADDITIONS_TOO_LARGE/);
         assert.equal(factories, 0);
         assert.equal(broker.mailStore.list().length, 0);
-        assert.equal(broker.getSnapshot().agents.length, 0);
-        assert.equal(broker.getSnapshot().capacity.identitiesUsed, 0);
+        assert.equal(llmSnapshot(broker).agents.length, 0);
+        assert.equal(llmSnapshot(broker).capacity.identitiesUsed, 0);
       } else {
         await send;
         await settled;

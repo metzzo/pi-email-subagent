@@ -50,9 +50,12 @@ export interface EmailEnvelope {
   effortIntent?: ThinkingLevel;
   /** Durable provider/model selected when accepting mail for a new identity. */
   modelBindingIntent?: ModelBinding;
+  /** Exact trusted script binding; accepted body remains opaque task input. */
+  mechanisticBindingIntent?: MechanisticBinding;
 }
 
 export interface ParsedAddress {
+  kind: "llm";
   address: string;
   name: string;
   taskSlug: string;
@@ -108,6 +111,7 @@ export interface SubagentConfig {
   lifecycleMaxima: LifecyclePolicy;
   roles: Record<string, RoleConfig>;
   addresses: Record<string, AddressConfig>;
+  mechanisticPrograms: Record<string, MechanisticProgram>;
 }
 
 export interface UsageSnapshot {
@@ -211,7 +215,8 @@ export interface CleanupDiagnostic {
   detail?: string;
 }
 
-export interface AgentRecord {
+export interface LlmAgentRecord {
+  kind: "llm";
   address: string;
   name: string;
   taskSlug: string;
@@ -243,8 +248,66 @@ export interface AgentRecord {
   work?: AgentWorkState;
 }
 
+export type MechanisticCaller = "main" | "llm" | "mechanistic";
+export interface MechanisticBinding { key: string; python: string; script: string; cwd: string }
+export interface MechanisticProgram extends MechanisticBinding { allowedCallers: MechanisticCaller[] }
+export interface MechanisticAddress { kind: "mechanistic"; address: string; name: string; taskSlug: string; binding: MechanisticBinding }
+export type AgentAddress = ParsedAddress | MechanisticAddress;
+export type MechanisticResult = "success" | "task_failure" | "invalid_arguments" | "spawn_failure" | "crash" | "timeout" | "forced_stop" | "protocol_failure" | "missing_terminal" | "interrupted";
+export interface MechanisticProgress { message: string; percent?: number }
+export interface MechanisticTerminal { status: "success" | "failure"; summary: string; artifacts: string[]; invalidArguments?: boolean }
+export interface MechanisticCleanup {
+  state: "confirmed" | "cleanup-unknown";
+  childExited: boolean;
+  pipesClosed: boolean;
+  boundary: "direct-child-only";
+  detail?: string;
+}
+export interface MechanisticJob {
+  id: string;
+  address: string;
+  binding: MechanisticBinding;
+  allowedCallers: MechanisticCaller[];
+  lifecycle: LifecyclePolicy;
+  phase: "queued" | "starting" | "running" | "stopping" | "terminal";
+  createdAt: string;
+  updatedAt: string;
+  generation?: number;
+  pid?: number;
+  progress?: MechanisticProgress;
+  reported?: MechanisticTerminal;
+  result?: MechanisticResult;
+  exitCode?: number | null;
+  signal?: string | null;
+  stderr: string;
+  cleanup?: MechanisticCleanup;
+  outcomeMailId?: string;
+  /** Snapshot-only, derived from the linked outcome envelope. */
+  outcomeDeliveryState?: DeliveryState;
+}
+export interface MechanisticAgentRecord {
+  kind: "mechanistic";
+  address: string;
+  name: string;
+  taskSlug: string;
+  binding: MechanisticBinding;
+  allowedCallers: MechanisticCaller[];
+  state: AgentStatus;
+  createdAt: string;
+  updatedAt: string;
+  currentActivity?: string;
+  failure?: string;
+  lifecycle: LifecyclePolicy;
+  /** Derived bounded journal evidence, not a second job store. */
+  jobs?: MechanisticJob[];
+  cleanupUnknown?: boolean;
+  /** Explicit operator release, not a rewrite of historical process proof. */
+  cleanupResolvedAt?: string;
+}
+export type AgentRecord = LlmAgentRecord | MechanisticAgentRecord;
+
 export interface BrokerRegistry {
-  version: 1;
+  version: 1 | 2;
   mainAddress: string;
   mainAliases: string[];
   agents: AgentRecord[];
@@ -280,6 +343,8 @@ export interface SendEmailResult {
   spawned: boolean;
   /** Present when journal delivery advanced but no exact worker admission was confirmed. */
   deliveryUncertain?: DeliveryUncertainty;
+  recipientKind?: "llm" | "mechanistic";
+  recipientBinding?: MechanisticBinding;
   recipientModel?: string;
   /** Exact provider selected for or preserved by the recipient identity. */
   recipientProvider?: string;
@@ -324,7 +389,8 @@ export interface AgentBudgetSnapshot {
   currentRun: { turns: number; toolCalls: number; tokens: number };
 }
 
-export interface AgentInspection {
+export interface LlmAgentInspection {
+  kind: "llm";
   address: string;
   exists: boolean;
   wouldSpawn: boolean;
@@ -355,6 +421,29 @@ export interface AgentInspection {
   providerReady: "available" | "unavailable" | "unknown";
   lifecycle: LifecyclePolicy;
 }
+
+export interface MechanisticAgentInspection {
+  kind: "mechanistic";
+  address: string;
+  exists: boolean;
+  wouldSpawn: boolean;
+  capacityAvailable: boolean;
+  capacity: AgentCapacitySnapshot;
+  holdsActivationLease: boolean;
+  binding: MechanisticBinding;
+  allowedCallers: MechanisticCaller[];
+  bindingReady: "available" | "unavailable";
+  state: AgentStatus | "new";
+  currentActivity?: string;
+  queued: number;
+  archiveEligible: boolean;
+  archiveBlockers: AgentArchiveBlockers;
+  lifecycle: LifecyclePolicy;
+  jobs: MechanisticJob[];
+  cleanupUnknown: boolean;
+  failure?: string;
+}
+export type AgentInspection = LlmAgentInspection | MechanisticAgentInspection;
 
 export type ReplyWaitState = "answered" | "failed" | "cancelled" | "stopped" | "archived" | "paused" | "pending";
 
@@ -399,7 +488,7 @@ export interface WorkerRunLivenessEvent {
 export type WorkerEvent = WorkerStatusEvent | WorkerToolLifecycleEvent | WorkerRunLivenessEvent;
 
 export interface WorkerSnapshot {
-  record: AgentRecord;
+  record: LlmAgentRecord;
   /** Exact names returned by the live Pi session. */
   activeTools: string[];
   isIdle: boolean;
@@ -425,13 +514,14 @@ export interface WorkerCleanupReport {
 }
 
 export interface WorkerStartConfig {
-  record: AgentRecord;
+  record: LlmAgentRecord;
   model: Model<any>;
   cwd: string;
   agentDir: string;
   sessionDir: string;
   projectTrusted: boolean;
   systemPrompt: string;
+  mechanisticPrompt?: string;
   /** Synchronous admission guard before each assistant provider request, including Pi retries. */
   beforeModelTurn?: () => void;
   sendEmail: (input: SendEmailInput, signal?: AbortSignal) => Promise<SendEmailResult>;

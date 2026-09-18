@@ -1,3 +1,4 @@
+import { inspectLlm, llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -70,7 +71,7 @@ describe("worker cleanup quarantine", () => {
       workers[0]!.emit({ type: "tool_lifecycle", phase: "start", toolCallId: "active-bash", toolName: "bash" });
       await entered.promise;
       await eventually(() => {
-        const inspection = broker.inspectAgent(sent.envelope.to) as any;
+        const inspection = inspectLlm(broker, sent.envelope.to) as any;
         assert.equal(inspection.state, "failed");
         assert.equal(inspection.cleanup?.state, "unknown");
         assert.equal(inspection.cleanup?.heldRunSlot, true);
@@ -94,7 +95,7 @@ describe("worker cleanup quarantine", () => {
 
       cleanup.resolve(verifiedCleanup());
       await eventually(() => {
-        assert.equal((broker.inspectAgent(sent.envelope.to) as any).cleanup, undefined);
+        assert.equal((inspectLlm(broker, sent.envelope.to) as any).cleanup, undefined);
         assert.equal((broker as any).active.has(sent.envelope.to), false);
       });
     } finally {
@@ -129,28 +130,28 @@ describe("worker cleanup quarantine", () => {
         priority: "low",
       });
       workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(sent.envelope.to).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(broker, sent.envelope.to).state, "idle"));
       const staleListener = [...workers[0]!.listeners][0]!;
 
       await assert.rejects(broker.restart(sent.envelope.to), /LIFECYCLE_DISPOSE_TIMEOUT|cleanup.*quarantin/i);
       await entered.promise;
       assert.equal(workers.length, 1, "replacement is prohibited before proof");
-      assert.equal((broker.inspectAgent(sent.envelope.to) as any).cleanup?.state, "unknown");
+      assert.equal((inspectLlm(broker, sent.envelope.to) as any).cleanup?.state, "unknown");
 
       cleanup.resolve(verifiedCleanup());
       await eventually(() => {
         assert.equal(workers.length, 1, "late cleanup never creates a hidden replacement");
-        const inspection = broker.inspectAgent(sent.envelope.to) as any;
+        const inspection = inspectLlm(broker, sent.envelope.to) as any;
         assert.equal(inspection.cleanup, undefined);
         assert.equal(inspection.state, "paused");
       });
       staleListener({ type: "failure", error: "stale cleanup callback" });
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "paused");
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "paused");
       assert.equal(workers.length, 1);
 
       await broker.restart(sent.envelope.to);
       assert.equal(workers.length, 2, "an explicit second restart creates the replacement");
-      assert.equal(broker.inspectAgent(sent.envelope.to).state, "idle");
+      assert.equal(inspectLlm(broker, sent.envelope.to).state, "idle");
     } finally {
       cleanup.resolve(verifiedCleanup());
       await broker.shutdown().catch(() => undefined);
@@ -179,13 +180,13 @@ describe("worker cleanup quarantine", () => {
         priority: "low",
       });
       worker.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(sent.envelope.to).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(broker, sent.envelope.to).state, "idle"));
 
       await assert.rejects(broker.archive(sent.envelope.to), /cleanup|quiescence|LIFECYCLE_DISPOSE_TIMEOUT/i);
       await entered.promise;
       cleanup.reject(new Error("late cleanup rejected"));
       await eventually(() => {
-        const inspection = broker.inspectAgent(sent.envelope.to) as any;
+        const inspection = inspectLlm(broker, sent.envelope.to) as any;
         assert.equal(inspection.cleanup?.state, "unknown");
         assert.equal(inspection.cleanup?.detail, "WORKER_CLEANUP_REJECTED");
       });
@@ -211,7 +212,7 @@ describe("worker cleanup quarantine", () => {
       let rejectedRelease = false;
       broker.registryStore.save = async (registry) => {
         const candidate = registry.agents.find((agent) => agent.address === sent.envelope.to);
-        if (!rejectedRelease && candidate?.state === "stopped" && !candidate.cleanup) {
+        if (!rejectedRelease && candidate?.kind === "llm" && candidate.state === "stopped" && !candidate.cleanup) {
           rejectedRelease = true;
           throw new Error("verified release persistence failed");
         }
@@ -219,7 +220,7 @@ describe("worker cleanup quarantine", () => {
       };
       await assert.rejects(broker.stop(sent.envelope.to), /cleanup.*quarantin|quiescence.*unknown/i);
       await eventually(() => {
-        const inspection = broker.inspectAgent(sent.envelope.to) as any;
+        const inspection = inspectLlm(broker, sent.envelope.to) as any;
         assert.equal(inspection.cleanup?.state, "unknown");
         assert.equal(inspection.cleanup?.detail, "CLEANUP_RELEASE_PERSIST_FAILED");
       });
@@ -284,8 +285,8 @@ describe("worker cleanup quarantine", () => {
     await restored.init();
     try {
       assert.equal((restored as any).active.size, 2, "both exact inherited slots survive maxConcurrent reduction");
-      assert.equal(restored.getSnapshot().capacity.runSlotsUsed, 2);
-      for (const record of restored.getSnapshot().agents) {
+      assert.equal(llmSnapshot(restored).capacity.runSlotsUsed, 2);
+      for (const record of llmSnapshot(restored).agents) {
         assert.equal(record.tools.includes("bash"), false, "current read-only profile is visible");
         assert.equal(record.cleanup?.mutationCapableAtStart, true, "old generation capability is not overwritten");
         assert.equal(record.cleanup?.heldRunSlot, true);
@@ -342,7 +343,7 @@ describe("worker cleanup quarantine", () => {
       return worker;
     });
     try {
-      const inspection = restored.inspectAgent(sent.envelope.to) as any;
+      const inspection = inspectLlm(restored, sent.envelope.to) as any;
       assert.equal(restoredWorkers.length, 0);
       assert.equal(inspection.cleanup?.state, "pending");
       assert.equal((restored as any).activationLeases.has(sent.envelope.to), true);

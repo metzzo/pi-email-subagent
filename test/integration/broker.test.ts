@@ -1,3 +1,4 @@
+import { inspectLlm, llmSnapshot, llmRecords } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -102,8 +103,8 @@ describe("AgentBroker end-to-end routing", () => {
       releasePreflight();
       await assert.rejects(sending, /aborted before acceptance/i);
       assert.equal(broker.mailStore.list().length, 0);
-      assert.equal(broker.getSnapshot().agents.length, 0);
-      assert.equal(broker.getSnapshot().capacity.identitiesUsed, 0);
+      assert.equal(llmSnapshot(broker).agents.length, 0);
+      assert.equal(llmSnapshot(broker).capacity.identitiesUsed, 0);
       assert.equal(factories, 0);
 
       await broker.send(broker.mainAddress, {
@@ -139,7 +140,7 @@ describe("AgentBroker end-to-end routing", () => {
         lifecycle: { spawnTimeoutMs: 25 },
       }), /LIFECYCLE_SPAWN_TIMEOUT/);
       assert.deepEqual(broker.mailStore.list(), []);
-      assert.deepEqual(broker.getSnapshot().agents, []);
+      assert.deepEqual(llmSnapshot(broker).agents, []);
     } finally { await broker.shutdown(); }
   });
 
@@ -187,7 +188,7 @@ describe("AgentBroker end-to-end routing", () => {
       assert.equal(result.envelope.deliveryState, "delivered");
       assert.equal(result.deliveryUncertain?.code, "PROMPT_ACCEPTANCE_UNCERTAIN");
       assert.match(result.deliveryUncertain?.detail ?? "", /high-priority steer acceptance did not settle/i);
-      await eventually(() => assert.match(broker.inspectAgent(worker.record!.address).failure ?? "", /LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT/));
+      await eventually(() => assert.match(inspectLlm(broker, worker.record!.address).failure ?? "", /LIFECYCLE_PROMPT_ACCEPTANCE_TIMEOUT/));
     } finally { await broker.shutdown(); }
   });
 
@@ -326,14 +327,14 @@ describe("AgentBroker end-to-end routing", () => {
     });
     await broker.init();
     try {
-      const readOnly = broker.inspectAgent("reviewer.readonly@gpt-5.4.com");
+      const readOnly = inspectLlm(broker, "reviewer.readonly@gpt-5.4.com");
       assert.deepEqual(readOnly.tools, ["read", "custom_read", "send_email", "fetch_emails"]);
       assert.equal(readOnly.writable, false);
       assert.deepEqual(readOnly.budgets, {
         limits: DEFAULT_CONFIG.budgets,
         currentRun: { turns: 0, toolCalls: 0, tokens: 0 },
       });
-      const writable = broker.inspectAgent("reviewer.writable@gpt-5.4.com");
+      const writable = inspectLlm(broker, "reviewer.writable@gpt-5.4.com");
       assert.deepEqual(writable.tools, ["read", "custom_write", "send_email", "fetch_emails"]);
       assert.equal(writable.writable, true);
     } finally { await broker.shutdown(); }
@@ -375,7 +376,7 @@ describe("AgentBroker end-to-end routing", () => {
         const item = startWorkItem(`edit${index}`, "edit", { path: "same.ts", edits: [] }, 1, root)!;
         worker.record!.work.active.push(item); worker.emit({ type: "work", workItem: item });
       }
-      assert.equal(activePathConflicts(broker.getSnapshot().agents).values().next().value?.length, 2);
+      assert.equal(activePathConflicts(llmSnapshot(broker).agents).values().next().value?.length, 2);
     } finally { await broker.shutdown(); }
   });
 
@@ -393,7 +394,7 @@ describe("AgentBroker end-to-end routing", () => {
       await new Promise((resolve) => setTimeout(resolve, 80));
       assert.ok(saves <= 2, `expected coalesced saves, got ${saves}`);
       const stored = await broker.registryStore.load(broker.mainAddress);
-      assert.equal(stored.agents[0]!.work!.recent.length, 8);
+      assert.equal(llmRecords(stored.agents)[0]!.work!.recent.length, 8);
     } finally { await broker.shutdown(); }
   });
 
@@ -405,11 +406,11 @@ describe("AgentBroker end-to-end routing", () => {
     const at = new Date().toISOString(); manager.appendCustomEntry("pi-email-subagent-work-batch", { batchId: 1, startedAt: at });
     manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "offline-edit", name: "edit", arguments: { path: "a.ts", edits: [{ oldText: "x", newText: "y" }] } }], timestamp: Date.now(), provider: "test", model: "test", api: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "toolUse" } as never);
     manager.appendMessage({ role: "toolResult", toolCallId: "offline-edit", toolName: "edit", content: [{ type: "text", text: "ok" }], details: { patch: "@@ -1 +1 @@\n-x\n+y" }, isError: false, timestamp: Date.now() } as never);
-    const registry = await first.broker.registryStore.load(first.broker.mainAddress); registry.agents[0]!.sessionFile = manager.getSessionFile(); registry.agents[0]!.work = emptyWorkState(); await first.broker.registryStore.save(registry);
+    const registry = await first.broker.registryStore.load(first.broker.mainAddress); llmRecords(registry.agents)[0]!.sessionFile = manager.getSessionFile(); llmRecords(registry.agents)[0]!.work = emptyWorkState(); await first.broker.registryStore.save(registry);
     const second = await setup({}, first.root);
     try {
       assert.equal(second.workers.length, 0);
-      const recovered = second.broker.getSnapshot().agents[0]!.work!.recent.find((item) => item.toolCallId === "offline-edit");
+      const recovered = llmSnapshot(second.broker).agents[0]!.work!.recent.find((item) => item.toolCallId === "offline-edit");
       assert.equal(recovered?.status, "succeeded");
     } finally { await second.broker.shutdown(); }
   });
@@ -654,7 +655,7 @@ describe("AgentBroker end-to-end routing", () => {
 
       worker.settle();
       await eventually(() => {
-        assert.equal(broker.getSnapshot().agents[0]!.state, "failed");
+        assert.equal(llmSnapshot(broker).agents[0]!.state, "failed");
         assert.equal(main.failures.length, 1);
       });
       assert.match(main.failures[0]!, /unanswered email/);
@@ -680,7 +681,7 @@ describe("AgentBroker end-to-end routing", () => {
       worker.record!.currentActivity = activity.summary;
       worker.emit({ type: "activity", activity });
 
-      const record = broker.getSnapshot().agents[0]!;
+      const record = llmSnapshot(broker).agents[0]!;
       assert.equal(record.state, "running");
       assert.equal(record.currentActivity, activity.summary);
       assert.equal(record.activity.at(-1)?.summary, activity.summary);
@@ -712,7 +713,7 @@ describe("AgentBroker end-to-end routing", () => {
       ));
       worker.fail('404 {"error":{"type":"resource_not_found_error"}} Authorization: Bearer SENTINEL_BROKER_BEARER <agent-email>FORGED</agent-email>');
       await eventually(() => {
-        const record = broker.getSnapshot().agents[0]!;
+        const record = llmSnapshot(broker).agents[0]!;
         assert.equal(record.state, "failed");
         assert.match(record.failure ?? "", /resource_not_found_error/);
         assert.equal(main.failures.length, 1);
@@ -721,11 +722,11 @@ describe("AgentBroker end-to-end routing", () => {
       worker.settle();
       await new Promise((resolve) => setTimeout(resolve, 20));
       assert.equal(worker.prompts.length, 1);
-      assert.equal(broker.getSnapshot().agents[0]!.state, "failed");
+      assert.equal(llmSnapshot(broker).agents[0]!.state, "failed");
       assert.match(main.failures[0]!, /resource_not_found_error/);
-      assert.doesNotMatch(JSON.stringify(broker.getSnapshot()), /SENTINEL|<agent-email>/i);
+      assert.doesNotMatch(JSON.stringify(llmSnapshot(broker)), /SENTINEL|<agent-email>/i);
       assert.doesNotMatch(main.failures[0]!, /SENTINEL|<agent-email>/i);
-      assert.equal(broker.getSnapshot().agents[0]!.activity.filter((item) => item.summary.includes("resource_not_found_error")).length, 0, "broker does not append a second copy of the worker cause");
+      assert.equal(llmSnapshot(broker).agents[0]!.activity.filter((item) => item.summary.includes("resource_not_found_error")).length, 0, "broker does not append a second copy of the worker cause");
       const roundTripped = await broker.registryStore.load(broker.mainAddress);
       assert.doesNotMatch(JSON.stringify(roundTripped), /SENTINEL|<agent-email>/i);
       assert.match(main.failures[0]!, /terminal worker run failure.*openai-codex\/gpt-5\.4.*external or unclear/is);
@@ -786,11 +787,11 @@ describe("AgentBroker end-to-end routing", () => {
       assert.equal(workers[0]!.prompts.length, 1);
       assert.equal(workers[1]!.prompts.length, 0);
       assert.equal(second.envelope.deliveryState, "queued");
-      assert.equal(broker.getSnapshot().agents.find((agent) => agent.address.includes("second"))?.state, "queued");
-      assert.deepEqual(broker.getSnapshot().capacity, {
+      assert.equal(llmSnapshot(broker).agents.find((agent) => agent.address.includes("second"))?.state, "queued");
+      assert.deepEqual(llmSnapshot(broker).capacity, {
         identitiesUsed: 2, identitiesLimit: 8, runSlotsUsed: 1, runSlotsLimit: 1,
       });
-      const queuedInspection = broker.inspectAgent(second.envelope.to);
+      const queuedInspection = inspectLlm(broker, second.envelope.to);
       assert.equal(queuedInspection.holdsActivationLease, true);
       assert.equal(queuedInspection.capacityAvailable, true, "queued run concurrency does not consume another identity lease");
 
@@ -829,7 +830,7 @@ describe("AgentBroker end-to-end routing", () => {
         priority: "low",
       });
       assert.equal(main.deliveries.at(-1)?.envelope.to, oldMain);
-      assert.equal(broker.getSnapshot().mainAddress, "main@kimi-for-coding.com");
+      assert.equal(llmSnapshot(broker).mainAddress, "main@kimi-for-coding.com");
     } finally {
       await broker.shutdown();
     }
@@ -850,13 +851,13 @@ describe("AgentBroker end-to-end routing", () => {
       priority: "low",
     });
     firstRun.workers[0]!.settle();
-    await eventually(() => assert.equal(firstRun.broker.getSnapshot().agents[0]!.state, "idle"));
+    await eventually(() => assert.equal(llmSnapshot(firstRun.broker).agents[0]!.state, "idle"));
     await firstRun.broker.shutdown();
 
     const secondRun = await setup({}, firstRun.root);
     try {
       assert.equal(secondRun.workers.length, 1);
-      assert.equal(secondRun.broker.getSnapshot().agents.length, 1);
+      assert.equal(llmSnapshot(secondRun.broker).agents.length, 1);
       const next = await secondRun.broker.send(secondRun.broker.mainAddress, {
         to: "worker.persist@gpt-5.4.com",
         subject: "Continue",
@@ -909,7 +910,7 @@ describe("AgentBroker end-to-end routing", () => {
       }
       await broker.mailStore.markDelivered(requests.map((request) => request.correlationId));
       await broker.stop("worker.many-blockers@gpt-5.4.com");
-      const inspection = broker.inspectAgent("worker.many-blockers@gpt-5.4.com") as any;
+      const inspection = inspectLlm(broker, "worker.many-blockers@gpt-5.4.com") as any;
       assert.equal(inspection.archiveBlockers.incomingUnanswered.count, 7);
       assert.equal(inspection.archiveBlockers.incomingUnanswered.requestIds.length, 5);
       assert.equal(inspection.archiveBlockers.incomingUnanswered.omitted, 2);
@@ -970,7 +971,7 @@ describe("AgentBroker end-to-end routing", () => {
         message: "This work may be abandoned by the owner.",
         priority: "low",
       });
-      assert.equal(broker.getSnapshot().unanswered, 1);
+      assert.equal(llmSnapshot(broker).unanswered, 1);
       await assert.rejects(broker.cancelRequest(request.correlationId, "short"), /at least 8/);
       await assert.rejects(broker.cancelRequest(request.correlationId, "🙂".repeat(300)), /1024 UTF-8 bytes/);
       const pendingReply = {
@@ -986,8 +987,8 @@ describe("AgentBroker end-to-end routing", () => {
         deliveryState: "queued" as const,
       };
       await broker.mailStore.reserveReply(pendingReply, request.envelope.id);
-      assert.equal(broker.getSnapshot().unanswered, 0, "a reply reservation is not still labelled unanswered");
-      const reservedInspection = broker.inspectAgent(request.envelope.to);
+      assert.equal(llmSnapshot(broker).unanswered, 0, "a reply reservation is not still labelled unanswered");
+      const reservedInspection = inspectLlm(broker, request.envelope.to);
       assert.equal(reservedInspection.unanswered, 0);
       assert.equal(reservedInspection.pendingReplies, 1);
       assert.equal(reservedInspection.archiveEligible, false);
@@ -996,7 +997,7 @@ describe("AgentBroker end-to-end routing", () => {
       });
       await assert.rejects(broker.cancelRequest(request.correlationId, "Cannot beat a reply reservation."), /pending delivery/);
       await broker.mailStore.markFailed(pendingReply.id, "Simulated reply delivery rollback.");
-      assert.equal(broker.getSnapshot().unanswered, 1);
+      assert.equal(llmSnapshot(broker).unanswered, 1);
 
       await assert.rejects(
         broker.cancelRequest(request.correlationId, "Owner abandoned this review."),
@@ -1009,8 +1010,8 @@ describe("AgentBroker end-to-end routing", () => {
       assert.equal(cancelled.cancelledBy, broker.mainAddress);
       assert.equal(cancelled.cancellationReason, "Owner abandoned this review after a scope violation.");
       assert.equal(cancelled.answeredAt, undefined, "administrative cancellation is not a fabricated reply");
-      assert.equal(broker.getSnapshot().unanswered, 0);
-      assert.equal(broker.inspectAgent(request.envelope.to).unanswered, 0);
+      assert.equal(llmSnapshot(broker).unanswered, 0);
+      assert.equal(inspectLlm(broker, request.envelope.to).unanswered, 0);
       assert.deepEqual(broker.fetchUnanswered(request.envelope.to), []);
 
       const joined = await broker.waitForReplies([request.correlationId], 0, true);
@@ -1030,7 +1031,7 @@ describe("AgentBroker end-to-end routing", () => {
       await broker.cancelRequest(request.correlationId, "Idempotent retry uses the original durable reason.");
       assert.equal(broker.mailStore.get(request.correlationId)?.cancellationReason, "Owner abandoned this review after a scope violation.");
       await broker.archive(request.envelope.to);
-      assert.equal(broker.inspectAgent(request.envelope.to).state, "archived");
+      assert.equal(inspectLlm(broker, request.envelope.to).state, "archived");
     } finally {
       await broker.shutdown();
     }
@@ -1052,7 +1053,7 @@ describe("AgentBroker end-to-end routing", () => {
       worker.record!.usage.turns = 2;
       worker.settle();
       await eventually(() => assert.equal(worker.prompts.length, 3));
-      assert.doesNotMatch(broker.inspectAgent(sent.envelope.to).failure ?? "", /IDENTITY_TURN_BUDGET/);
+      assert.doesNotMatch(inspectLlm(broker, sent.envelope.to).failure ?? "", /IDENTITY_TURN_BUDGET/);
 
       await worker.send({
         to: broker.mainAddress,
@@ -1063,8 +1064,8 @@ describe("AgentBroker end-to-end routing", () => {
       });
       worker.record!.usage.turns = 3;
       worker.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(sent.envelope.to).state, "idle"));
-      assert.equal(broker.getSnapshot().agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures ?? 0, 0);
+      await eventually(() => assert.equal(inspectLlm(broker, sent.envelope.to).state, "idle"));
+      assert.equal(llmSnapshot(broker).agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures ?? 0, 0);
     } finally { await broker.shutdown(); }
   });
 
@@ -1077,8 +1078,8 @@ describe("AgentBroker end-to-end routing", () => {
       const worker = settlement.workers[0]!;
       worker.prompt = async () => { throw new Error("enforcement prompt rejected"); };
       worker.settle();
-      await eventually(() => assert.equal(settlement.broker.inspectAgent(sent.envelope.to).state, "failed"));
-      assert.equal(settlement.broker.getSnapshot().agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures, 1);
+      await eventually(() => assert.equal(inspectLlm(settlement.broker, sent.envelope.to).state, "failed"));
+      assert.equal(llmSnapshot(settlement.broker).agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures, 1);
     } finally { await settlement.broker.shutdown(); }
 
     const resume = await setup();
@@ -1091,8 +1092,8 @@ describe("AgentBroker end-to-end routing", () => {
       const internal = resume.broker as unknown as { active: Set<string>; resumeEnforcement(address: string): Promise<void> };
       internal.active.delete(sent.envelope.to);
       await internal.resumeEnforcement(sent.envelope.to);
-      assert.equal(resume.broker.inspectAgent(sent.envelope.to).state, "failed");
-      assert.equal(resume.broker.getSnapshot().agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures, 1);
+      assert.equal(inspectLlm(resume.broker, sent.envelope.to).state, "failed");
+      assert.equal(llmSnapshot(resume.broker).agents.find((record) => record.address === sent.envelope.to)?.consecutiveFailures, 1);
     } finally { await resume.broker.shutdown(); }
   });
 
@@ -1108,7 +1109,7 @@ describe("AgentBroker end-to-end routing", () => {
       worker.emit({ type: "tool_lifecycle", phase: "start", toolCallId: "one", toolName: "read" });
       worker.emit({ type: "tool_lifecycle", phase: "end", toolCallId: "one", toolName: "read" });
       worker.emit({ type: "tool_lifecycle", phase: "start", toolCallId: "two", toolName: "read" });
-      await eventually(() => assert.match(toolHarness.broker.inspectAgent(worker.record!.address).failure ?? "", /IDENTITY_TOOL_BUDGET/));
+      await eventually(() => assert.match(inspectLlm(toolHarness.broker, worker.record!.address).failure ?? "", /IDENTITY_TOOL_BUDGET/));
     } finally { await toolHarness.broker.shutdown(); }
 
     const tokenHarness = await setup({
@@ -1121,7 +1122,7 @@ describe("AgentBroker end-to-end routing", () => {
       const worker = tokenHarness.workers[0]!;
       worker.record!.usage.input = 2;
       worker.settle();
-      await eventually(() => assert.match(tokenHarness.broker.inspectAgent(worker.record!.address).failure ?? "", /IDENTITY_TOKEN_BUDGET/));
+      await eventually(() => assert.match(inspectLlm(tokenHarness.broker, worker.record!.address).failure ?? "", /IDENTITY_TOKEN_BUDGET/));
     } finally { await tokenHarness.broker.shutdown(); }
 
     const turnHarness = await setup({
@@ -1134,13 +1135,13 @@ describe("AgentBroker end-to-end routing", () => {
       const first = turnHarness.workers[0]!;
       first.record!.usage.turns = 2;
       first.settle();
-      await eventually(() => assert.match(turnHarness.broker.inspectAgent(sent.envelope.to).failure ?? "", /IDENTITY_TURN_BUDGET/));
-      await eventually(() => assert.equal(turnHarness.broker.inspectAgent(sent.envelope.to).cleanup, undefined));
+      await eventually(() => assert.match(inspectLlm(turnHarness.broker, sent.envelope.to).failure ?? "", /IDENTITY_TURN_BUDGET/));
+      await eventually(() => assert.equal(inspectLlm(turnHarness.broker, sent.envelope.to).cleanup, undefined));
 
       await turnHarness.broker.restart(sent.envelope.to);
       const second = turnHarness.workers[1]!;
       second.fail("second terminal failure");
-      await eventually(() => assert.equal(turnHarness.broker.inspectAgent(sent.envelope.to).cleanup, undefined));
+      await eventually(() => assert.equal(inspectLlm(turnHarness.broker, sent.envelope.to).cleanup, undefined));
       await assert.rejects(turnHarness.broker.restart(sent.envelope.to), /circuit breaker is open.*2 consecutive terminal failures/is);
 
       await turnHarness.broker.stop(sent.envelope.to);
@@ -1167,15 +1168,15 @@ describe("AgentBroker end-to-end routing", () => {
         priority: "low",
       });
       workers[0]!.settle();
-      await eventually(() => assert.equal(broker.getSnapshot().agents[0]!.state, "idle"));
+      await eventually(() => assert.equal(llmSnapshot(broker).agents[0]!.state, "idle"));
       await broker.setEffort("worker.controls@gpt-5.4.com", "high");
-      assert.equal(broker.getSnapshot().agents[0]!.effort, "high");
+      assert.equal(llmSnapshot(broker).agents[0]!.effort, "high");
 
       await broker.stop("worker.controls@gpt-5.4.com");
-      assert.equal(broker.getSnapshot().agents[0]!.state, "stopped");
+      assert.equal(llmSnapshot(broker).agents[0]!.state, "stopped");
       await broker.restart("worker.controls@gpt-5.4.com");
       assert.equal(workers.length, 2);
-      assert.equal(broker.getSnapshot().agents[0]!.state, "idle");
+      assert.equal(llmSnapshot(broker).agents[0]!.state, "idle");
     } finally {
       await broker.shutdown();
     }

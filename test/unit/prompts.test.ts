@@ -18,7 +18,7 @@ import {
   sharedMailPrompt,
   subagentPrompt,
 } from "../../src/prompts.ts";
-import type { AgentRecord, EmailEnvelope, SubagentConfig } from "../../src/types.ts";
+import type { LlmAgentRecord as AgentRecord, EmailEnvelope, SubagentConfig } from "../../src/types.ts";
 
 const request: EmailEnvelope = {
   id: "mail_test",
@@ -35,6 +35,7 @@ const request: EmailEnvelope = {
 
 function record(): AgentRecord {
   return {
+    kind: "llm",
     address: "worker.change@gpt-5.6-sol.com",
     name: "worker",
     taskSlug: "change",

@@ -21,6 +21,7 @@ for (const fault of ["registry", "publication", "failure-finalization"] as const
     const session = SessionManager.inMemory(root);
     let armed = false;
     const record: AgentRecord = {
+      kind: "llm",
       address: `worker.acceptance@${model.id}.com`, name: "worker", taskSlug: "acceptance",
       provider: model.provider, modelId: model.id, effort: "off", tools: ["send_email", "fetch_emails"],
       state: "failed", failure: "Prior failure", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),

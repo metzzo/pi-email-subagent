@@ -1,3 +1,4 @@
+import { llmRecords } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,12 +17,13 @@ import {
   RegistryStore,
   parseRegistry,
 } from "../../src/registry-store.ts";
-import type { AgentRecord, BrokerRegistry } from "../../src/types.ts";
+import type { LlmAgentRecord as AgentRecord, BrokerRegistry } from "../../src/types.ts";
 import { emptyWorkState, MAX_ACTIVE_WORK, MAX_PATCH_BYTES, MAX_RECENT_WORK } from "../../src/work-ledger.ts";
 
 function record(address = "worker.registry@gpt-5.4.com"): AgentRecord {
   const now = new Date().toISOString();
   return {
+    kind: "llm",
     address,
     name: "worker",
     taskSlug: "registry",
@@ -56,7 +58,7 @@ describe("registry schema", () => {
     const store = new RegistryStore(join(root, "registry.json"));
     await store.save(registry());
     const restored = await store.load("main@gpt-5.4.com");
-    assert.equal(restored.agents[0]?.state, "archived");
+    assert.equal(llmRecords(restored.agents)[0]?.state, "archived");
   });
 
   it("removes its temporary file when a save rename fails", async () => {
@@ -71,15 +73,15 @@ describe("registry schema", () => {
     const legacy = registry() as unknown as { agents: Record<string, unknown>[] };
     legacy.agents[0]!.canSpawn = true;
     const parsed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
-    assert.equal(Object.hasOwn(parsed.agents[0]!, "canSpawn"), false);
-    assert.deepEqual(parsed.agents[0]?.work, emptyWorkState());
+    assert.equal(Object.hasOwn(llmRecords(parsed.agents)[0]!, "canSpawn"), false);
+    assert.deepEqual(llmRecords(parsed.agents)[0]?.work, emptyWorkState());
     legacy.agents[0]!.currentActivity = 'write {"content":"SENTINEL_SECRET"}';
     legacy.agents[0]!.activity = [{ at: new Date().toISOString(), kind: "tool", summary: 'edit {"newText":"SENTINEL_SECRET"}' }];
     const scrubbed = parseRegistry(JSON.parse(JSON.stringify(legacy)));
     assert.doesNotMatch(JSON.stringify(scrubbed), /SENTINEL_SECRET/);
     delete legacy.agents[0]!.lifecycle;
     const lifecycleLegacy = parseRegistry(JSON.parse(JSON.stringify(legacy)));
-    assert.deepEqual(lifecycleLegacy.agents[0]?.lifecycle, DEFAULT_LIFECYCLE);
+    assert.deepEqual(llmRecords(lifecycleLegacy.agents)[0]?.lifecycle, DEFAULT_LIFECYCLE);
   });
 
   it("rejects restored semantic and display fields that bypass configured bounds", () => {
@@ -108,16 +110,16 @@ describe("registry schema", () => {
       runSlotHeld: true,
     };
     const parsed = parseRegistry({ ...registry(), agents: [base] });
-    assert.deepEqual(parsed.agents[0]?.workerEpoch, base.workerEpoch);
+    assert.deepEqual(llmRecords(parsed.agents)[0]?.workerEpoch, base.workerEpoch);
 
     const legacy = record();
     const legacyParsed = parseRegistry({ ...registry(), agents: [legacy] });
-    assert.equal(legacyParsed.agents[0]?.workerEpoch, undefined);
+    assert.equal(llmRecords(legacyParsed.agents)[0]?.workerEpoch, undefined);
     const legacyVerified = parseRegistry({
       ...registry(),
       agents: [{ ...base, workerEpoch: { ...base.workerEpoch, phase: "verified-clean", runSlotHeld: false } }],
     });
-    assert.equal(legacyVerified.agents[0]?.workerEpoch?.phase, "session-settled");
+    assert.equal(llmRecords(legacyVerified.agents)[0]?.workerEpoch?.phase, "session-settled");
 
     for (const workerEpoch of [
       { ...base.workerEpoch, generation: 0 },
@@ -150,11 +152,11 @@ describe("registry schema", () => {
       source: "operator-attested",
     };
     const parsed = parseRegistry({ ...registry(), agents: [base] });
-    assert.equal(parsed.agents[0]?.workerEpoch?.phase, "session-settled");
-    assert.equal(parsed.agents[0]?.state, "failed");
-    assert.equal(Object.hasOwn(parsed.agents[0]!, "lastCleanupRecovery"), false);
-    assert.match(parsed.agents[0]?.failure ?? "", /legacy operator cleanup release.*not Pi session settlement.*OS-process proof/i);
-    assert.doesNotMatch(JSON.stringify(parsed.agents[0]), /secret-value|operator-attested/i);
+    assert.equal(llmRecords(parsed.agents)[0]?.workerEpoch?.phase, "session-settled");
+    assert.equal(llmRecords(parsed.agents)[0]?.state, "failed");
+    assert.equal(Object.hasOwn(llmRecords(parsed.agents)[0]!, "lastCleanupRecovery"), false);
+    assert.match(llmRecords(parsed.agents)[0]?.failure ?? "", /legacy operator cleanup release.*not Pi session settlement.*OS-process proof/i);
+    assert.doesNotMatch(JSON.stringify(llmRecords(parsed.agents)[0]), /secret-value|operator-attested/i);
 
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: undefined }] }), /operator-released.*audit/i);
     assert.throws(() => parseRegistry({ ...registry(), agents: [{ ...base, lastCleanupRecovery: { ...base.lastCleanupRecovery, source: "Pi-verified" } }] }), /operator-attested/i);
@@ -179,7 +181,7 @@ describe("registry schema", () => {
       detail: "Pi session/tool cleanup did not settle before the caller deadline.",
     };
     const parsed = parseRegistry({ ...registry(), agents: [base] });
-    assert.deepEqual((parsed.agents[0] as any).cleanup, (base as any).cleanup);
+    assert.deepEqual((llmRecords(parsed.agents)[0] as any).cleanup, (base as any).cleanup);
 
     for (const cleanup of [
       { ...(base as any).cleanup, state: "verified" },
@@ -217,7 +219,7 @@ describe("registry schema", () => {
       }],
     };
     const parsed = parseRegistry({ ...registry(), agents: [base] });
-    assert.deepEqual(parsed.agents[0]?.work, base.work);
+    assert.deepEqual(llmRecords(parsed.agents)[0]?.work, base.work);
 
     for (const item of [
       { ...base.work.recent[0], attribution: "explicit" },
@@ -237,8 +239,8 @@ describe("registry schema", () => {
     };
     base.work = { ...emptyWorkState(), recent: Array.from({ length: MAX_RECENT_WORK + 20 }, (_, index) => ({ ...item, toolCallId: `id${index}` })) } as never;
     const parsed = parseRegistry({ ...registry(), agents: [base] });
-    assert.equal(parsed.agents[0]!.work!.recent.length, MAX_RECENT_WORK);
-    assert.ok(Buffer.byteLength(parsed.agents[0]!.work!.recent[0]!.patchPreview!, "utf8") <= MAX_PATCH_BYTES);
+    assert.equal(llmRecords(parsed.agents)[0]!.work!.recent.length, MAX_RECENT_WORK);
+    assert.ok(Buffer.byteLength(llmRecords(parsed.agents)[0]!.work!.recent[0]!.patchPreview!, "utf8") <= MAX_PATCH_BYTES);
     base.work = { ...emptyWorkState(), active: Array.from({ length: MAX_ACTIVE_WORK + 1 }, (_, index) => ({ ...item, toolCallId: `active${index}`, status: "running", endedAt: undefined })), recent: [] } as never;
     assert.throws(() => parseRegistry({ ...registry(), agents: [base] }), /active exceeds the 64-item safety bound/);
     base.work = { ...emptyWorkState(), active: [{ ...item, status: "running", endedAt: undefined }], recent: [item] } as never;

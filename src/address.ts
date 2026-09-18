@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { ModelBinding, ParsedAddress } from "./types.ts";
+import { assertUnreservedModel } from "./mechanistic.ts";
 
 const SEGMENT = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const MODEL_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,126}[a-z0-9])?$/;
@@ -48,6 +49,7 @@ export class ModelCatalog {
 
   constructor(models: readonly Model<any>[]) {
     for (const model of models) {
+      assertUnreservedModel(model.id);
       if (!isEmailModelId(model.id)) continue;
       const key = model.id.toLowerCase();
       const entries = this.byId.get(key) ?? [];
@@ -83,6 +85,7 @@ export class ModelCatalog {
   }
 
   resolveBound(binding: ModelBinding): Model<any> {
+    assertUnreservedModel(binding.modelId);
     const matches = (this.byId.get(binding.modelId.toLowerCase()) ?? [])
       .filter((model) => model.provider === binding.provider);
     if (matches.length === 1) return matches[0]!;
@@ -146,7 +149,7 @@ export function parseSubagentAddressShape(input: string): SubagentAddressShape {
 
 function parsedFrom(shape: SubagentAddressShape, model: Model<any>): ParsedAddress {
   const canonical = `${shape.name}.${shape.taskSlug}@${model.id.toLowerCase()}.com`;
-  return { address: canonical, name: shape.name, taskSlug: shape.taskSlug, modelId: model.id, model };
+  return { kind: "llm", address: canonical, name: shape.name, taskSlug: shape.taskSlug, modelId: model.id, model };
 }
 
 export function parseNewSubagentAddress(
@@ -178,6 +181,7 @@ export function parseLegacySubagentAddress(input: string, catalog: ModelCatalog)
 }
 
 export function makeMainAddress(modelId: string): string {
+  assertUnreservedModel(modelId);
   const normalized = modelId.trim().toLowerCase();
   if (!MODEL_DOMAIN.test(normalized)) {
     throw new AddressError(`Model "${modelId}" cannot be represented as a main email address.`);

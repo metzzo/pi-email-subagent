@@ -1,6 +1,6 @@
 import { isEmailModelId } from "./address.ts";
 import { isConfiguredWritable } from "./capability.ts";
-import type { AgentRecord, EmailEnvelope, IdentityBudgetPolicy, SubagentConfig } from "./types.ts";
+import type { LlmAgentRecord as AgentRecord, EmailEnvelope, IdentityBudgetPolicy, SubagentConfig } from "./types.ts";
 import { DEFAULT_CONFIG, DEFAULT_MODEL_POLICY, isSafeConfigSemanticText, resolveAgentProfile } from "./config.ts";
 import { makeReplySubject } from "./reply.ts";
 
@@ -183,6 +183,12 @@ export function effectiveRoleToolSummary(config: SubagentConfig): string {
   return lines.join("\n");
 }
 
+export function mechanisticPrompt(config: SubagentConfig, caller: "main" | "llm"): string {
+  const programs = Object.values(config.mechanisticPrograms).filter((program) => program.allowedCallers.includes(caller));
+  if (!programs.length) return "";
+  return `\nConfigured send-only Python programs (trusted code, not sandboxed):\n${programs.map((program) => `- ${program.key}.<task-slug>@mechanistic.com`).join("\n")}\nUse send_email with a program's documented JSON input as a new notification (requires_response omitted or false). No reply_to, legacy reply, completion, effort, inbox, or script follow-up exists. One accepted ID is one job; high changes queue order only. Outcomes are non-correlated notifications to main, never response obligations. LLM-to-LLM nested delegation remains unsupported.\n`;
+}
+
 export function mainCoordinatorPrompt(
   address: string,
   modelId: string,
@@ -207,7 +213,7 @@ Main-only tools: \`inspect_agent\`, \`wait_for_replies\`, \`cancel_request\`, \`
 6. Reuse an identity only for the same continuing feature/worktree/review cycle. Stop does not free its lease; cancel only user-abandoned inactive requests; archive only after blockers clear.
 
 ${capabilitySummary}
-
+${effectiveConfig ? mechanisticPrompt(effectiveConfig, "main") : ""}
 Current unanswered main-thread requests: ${unanswered}.
 `;
 }
@@ -218,6 +224,7 @@ export function subagentPrompt(
   modelIds: readonly string[],
   modelPolicy: string = DEFAULT_MODEL_POLICY,
   budgets: IdentityBudgetPolicy = DEFAULT_CONFIG.budgets,
+  mechanistic: string = "",
 ): string {
   const role = record.instructions ? `\nRole instructions:\n${record.instructions}\n` : "";
   return `${sharedMailPrompt({ address: record.address, modelId: record.modelId, effort: record.effort }, modelIds, modelPolicy)}
@@ -227,6 +234,7 @@ Task slug: \`${record.taskSlug}\` · main: \`${mainAddress}\`
 Lifecycle: spawn ${record.lifecycle.spawnTimeoutMs}ms · prompt ${record.lifecycle.promptAcceptanceTimeoutMs}ms · run ${record.lifecycle.runTimeoutMs}ms · idle ${record.lifecycle.idleTimeoutMs}ms · cleanup ${record.lifecycle.abortTimeoutMs + record.lifecycle.disposeTimeoutMs}ms
 Per-run budgets: ${budgets.maxTurns} turns · ${budgets.maxToolCalls} tool calls · ${budgets.maxTokens} input+output tokens. Current cumulative identity usage: ${record.usage.turns} turns · ${record.usage.input + record.usage.output} tokens. Circuit breaker: ${record.consecutiveFailures ?? 0}/${budgets.maxConsecutiveFailures} consecutive terminal failures.
 ${role}
+${mechanistic}
 1. Nested delegation is unsupported; complete assigned work yourself or report a concrete blocker to main.
 2. Read all fetched requests before choosing work, handle high priority first, and preserve the requested objective/scope/constraints/deliverables.
 3. Authorized implementation means make the changes and run appropriate validation; a read-only request forbids edits.

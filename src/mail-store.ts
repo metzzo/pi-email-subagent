@@ -3,11 +3,14 @@ import { chmod, mkdir, open, readFile, rename, unlink, writeFile, type FileHandl
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseSubagentAddressShape } from "./address.ts";
+import { assertUnreservedModel, isMechanisticAddress, parseMechanisticBinding } from "./mechanistic.ts";
 import { isThinkingLevel, LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
-import type { EmailEnvelope, LifecyclePolicy, ModelBinding, ReplyCompletion, ReplyStatus } from "./types.ts";
+import type { EmailEnvelope, LifecyclePolicy, MechanisticJob, ModelBinding, ReplyCompletion, ReplyStatus } from "./types.ts";
+import { parseJob } from "./mechanistic-job.ts";
 import { byteLength, clone, nowIso } from "./util.ts";
 
 export type MailEvent =
+  | { type: "job.queued" | "job.updated" | "job.terminal" | "job.snapshot"; job: MechanisticJob; email?: EmailEnvelope }
   | { type: "email.created"; email: EmailEnvelope }
   | { type: "email.delivered"; id: string; at: string }
   | { type: "email.failed"; id: string; at: string; error: string }
@@ -36,6 +39,7 @@ function parseModelBinding(value: unknown, recipient: string): ModelBinding | un
   const raw = object(value, "email.modelBindingIntent");
   const provider = string(raw.provider, "email.modelBindingIntent.provider");
   const modelId = string(raw.modelId, "email.modelBindingIntent.modelId");
+  assertUnreservedModel(modelId);
   if (!provider.trim()) throw new Error("email.modelBindingIntent.provider must be a non-empty string.");
   if (!modelId.trim()) throw new Error("email.modelBindingIntent.modelId must be a non-empty string.");
   let recipientModelId: string;
@@ -126,6 +130,15 @@ function parseEmail(value: unknown): EmailEnvelope {
     const parsed = optionalString(raw[key], label);
     if (parsed !== undefined) (email as unknown as Record<string, unknown>)[key] = parsed;
   }
+  if (raw.mechanisticBindingIntent !== undefined) {
+    const binding = parseMechanisticBinding(raw.mechanisticBindingIntent);
+    if (!isMechanisticAddress(email.to) || parseSubagentAddressShape(email.to).name !== binding.key) throw new Error("Mechanistic binding does not match recipient.");
+    email.mechanisticBindingIntent = binding;
+  }
+  if ((isMechanisticAddress(email.to) || isMechanisticAddress(email.from))
+    && (email.requiresResponse || email.kind !== "notification" || raw.inReplyTo !== undefined || raw.completion !== undefined)) {
+    throw new Error("Mechanistic mail must be a new send-only notification.");
+  }
   const completion = parseReplyCompletion(raw.completion);
   if (completion) email.completion = completion;
   const lifecycleIntent = parseLifecycle(raw.lifecycleIntent, "email.lifecycleIntent");
@@ -156,6 +169,9 @@ function parseEmail(value: unknown): EmailEnvelope {
 export function parseMailEvent(value: unknown): MailEvent {
   const raw = object(value, "mail event");
   const type = string(raw.type, "mail event.type");
+  if (type === "job.queued" || type === "job.updated" || type === "job.terminal" || type === "job.snapshot") {
+    return { type, job: parseJob(raw.job), ...(raw.email === undefined ? {} : { email: parseEmail(raw.email) }) };
+  }
   if (type === "email.created") return { type, email: parseEmail(raw.email) };
   if (type === "email.delivered") {
     return { type, id: string(raw.id, "mail event.id"), at: string(raw.at, "mail event.at") };
@@ -212,7 +228,8 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent)
     && left.effortIntent === right.effortIntent
     && left.modelBindingIntent?.provider === right.modelBindingIntent?.provider
-    && left.modelBindingIntent?.modelId === right.modelBindingIntent?.modelId;
+    && left.modelBindingIntent?.modelId === right.modelBindingIntent?.modelId
+    && JSON.stringify(left.mechanisticBindingIntent) === JSON.stringify(right.mechanisticBindingIntent);
 }
 
 // Rewrite the journal as a snapshot once it grows past this many events.
@@ -227,6 +244,7 @@ class MailJournalPoisonError extends Error {
 
 export class MailStore {
   private readonly emails = new Map<string, EmailEnvelope>();
+  private readonly jobs = new Map<string, MechanisticJob>();
   private writeChain: Promise<void> = Promise.resolve();
   private poison?: MailJournalPoisonError;
   private maintenancePromise?: Promise<boolean>;
@@ -301,6 +319,18 @@ export class MailStore {
 
   private apply(event: MailEvent): void {
     this.eventCount += 1;
+    if ("job" in event) {
+      const { job } = event;
+      if (event.email) this.apply({ type: "email.created", email: event.email });
+      const trigger = this.emails.get(job.id);
+      if (!trigger || trigger.to !== job.address || !trigger.mechanisticBindingIntent) throw new Error("Job trigger/binding missing from journal.");
+      if (event.type === "job.queued" && (job.phase !== "queued" || event.email?.id !== job.id || this.jobs.has(job.id))) throw new Error("Invalid queued job event.");
+      if (event.type === "job.terminal" && (job.phase !== "terminal" || !event.email || event.email.id !== job.outcomeMailId || event.email.kind !== "notification" || event.email.inReplyTo || event.email.requiresResponse)) throw new Error("Invalid job outcome notification.");
+      if (event.type === "job.updated") this.assertJobTransition(job);
+      if (job.phase !== "queued" && trigger.deliveryState === "queued") this.apply({ type: "email.delivered", id: job.id, at: job.updatedAt });
+      this.jobs.set(job.id, clone(job));
+      return;
+    }
     if (event.type === "email.created") {
       const existing = this.emails.get(event.email.id);
       if (existing && !sameCreatedEmail(existing, event.email)) throw new Error(`Conflicting duplicate email ${event.email.id}.`);
@@ -472,6 +502,57 @@ export class MailStore {
     });
   }
 
+  async acceptJob(email: EmailEnvelope, job: MechanisticJob): Promise<void> {
+    const parsed = parseJob(job);
+    await this.transact(() => {
+      if (this.emails.has(email.id) || this.jobs.has(job.id)) throw new Error("Job already accepted; never resend.");
+      if (email.id !== job.id || email.to !== job.address || parsed.phase !== "queued") throw new Error("Invalid job acceptance.");
+      return [{ type: "job.queued", email: parseEmail(email), job: parsed }];
+    });
+  }
+
+  private assertJobTransition(job: MechanisticJob): void {
+    const prior = this.jobs.get(job.id);
+    if (!prior || prior.phase === "terminal" || job.phase === "queued"
+      || prior.address !== job.address || JSON.stringify(prior.binding) !== JSON.stringify(job.binding)
+      || (prior.phase === "queued" && job.phase !== "starting")
+      || (prior.phase !== "queued" && prior.generation !== job.generation)
+      || (prior.phase === "running" && job.phase === "starting")
+      || (prior.phase === "stopping" && job.phase !== "stopping" && job.phase !== "terminal")) throw new Error("Invalid durable job transition; started jobs cannot replay.");
+  }
+
+  async updateJob(job: MechanisticJob): Promise<void> {
+    const parsed = parseJob(job);
+    await this.transact(() => {
+      this.assertJobTransition(parsed);
+      if (parsed.phase === "terminal") throw new Error("Terminal persistence must include the stable outcome notification.");
+      return [{ type: "job.updated", job: parsed }];
+    });
+  }
+
+  async finishJob(job: MechanisticJob, outcome: EmailEnvelope): Promise<void> {
+    const parsed = parseJob(job); const email = parseEmail(outcome);
+    await this.transact(() => {
+      const prior = this.jobs.get(job.id);
+      if (prior?.phase === "terminal") {
+        if (prior.outcomeMailId !== email.id) throw new Error("Conflicting job outcome ID.");
+        return [];
+      }
+      this.assertJobTransition(parsed);
+      if (parsed.phase !== "terminal" || parsed.outcomeMailId !== email.id || email.kind !== "notification" || email.requiresResponse || email.inReplyTo) throw new Error("Invalid outcome.");
+      return [{ type: "job.terminal", job: parsed, email }];
+    });
+  }
+
+  getJob(id: string): MechanisticJob | undefined {
+    const job = this.jobs.get(id);
+    return job ? { ...clone(job), ...(job.outcomeMailId ? { outcomeDeliveryState: this.emails.get(job.outcomeMailId)?.deliveryState } : {}) } : undefined;
+  }
+
+  listJobs(address?: string): MechanisticJob[] {
+    return [...this.jobs.values()].filter((job) => !address || job.address === address).map((job) => this.getJob(job.id)!);
+  }
+
   async reserveReply(reply: EmailEnvelope, originalId: string): Promise<void> {
     await this.transact(() => {
       if (this.emails.has(reply.id)) throw new Error(`Email ${reply.id} already exists.`);
@@ -609,7 +690,14 @@ export class MailStore {
       if (email.inReplyTo && this.emails.has(email.inReplyTo)) keep.add(email.inReplyTo);
       if (email.answeredBy && this.emails.has(email.answeredBy)) keep.add(email.answeredBy);
       if (email.replyReservedBy && this.emails.has(email.replyReservedBy)) keep.add(email.replyReservedBy);
+      for (const job of this.jobs.values()) {
+        if (job.id === email.id && job.outcomeMailId) keep.add(job.outcomeMailId);
+        if (job.outcomeMailId === email.id) keep.add(job.id);
+      }
     };
+    for (const job of this.jobs.values()) {
+      if (job.phase !== "terminal") keep.add(job.id);
+    }
     for (const email of all) {
       const open = email.deliveryState === "queued"
         || (email.requiresResponse && email.deliveryState === "delivered" && !email.answeredAt)
@@ -651,10 +739,17 @@ export class MailStore {
   }
 
   private async rewriteSnapshot(emails: readonly EmailEnvelope[]): Promise<void> {
-    const events: MailEvent[] = emails.map((email) => ({ type: "email.created", email: clone(email) }));
+    const retainedIds = new Set(emails.map((email) => email.id));
+    const jobs = [...this.jobs.values()].filter((job) => retainedIds.has(job.id));
+    const events: MailEvent[] = [
+      ...emails.map((email): MailEvent => ({ type: "email.created", email: clone(email) })),
+      ...jobs.map((job): MailEvent => ({ type: "job.snapshot", job: clone(job) })),
+    ];
     const payload = events.length > 0 ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n` : "";
     await this.replaceJournal(payload);
     this.emails.clear();
+    this.jobs.clear();
+    for (const job of jobs) this.jobs.set(job.id, clone(job));
     for (const email of emails) this.emails.set(email.id, clone(email));
     this.eventCount = events.length;
   }

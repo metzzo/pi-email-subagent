@@ -5,7 +5,7 @@ import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-a
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { ConversationComponent, conversationBlocks, DashboardComponent, formatConversationTranscript, UIController, WorkDiffComponent } from "../../src/ui.ts";
 import { emptyWorkState, finishWorkItem, startWorkItem } from "../../src/work-ledger.ts";
-import type { AgentRecord, BrokerSnapshot } from "../../src/types.ts";
+import type { LlmAgentRecord as AgentRecord, BrokerSnapshot } from "../../src/types.ts";
 
 const fakeTheme = {
   fg: (_color: string, text: string) => text,
@@ -18,6 +18,7 @@ const TEST_CAPACITY = { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 1, 
 function record(): AgentRecord {
   const now = new Date().toISOString();
   return {
+    kind: "llm",
     address: "reviewer.a-very-long-security-audit-task@gpt-5.4-mini.com",
     name: "reviewer",
     taskSlug: "a-very-long-security-audit-task",
@@ -114,6 +115,7 @@ describe("dashboard rendering", () => {
       capacity: { identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 0, runSlotsLimit: 1 },
     } as BrokerSnapshot;
     const inspection = {
+      kind: "llm",
       state: "stopped",
       holdsActivationLease: true,
       capacity: snapshot.capacity,
@@ -196,6 +198,7 @@ describe("dashboard rendering", () => {
       capacity: { identitiesUsed: 1, identitiesLimit: 8, runSlotsUsed: 0, runSlotsLimit: 4 },
     } as BrokerSnapshot;
     const inspection = {
+      kind: "llm",
       state: "failed",
       holdsActivationLease: true,
       capacity: snapshot.capacity,
@@ -245,6 +248,7 @@ describe("dashboard rendering", () => {
     agent.activity.push({ at: new Date().toISOString(), kind: "status", summary: "Agent run failed" }); agent.work = emptyWorkState();
     const snapshot = { mainAddress: "main@test", agents: [agent], unanswered: 0, queuedMail: 0, capacity: TEST_CAPACITY };
     const inspection = {
+      kind: "llm",
       state: "failed", holdsActivationLease: true, capacity: TEST_CAPACITY, queued: 0, unanswered: 0,
       pendingReplies: 0, archiveEligible: false,
       archiveBlockers: {

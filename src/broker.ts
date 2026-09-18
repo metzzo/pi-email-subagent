@@ -29,7 +29,7 @@ import { MailStore } from "./mail-store.ts";
 import { isCorrelatedMainReply as correlatedMainReply } from "./main-mail-routing.ts";
 import { ProviderReadinessError } from "./model-runtime.ts";
 import { NamespaceLock } from "./namespace-lock.ts";
-import { budgetPromptAdditions, enforcementPrompt, formatEmail, formatEmailBatch, modelInputTokenBudget, subagentPrompt } from "./prompts.ts";
+import { budgetPromptAdditions, enforcementPrompt, formatEmail, formatEmailBatch, modelInputTokenBudget, subagentPrompt, mechanisticPrompt } from "./prompts.ts";
 import { RegistryStore } from "./registry-store.ts";
 import { looksLikeReply, makeReplySubject, parseReplySubject } from "./reply.ts";
 import { SlidingWindowRateLimiter } from "./rate-limit.ts";
@@ -42,7 +42,13 @@ import type {
   AgentArchiveBlockers,
   AgentCapacitySnapshot,
   AgentInspection,
-  AgentRecord,
+  LlmAgentRecord as AgentRecord,
+  AgentRecord as RegisteredAgent,
+  MechanisticAgentRecord,
+  MechanisticCaller,
+  MechanisticJob,
+  MechanisticProgram,
+  MechanisticAgentInspection,
   CleanupDiagnostic,
   DeliveryUncertainty,
   BrokerOptions,
@@ -68,6 +74,9 @@ import type {
 import { byteLength, clone, nowIso, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 import { isInactiveWorkerState, workerCleanupDeadline } from "./worker-lifecycle.ts";
+import { isMechanisticAddress, preflightMechanisticBinding, sameMechanisticBinding, PROTOCOL_BYTES } from "./mechanistic.ts";
+import { outcomeText } from "./mechanistic-job.ts";
+import { PythonProcess, type PythonOutcome } from "./python-process.ts";
 
 export const MAX_REPLY_WAIT_MS = MAX_REPLY_WAIT_SECONDS * 1_000;
 export const MAX_CANCELLATION_REASON_BYTES = 1_024;
@@ -270,7 +279,10 @@ interface RunBudgetState {
   tripped: boolean;
 }
 
+interface MechanisticAuthority { kind: "mechanistic"; address: string; process: PythonProcess; jobId: string }
+
 interface WorkerMailboxAuthority {
+  kind?: "llm";
   address: string;
   worker: WorkerTransport;
   generation: number;
@@ -291,6 +303,9 @@ export class AgentBroker {
 
   private registry?: BrokerRegistry;
   private readonly records = new Map<string, AgentRecord>();
+  private readonly mechanisticRecords = new Map<string, MechanisticAgentRecord>();
+  private readonly pythonProcesses = new Map<string, PythonProcess>();
+  private readonly pythonRuns = new Map<string, Promise<void>>();
   private readonly routableRecords = new Set<string>();
   private readonly workers = new Map<string, WorkerTransport>();
   private readonly workerUnsubscribers = new Map<string, () => void>();
@@ -340,6 +355,7 @@ export class AgentBroker {
     this.mailStore = new MailStore(join(options.namespaceDir, "mail.jsonl"));
     this.registryStore = new RegistryStore(join(options.namespaceDir, "registry.json"));
     this.catalog = new ModelCatalog(options.models);
+    if ([options.mainAdapter.getAddress(), ...options.mainAdapter.getAliases()].some(isMechanisticAddress)) throw new Error("mechanistic.com is reserved; main identity collision.");
     this.mainRouting = {
       address: options.mainAdapter.getAddress().toLowerCase(),
       ...(options.preferredProvider ? { preferredProvider: options.preferredProvider } : {}),
@@ -400,11 +416,15 @@ export class AgentBroker {
 
       this.nextWorkerGeneration = this.registry.agents.reduce((maximum, record) => Math.max(
         maximum,
-        record.workerEpoch?.generation ?? 0,
-        record.cleanup?.workerGeneration ?? 0,
+        record.kind === "llm" ? record.workerEpoch?.generation ?? 0 : 0,
+        record.kind === "llm" ? record.cleanup?.workerGeneration ?? 0 : 0,
       ), this.nextWorkerGeneration);
       const startupFailures: string[] = [];
       for (const loaded of this.registry.agents) {
+        if (loaded.kind === "mechanistic") {
+          this.mechanisticRecords.set(loaded.address, clone(loaded));
+          continue;
+        }
         const shape = parseSubagentAddressShape(loaded.address);
         let record = clone(loaded);
         sanitizePersistedRecordErrors(record);
@@ -453,9 +473,12 @@ export class AgentBroker {
         this.records.set(record.address, record);
       }
 
+      await this.restoreMechanisticJobs();
+
       // Mail acceptance precedes first worker persistence. Recover a recipient
       // record when a crash leaves durable queued mail but no registry entry.
       for (const email of this.mailStore.list()) {
+        if (isMechanisticAddress(email.to)) continue;
         if (email.deliveryState !== "queued" || this.isMainIdentity(email.to) || this.records.has(email.to)) continue;
         const shape = parseSubagentAddressShape(email.to);
         try {
@@ -572,6 +595,11 @@ export class AgentBroker {
           record.updatedAt = nowIso();
         }
       }
+      for (const record of this.mechanisticRecords.values()) {
+        if (this.activationLeases.has(record.address) && !["stopped", "failed", "archived"].includes(record.state)) {
+          swallow(this.trackInFlight(this.scheduleMechanistic(record.address), `schedule-python:${record.address}`));
+        }
+      }
       this.publish();
       for (const failure of startupFailures) this.options.mainAdapter.notifyFailure(failure);
       this.scheduleMailMaintenance();
@@ -597,6 +625,233 @@ export class AgentBroker {
       }
       throw error;
     }
+  }
+
+  private assertMailAuthority(authority: WorkerMailboxAuthority | MechanisticAuthority): void {
+    if (authority.kind !== "mechanistic") { this.assertWorkerMailboxAuthority(authority); return; }
+    const job = this.mailStore.getJob(authority.jobId);
+    if (this.disposed || this.pythonProcesses.get(authority.address) !== authority.process
+      || job?.address !== authority.address || (job.phase !== "starting" && job.phase !== "running")) throw new Error("Stale mechanistic process send authority.");
+  }
+
+  private mechanisticProgram(address: string): MechanisticProgram {
+    const shape = parseSubagentAddressShape(address);
+    const program = this.options.config.mechanisticPrograms[shape.name];
+    if (!program) throw new Error(`Unknown or removed mechanistic program ${shape.name}; no email was accepted.`);
+    const existing = this.mechanisticRecords.get(address);
+    if (existing && !sameMechanisticBinding(existing.binding, program)) throw new Error(`Mechanistic binding for ${address} is unavailable; restore its trusted configuration. No rebind was performed.`);
+    preflightMechanisticBinding(program);
+    return program;
+  }
+
+  private async restoreMechanisticJobs(): Promise<void> {
+    for (const job of this.mailStore.listJobs()) {
+      this.nextWorkerGeneration = Math.max(this.nextWorkerGeneration, job.generation ?? 0);
+      let record = this.mechanisticRecords.get(job.address);
+      if (!record) {
+        const shape = parseSubagentAddressShape(job.address);
+        record = { kind: "mechanistic", address: job.address, name: shape.name, taskSlug: shape.taskSlug, binding: clone(job.binding), allowedCallers: [...job.allowedCallers], lifecycle: clone(job.lifecycle), state: "idle", createdAt: job.createdAt, updatedAt: nowIso() };
+        this.mechanisticRecords.set(record.address, record);
+      }
+      if (!sameMechanisticBinding(record.binding, job.binding)) throw new Error("Durable mechanistic binding collision between registry and journal.");
+      if (job.phase !== "queued" && job.phase !== "terminal") {
+        await this.finishMechanistic(job, { result: "interrupted", reported: job.reported, progress: job.progress, stderr: job.stderr, cleanup: { state: "cleanup-unknown", childExited: false, pipesClosed: false, boundary: "direct-child-only", detail: "Owner lost after durable start claim; no exact direct-child cleanup proof. Never replay this job." } });
+      }
+      const current = this.mailStore.getJob(job.id)!;
+      if (current.cleanup?.state === "cleanup-unknown" && (!record.cleanupResolvedAt || record.cleanupResolvedAt < current.updatedAt)) {
+        record.cleanupUnknown = true; record.state = "failed";
+      }
+    }
+    for (const record of this.mechanisticRecords.values()) {
+      try { this.mechanisticProgram(record.address); }
+      catch (error) { record.state = record.state === "archived" ? "archived" : "failed"; record.failure = errorMessage(error); }
+      if (record.state === "archived") continue;
+      if (this.activeIdentityCount() < this.options.config.maxAgents) this.activationLeases.add(record.address);
+      else if (!["stopped", "failed"].includes(record.state)) record.state = "paused";
+      if (["running", "spawning", "queued"].includes(record.state)) record.state = "idle";
+    }
+  }
+
+  private async sendMechanistic(sender: string, input: SendEmailInput, signal?: AbortSignal, authority?: WorkerMailboxAuthority | MechanisticAuthority): Promise<SendEmailResult> {
+    const shape = parseSubagentAddressShape(input.to);
+    if (this.sameIdentity(sender, shape.address)) throw new Error("Sending email to yourself is not supported.");
+    let envelope!: EmailEnvelope; let spawned = false; let acquired = false;
+    try {
+      await this.withAddressOperation(shape.address, async () => {
+        const program = this.mechanisticProgram(shape.address);
+        const caller: MechanisticCaller = this.isMainIdentity(sender) ? "main" : this.mechanisticRecords.has(sender) ? "mechanistic" : "llm";
+        if (!program.allowedCallers.includes(caller)) throw new Error(`Mechanistic program ${program.key} does not authorize ${caller} callers.`);
+        const existing = this.mechanisticRecords.get(shape.address);
+        if (input.lifecycle !== undefined && existing) throw new Error("Lifecycle overrides apply only to an unknown identity.");
+        const lifecycle = existing?.lifecycle ?? resolveLifecycle(this.options.config, shape.address, shape.name, input.lifecycle);
+        if (!this.activationLeases.has(shape.address)) {
+          if (this.activeIdentityCount() >= this.options.config.maxAgents) throw new Error(this.capacityFullDiagnostic(caller === "main"));
+          this.activationLeases.add(shape.address); acquired = true;
+        }
+        const binding = { key: program.key, python: program.python, script: program.script, cwd: program.cwd };
+        envelope = { id: createMailId(), from: sender, to: shape.address, subject: input.subject!.trim(), message: input.message, priority: input.priority, kind: "notification", requiresResponse: false, createdAt: nowIso(), deliveryState: "queued", mechanisticBindingIntent: binding, lifecycleIntent: clone(lifecycle) };
+        this.validateDeliverySize(envelope);
+        if (byteLength(`${JSON.stringify({ v: 1, type: "invoke", jobId: envelope.id, mainAddress: this.mainAddress, envelope })}\n`) > PROTOCOL_BYTES) throw new Error("Mechanistic invocation exceeds the 64 KiB protocol line bound.");
+        const job: MechanisticJob = { id: envelope.id, address: shape.address, binding, allowedCallers: [...program.allowedCallers], lifecycle: clone(lifecycle), phase: "queued", createdAt: envelope.createdAt, updatedAt: envelope.createdAt, stderr: "" };
+        await this.withMailAdmission(async () => {
+          this.validateQueueCapacity(shape.address, input);
+          if (authority) this.assertMailAuthority(authority);
+          if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
+          this.takeRateQuota(sender);
+          await this.mailStore.acceptJob(envelope, job);
+        });
+        spawned = !existing;
+        if (!existing) this.mechanisticRecords.set(shape.address, { kind: "mechanistic", address: shape.address, name: shape.name, taskSlug: shape.taskSlug, binding, allowedCallers: [...program.allowedCallers], lifecycle, state: "queued", createdAt: envelope.createdAt, updatedAt: envelope.createdAt });
+        else if (existing.state === "archived") existing.state = "queued";
+        await this.persistRegistry();
+      });
+    } catch (error) {
+      if (envelope && this.mailStore.get(envelope.id)) throw new EmailProtocolError("EMAIL_DELIVERY_FAILED", `Email ${envelope.id} was accepted; bookkeeping failed. Do not resend: ${errorMessage(error)}`, { email_id: envelope.id });
+      if (acquired) this.activationLeases.delete(shape.address);
+      throw error;
+    }
+    const record = this.mechanisticRecords.get(shape.address)!;
+    swallow(this.trackInFlight(this.scheduleMechanistic(shape.address), `schedule-python:${shape.address}`));
+    this.scheduleMailMaintenance(); this.publish();
+    return { envelope: this.mailStore.get(envelope.id)!, spawned, correlationId: envelope.id, recipientKind: "mechanistic", recipientBinding: clone(record.binding), recipientRole: record.name, recipientState: record.state, recipientLifecycle: clone(record.lifecycle), recipientDisposition: record.state === "failed" ? "failed" : record.state === "stopped" ? "stopped" : spawned ? "spawned" : "reused" };
+  }
+
+  private async scheduleMechanistic(address: string): Promise<void> {
+    const record = this.mechanisticRecords.get(address);
+    if (!record || this.disposed || this.active.has(address) || this.scheduling.has(address)
+      || !this.activationLeases.has(address) || record.cleanupUnknown || ["stopped", "failed", "archived"].includes(record.state)) return;
+    const trigger = this.mailStore.queued(address)[0];
+    if (!trigger) return;
+    if (this.active.size >= this.options.config.maxConcurrent) { this.enqueueStart(address); return; }
+    this.scheduling.add(address); this.active.add(address);
+    record.state = "spawning";
+    let claimed = false;
+    try {
+      this.mechanisticProgram(address);
+      const queued = this.mailStore.getJob(trigger.id);
+      if (!queued || queued.phase !== "queued") throw new Error("Only an unclaimed queued job can start.");
+      const job: MechanisticJob = { ...queued, phase: "starting", generation: ++this.nextWorkerGeneration, updatedAt: nowIso() };
+      await this.mailStore.updateJob(job); claimed = true;
+      if (this.disposed || record.state !== "spawning") {
+        await this.finishMechanistic(job, { result: "forced_stop", stderr: "", cleanup: { state: "confirmed", childExited: true, pipesClosed: true, boundary: "direct-child-only" } });
+        return;
+      }
+      const controller: PythonProcess = new PythonProcess({
+        envelope: this.mailStore.get(trigger.id)!, job, mainAddress: this.mainAddress,
+        onSpawn: async (pid) => {
+          const current = this.mailStore.getJob(job.id)!;
+          if (this.disposed || current.phase !== "starting") throw new Error("Start was revoked.");
+          await this.mailStore.updateJob({ ...current, phase: "running", pid, updatedAt: nowIso() });
+          if (record.state === "spawning") record.state = "running";
+          record.currentActivity = `Job ${job.id} running`; this.publish();
+        },
+        onProgress: async (progress) => {
+          const current = this.mailStore.getJob(job.id)!;
+          if (current.phase !== "running") return;
+          await this.mailStore.updateJob({ ...current, progress, updatedAt: nowIso() });
+          record.currentActivity = progress.message; this.publish();
+        },
+        sendEmail: (input) => this.send(address, input, undefined, { kind: "mechanistic", address, process: controller, jobId: job.id }),
+      });
+      this.pythonProcesses.set(address, controller);
+      let safeRelease = false;
+      const operation = controller.run().then(async (outcome) => {
+        await this.finishMechanistic(this.mailStore.getJob(job.id)!, outcome);
+        safeRelease = true;
+      }).catch(async (error) => {
+        record.state = "failed";
+        const durable = this.mailStore.getJob(job.id);
+        record.cleanupUnknown = durable?.phase !== "terminal" || durable.cleanup?.state === "cleanup-unknown";
+        record.failure = `Python finalization failed: ${errorMessage(error)}`;
+        await this.persistRegistry(true);
+        safeRelease = true;
+        this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}; never replay ${job.id}.`);
+      }).finally(() => {
+        this.pythonProcesses.delete(address); this.pythonRuns.delete(address);
+        if (safeRelease) this.active.delete(address);
+        this.publish();
+        if (!this.disposed) { this.enqueueStart(address); this.pump(); }
+      });
+      this.pythonRuns.set(address, operation);
+      this.trackInFlight(operation, `python-job:${job.id}`);
+    } catch (error) {
+      record.state = "failed"; record.failure = errorMessage(error);
+      if (claimed) record.cleanupUnknown = true;
+      await this.persistRegistry(true);
+      this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
+    } finally {
+      this.scheduling.delete(address);
+      if (!this.pythonProcesses.has(address)) this.active.delete(address);
+      this.publish();
+    }
+  }
+
+  private async finishMechanistic(job: MechanisticJob, outcome: PythonOutcome): Promise<void> {
+    if (job.phase === "terminal") return;
+    const terminal: MechanisticJob = { ...job, ...outcome, phase: "terminal", updatedAt: nowIso(), outcomeMailId: createMailId() };
+    const notification: EmailEnvelope = { id: terminal.outcomeMailId!, from: job.address, to: this.mainAddress, subject: `Job ${job.id}: ${outcome.result}`, message: outcomeText(terminal), kind: "notification", requiresResponse: false, priority: "low", deliveryState: "queued", createdAt: terminal.updatedAt };
+    await this.mailStore.finishJob(terminal, notification);
+    const record = this.mechanisticRecords.get(job.address)!;
+    record.cleanupUnknown = terminal.cleanup?.state === "cleanup-unknown";
+    record.currentActivity = `Job ${job.id}: ${terminal.result}`;
+    record.updatedAt = terminal.updatedAt;
+    if (record.cleanupUnknown) { record.state = "failed"; record.failure = "Direct-child cleanup unknown; inspect job evidence before explicit clear_failure. Never replay this job."; }
+    else if (!["stopped", "paused", "archived"].includes(record.state)) record.state = "idle";
+    await this.persistRegistry(true);
+    if (!this.disposed && this.lifecycle === "active") {
+      await this.routeMainEnvelope(notification);
+      this.scheduleMailMaintenance(); this.publish();
+    }
+  }
+
+  private inspectMechanistic(address: string): MechanisticAgentInspection {
+    const record = this.mechanisticRecords.get(address);
+    let program: MechanisticProgram | undefined;
+    try { program = this.mechanisticProgram(address); } catch (error) { if (!record) throw error; }
+    const archiveBlockers = this.classifyArchiveBlockers(address, record);
+    const holdsActivationLease = this.activationLeases.has(address);
+    return { kind: "mechanistic", address, exists: Boolean(record), wouldSpawn: !record,
+      binding: clone(record?.binding ?? program!), allowedCallers: [...(program?.allowedCallers ?? record!.allowedCallers)], bindingReady: program ? "available" : "unavailable",
+      capacityAvailable: Boolean(program) && !record?.cleanupUnknown && (holdsActivationLease || this.activeIdentityCount() < this.options.config.maxAgents),
+      capacity: this.capacitySnapshot(), holdsActivationLease, state: record?.state ?? "new", currentActivity: record?.currentActivity,
+      queued: this.mailStore.queued(address).length, archiveEligible: this.archiveEligible(record, archiveBlockers), archiveBlockers,
+      lifecycle: clone(record?.lifecycle ?? resolveLifecycle(this.options.config, address, program!.key)),
+      jobs: this.mailStore.listJobs(address).slice(-20), cleanupUnknown: Boolean(record?.cleanupUnknown), ...(record?.failure ? { failure: record.failure } : {}),
+    };
+  }
+
+  private async manageMechanistic(address: string, action: "stop" | "restart" | "archive" | "clear_failure"): Promise<void> {
+    await this.withAddressOperation(address, async () => {
+      const record = this.mechanisticRecords.get(address)!;
+      if (action === "clear_failure") {
+        if (this.pythonProcesses.has(address) || this.scheduling.has(address)) throw new Error("Stop the exact direct child before clearing failure.");
+        record.cleanupUnknown = false; record.cleanupResolvedAt = nowIso(); delete record.failure;
+        record.state = "stopped"; record.currentActivity = "Operator cleared failure after evidence review; cleanup history is not proof of descendant settlement.";
+      } else if (action === "archive") {
+        const blockers = this.classifyArchiveBlockers(address, record);
+        if (!this.archiveEligible(record, blockers)) throw new Error(this.archiveBlockedDiagnostic(blockers));
+        record.state = "archived"; this.activationLeases.delete(address);
+      } else if (action === "stop") {
+        if (record.state === "archived") throw new Error(`Agent ${address} is archived.`);
+        record.state = "stopped";
+        const job = this.mailStore.listJobs(address).find((candidate) => ["starting", "running", "stopping"].includes(candidate.phase));
+        if (job) await this.mailStore.updateJob({ ...job, phase: "stopping", updatedAt: nowIso() });
+        await this.pythonProcesses.get(address)?.stop();
+        await this.pythonRuns.get(address);
+      } else {
+        if (record.cleanupUnknown) throw new Error("Direct-child cleanup is unknown; inspect evidence and explicitly clear_failure before restart.");
+        if (this.pythonProcesses.has(address) || this.scheduling.has(address)) throw new Error("Stop and settle the running job before restart.");
+        this.mechanisticProgram(address);
+        if (!this.activationLeases.has(address)) {
+          if (this.activeIdentityCount() >= this.options.config.maxAgents) throw new Error(this.capacityFullDiagnostic());
+          this.activationLeases.add(address);
+        }
+        record.state = "idle"; delete record.failure;
+      }
+      record.updatedAt = nowIso(); await this.persistRegistry(); this.publish();
+      if (action === "restart") await this.scheduleMechanistic(address);
+      this.pump();
+    });
   }
 
   private interruptRecordWork(record: AgentRecord): void {
@@ -1101,7 +1356,7 @@ export class AgentBroker {
     };
   }
 
-  private classifyArchiveBlockers(address: string, record?: AgentRecord, worker?: WorkerTransport): AgentArchiveBlockers {
+  private classifyArchiveBlockers(address: string, record?: RegisteredAgent, worker?: WorkerTransport): AgentArchiveBlockers {
     const queued: string[] = [];
     const incomingUnanswered: string[] = [];
     const pendingReplies: string[] = [];
@@ -1120,7 +1375,7 @@ export class AgentBroker {
     }
     return {
       active: record?.state === "running" || record?.state === "spawning" || Boolean(worker?.getSnapshot().isStreaming),
-      cleanupQuarantine: Boolean(record?.cleanup || this.cleanupQuarantines.has(address)),
+      cleanupQuarantine: Boolean((record?.kind === "mechanistic" ? record.cleanupUnknown : record?.cleanup) || this.cleanupQuarantines.has(address)),
       queued: this.boundedRequestIds(queued),
       incomingUnanswered: this.boundedRequestIds(incomingUnanswered),
       pendingReplies: this.boundedRequestIds(pendingReplies),
@@ -1133,7 +1388,7 @@ export class AgentBroker {
     }
   }
 
-  private archiveEligible(record: AgentRecord | undefined, blockers: AgentArchiveBlockers): boolean {
+  private archiveEligible(record: RegisteredAgent | undefined, blockers: AgentArchiveBlockers): boolean {
     if (!record) return false;
     if (record.state === "archived") return true;
     return !blockers.active
@@ -1252,13 +1507,14 @@ export class AgentBroker {
 
   private validateSender(sender: string): string {
     const normalized = sender.trim().toLowerCase();
-    if (this.isMainIdentity(normalized) || this.records.has(normalized)) return normalized;
+    if (this.isMainIdentity(normalized) || this.records.has(normalized) || this.mechanisticRecords.has(normalized)) return normalized;
     throw new Error(`Unknown sender identity ${normalized}.`);
   }
 
   async updateMainModel(address: string, preferredProvider?: string): Promise<void> {
     this.assertActive();
     const normalized = address.toLowerCase();
+    if (isMechanisticAddress(normalized)) throw new Error("mechanistic.com is reserved; main identity collision.");
     // Replace one object synchronously before persistence so a concurrent new
     // recipient observes either the old or new complete routing preference.
     this.mainRouting = { address: normalized, ...(preferredProvider ? { preferredProvider } : {}) };
@@ -1385,7 +1641,7 @@ export class AgentBroker {
     senderInput: string,
     input: SendEmailInput,
     signal?: AbortSignal,
-    authority?: WorkerMailboxAuthority,
+    authority?: WorkerMailboxAuthority | MechanisticAuthority,
   ): Promise<SendEmailResult> {
     const operation = this.sendInternal(senderInput, input, signal, authority);
     const tracked = operation.then(
@@ -1407,10 +1663,10 @@ export class AgentBroker {
     senderInput: string,
     input: SendEmailInput,
     signal?: AbortSignal,
-    authority?: WorkerMailboxAuthority,
+    authority?: WorkerMailboxAuthority | MechanisticAuthority,
   ): Promise<SendEmailResult> {
     this.assertActive();
-    if (authority) this.assertWorkerMailboxAuthority(authority);
+    if (authority) this.assertMailAuthority(authority);
     if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
     if (input.reply_to !== undefined && !input.reply_to.trim()) {
       throw new EmailProtocolError("INVALID_INPUT", "reply_to must be a non-empty mail ID.");
@@ -1423,6 +1679,14 @@ export class AgentBroker {
     }
     const sender = this.validateSender(senderInput);
     const requestedTo = input.to.trim().toLowerCase();
+    const mechanisticSender = this.mechanisticRecords.has(sender);
+    if (mechanisticSender || isMechanisticAddress(requestedTo)) {
+      if (input.requires_response === true || input.reply_to !== undefined || input.completion !== undefined || legacyReply || (input.subject && looksLikeReply(input.subject))) throw new Error("Mechanistic mail is send-only: no response requirement, explicit/legacy reply, or completion metadata.");
+      if (input.effort !== undefined) throw new Error("Mechanistic invocation/senders have no effort or model API.");
+      if (mechanisticSender && authority?.kind !== "mechanistic") throw new Error("Mechanistic sender requires its exact live process authority.");
+      if (mechanisticSender && input.lifecycle !== undefined) throw new Error("Mechanistic senders cannot change lifecycle policy.");
+    }
+    if (isMechanisticAddress(requestedTo)) return this.sendMechanistic(sender, input, signal, authority);
     if (this.sameIdentity(sender, requestedTo)) throw new Error("Sending email to yourself is not supported.");
 
     const toMain = this.isMainIdentity(requestedTo);
@@ -1539,6 +1803,7 @@ export class AgentBroker {
 
         const firstIdentityMail = Boolean(parsed && !currentRecord && !acceptedCreation && !replyId);
         const requiresResponse = !replyId
+          && !mechanisticSender
           && (input.requires_response ?? !(toMain && this.records.has(sender)));
         envelope = {
           id: createMailId(),
@@ -1589,7 +1854,7 @@ export class AgentBroker {
           // This is the final synchronous pre-append linearization check. Once
           // accept/reserveReply is invoked, journal ownership continues even if
           // the caller aborts while the append is pending.
-          if (authority) this.assertWorkerMailboxAuthority(authority);
+          if (authority) this.assertMailAuthority(authority);
           if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
           this.takeRateQuota(sender);
           if (answeredEmailId) await this.mailStore.reserveReply(envelope, answeredEmailId);
@@ -1636,6 +1901,7 @@ export class AgentBroker {
           expectedReplySubject: makeReplySubject(envelope.id, envelope.subject),
         } : {}),
         ...(recipientRecord ? {
+          recipientKind: "llm",
           recipientModel: recipientRecord.modelId,
           recipientProvider: recipientRecord.provider,
           recipientEffort: recipientRecord.effort,
@@ -1677,6 +1943,7 @@ export class AgentBroker {
     this.assertActive();
     if (authority) this.assertWorkerMailboxAuthority(authority);
     const address = this.validateSender(addressInput);
+    if (this.mechanisticRecords.has(address)) throw new Error("Mechanistic identities are send-only and have no inbox/fetch API.");
     if (this.isMainIdentity(address)) {
       const ids = new Set<string>();
       const result: EmailEnvelope[] = [];
@@ -1767,6 +2034,7 @@ export class AgentBroker {
     const profile = resolveAgentProfile(this.options.config, parsed.address, parsed.name);
     const now = nowIso();
     return {
+      kind: "llm",
       address: parsed.address,
       name: parsed.name,
       taskSlug: parsed.taskSlug,
@@ -1796,6 +2064,7 @@ export class AgentBroker {
   ): AgentRecord {
     const failure = truncateText(`Model unavailable during restore: ${reason}`, 1_500);
     return {
+      kind: "llm",
       address: shape.address,
       name: shape.name,
       taskSlug: shape.taskSlug,
@@ -1939,7 +2208,8 @@ export class AgentBroker {
         agentDir: this.options.agentDir,
         sessionDir: join(this.options.namespaceDir, "sessions"),
         projectTrusted: this.options.projectTrusted,
-        systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, additions.modelPolicy, this.options.config.budgets),
+        systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, additions.modelPolicy, this.options.config.budgets, mechanisticPrompt(this.options.config, "llm")),
+        mechanisticPrompt: mechanisticPrompt(this.options.config, "llm"),
         beforeModelTurn: () => {
           this.assertWorkerMailboxAuthority(authority);
           const violation = this.modelBudgetViolation(record.address, worker, true);
@@ -2542,8 +2812,8 @@ export class AgentBroker {
 
   private enqueueStart(address: string): void {
     if (!this.pendingStarts.includes(address)) this.pendingStarts.push(address);
-    const record = this.records.get(address);
-    if (record && !["stopped", "failed", "archived"].includes(record.state)) record.state = "queued";
+    const record = this.records.get(address) ?? this.mechanisticRecords.get(address);
+    if (record && !this.active.has(address) && !["stopped", "failed", "archived"].includes(record.state)) record.state = "queued";
   }
 
   private selectBatch(
@@ -2806,6 +3076,7 @@ export class AgentBroker {
     if (this.pendingAdmissions.has(address)) return;
     this.pendingAdmissions.add(address);
     const operation = this.withAddressOperation(address, async () => {
+      if (this.mechanisticRecords.has(address)) { await this.scheduleMechanistic(address); return; }
       const record = this.records.get(address);
       if (!record || ["stopped", "failed", "archived"].includes(record.state)) return;
       let worker = this.workers.get(address);
@@ -2832,6 +3103,7 @@ export class AgentBroker {
 
   async stop(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
+    if (this.mechanisticRecords.has(address)) return this.manageMechanistic(address, "stop");
     await this.withAddressOperation(address, async () => {
       const worker = this.workers.get(address);
       const record = this.records.get(address);
@@ -2858,6 +3130,7 @@ export class AgentBroker {
 
   async restart(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
+    if (this.mechanisticRecords.has(address)) return this.manageMechanistic(address, "restart");
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
@@ -2942,6 +3215,7 @@ export class AgentBroker {
 
   async archive(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
+    if (this.mechanisticRecords.has(address)) return this.manageMechanistic(address, "archive");
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
@@ -2975,6 +3249,7 @@ export class AgentBroker {
 
   async clearFailure(addressInput: string): Promise<void> {
     const address = addressInput.trim().toLowerCase();
+    if (this.mechanisticRecords.has(address)) return this.manageMechanistic(address, "clear_failure");
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       if (!record) throw new Error(`Unknown agent ${address}.`);
@@ -2992,6 +3267,7 @@ export class AgentBroker {
 
   async setEffort(addressInput: string, effort: ThinkingLevel): Promise<void> {
     const address = addressInput.trim().toLowerCase();
+    if (isMechanisticAddress(address)) throw new Error("Mechanistic identities have no effort/model API.");
     await this.withAddressOperation(address, async () => {
       const record = this.records.get(address);
       const worker = this.workers.get(address);
@@ -3010,6 +3286,10 @@ export class AgentBroker {
       throw new Error("Effort must be one of off, minimal, low, medium, high, xhigh, or max.");
     }
     const shape = parseSubagentAddressShape(addressInput);
+    if (isMechanisticAddress(shape.address)) {
+      if (effortOverride !== undefined) throw new Error("Mechanistic identities have no effort/model API.");
+      return this.inspectMechanistic(shape.address);
+    }
     const existing = this.records.get(shape.address);
     const parsed = existing
       ? undefined
@@ -3038,6 +3318,7 @@ export class AgentBroker {
         }
       : { turns: 0, toolCalls: 0, tokens: 0 };
     return {
+      kind: "llm",
       address,
       exists: Boolean(record),
       wouldSpawn: !record,
@@ -3298,7 +3579,7 @@ export class AgentBroker {
       email.requiresResponse && !email.answeredAt && !email.replyReservedBy && email.deliveryState === "delivered").length;
     return {
       mainAddress: this.mainAddress,
-      agents,
+      agents: [...agents, ...[...this.mechanisticRecords.values()].map((record) => ({ ...clone(record), jobs: this.mailStore.listJobs(record.address).slice(-20) }))].sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       unanswered,
       queuedMail: this.mailStore.countQueued(),
       capacity: this.capacitySnapshot(),
@@ -3323,7 +3604,8 @@ export class AgentBroker {
 
   private async persistRegistry(force = false): Promise<void> {
     if (!this.registry || (!force && (this.lifecycle === "closing" || this.lifecycle === "closed"))) return;
-    this.registry.agents = [...this.records.values()].map(clone);
+    this.registry.version = 2;
+    this.registry.agents = [...this.records.values(), ...this.mechanisticRecords.values()].map(clone);
     await this.registryStore.save(this.registry);
   }
 
@@ -3335,6 +3617,12 @@ export class AgentBroker {
   }
 
   private async disposeOwnedWorkers(maximumTimeoutMs = Number.MAX_SAFE_INTEGER): Promise<void> {
+    await Promise.all([...this.pythonProcesses.entries()].map(async ([address, controller]) => {
+      const record = this.mechanisticRecords.get(address);
+      if (record && !["failed", "stopped", "archived"].includes(record.state)) record.state = "paused";
+      await controller.stop();
+      await this.pythonRuns.get(address);
+    }));
     const committed = new Map(this.workers);
     const allWorkers = new Set<WorkerTransport>([
       ...committed.values(),
@@ -3391,6 +3679,10 @@ export class AgentBroker {
     const failures: unknown[] = [];
     const persistedCleanup = [...this.records.values()].find((record) => record.cleanup && !this.cleanupQuarantines.has(record.address));
     let sessionCleanupSettled = !persistedCleanup;
+    if ([...this.mechanisticRecords.keys()].some((address) => this.active.has(address) && !this.pythonProcesses.has(address))) {
+      sessionCleanupSettled = false;
+      failures.push(new Error("Mechanistic terminal/quarantine persistence did not settle; namespace ownership retained."));
+    }
     if (persistedCleanup) failures.push(this.cleanupError(persistedCleanup.address));
     const shutdownMs = this.options.config.lifecycle.brokerShutdownTimeoutMs;
     const deadline = Date.now() + shutdownMs;

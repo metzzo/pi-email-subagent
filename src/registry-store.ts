@@ -12,7 +12,9 @@ import {
   MAX_CONFIG_TOOL_NAME_BYTES,
   MAX_TIMER_DELAY_MS,
 } from "./config.ts";
-import type { ActivityItem, AgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
+import type { ActivityItem, AgentRecord, LlmAgentRecord, AgentStatus, AgentWorkState, BrokerRegistry, CleanupDiagnostic, LifecyclePolicy, UsageSnapshot, WorkItem, WorkerCapabilityEpoch } from "./types.ts";
+import { assertUnreservedModel, isMechanisticAddress, parseMechanisticBinding, parseMechanisticCallers } from "./mechanistic.ts";
+import { parseSubagentAddressShape } from "./address.ts";
 import { capPatch, capText, emptyWorkState, MAX_ACTIVE_WORK, MAX_COMMAND_CHARS, MAX_ERROR_CHARS, MAX_RECENT_WORK, sanitizeWorkPath } from "./work-ledger.ts";
 import { clone, nowIso } from "./util.ts";
 
@@ -339,9 +341,31 @@ function parseCleanup(value: unknown, label: string, fallbackTools: readonly str
   };
 }
 
-function parseRecord(value: unknown, index: number): AgentRecord {
+function parseRecord(value: unknown, index: number, version: number): AgentRecord {
   const label = `registry.agents[${index}]`;
   const raw = object(value, label);
+  if (version === 2 && raw.kind === "mechanistic") {
+    const shape = parseSubagentAddressShape(string(raw.address, `${label}.address`));
+    const binding = parseMechanisticBinding(raw.binding);
+    if (!isMechanisticAddress(shape.address) || binding.key !== shape.name) throw new Error("Mechanistic registry address/binding mismatch.");
+    if (["provider", "modelId", "effort", "usage", "sessionFile", "tools", "work", "inbox", "cleanup", "workerEpoch"].some((key) => raw[key] !== undefined)) throw new Error("Mechanistic identities cannot contain LLM/session/inbox fields.");
+    const state = string(raw.state, `${label}.state`) as AgentStatus;
+    if (!STATES.has(state)) throw new Error(`${label}.state is invalid.`);
+    if (raw.cleanupUnknown !== undefined && typeof raw.cleanupUnknown !== "boolean") throw new Error("cleanupUnknown must be boolean.");
+    return {
+      kind: "mechanistic", address: shape.address, name: shape.name, taskSlug: shape.taskSlug, binding,
+      allowedCallers: parseMechanisticCallers(raw.allowedCallers), state,
+      createdAt: timestamp(raw.createdAt, `${label}.createdAt`), updatedAt: timestamp(raw.updatedAt, `${label}.updatedAt`),
+      lifecycle: parseLifecycle(raw.lifecycle, `${label}.lifecycle`),
+      ...(raw.cleanupUnknown ? { cleanupUnknown: true } : {}),
+      ...(raw.cleanupResolvedAt === undefined ? {} : { cleanupResolvedAt: timestamp(raw.cleanupResolvedAt, `${label}.cleanupResolvedAt`) }),
+      ...(raw.failure === undefined ? {} : { failure: boundedString(raw.failure, `${label}.failure`, MAX_REGISTRY_DIAGNOSTIC_BYTES) }),
+      ...(raw.currentActivity === undefined ? {} : { currentActivity: boundedString(raw.currentActivity, `${label}.currentActivity`, MAX_REGISTRY_DIAGNOSTIC_BYTES) }),
+    };
+  }
+  if ((version === 2 && raw.kind !== "llm") || (version === 1 && raw.kind !== undefined && raw.kind !== "llm")) throw new Error("Registry v1 migrates only LLM identities; v2 requires an explicit kind.");
+  assertUnreservedModel(string(raw.modelId, `${label}.modelId`));
+  if (isMechanisticAddress(string(raw.address, `${label}.address`))) throw new Error("mechanistic.com is reserved; persisted LLM address collision.");
   const effort = string(raw.effort, `${label}.effort`) as ThinkingLevel;
   const rawState = string(raw.state, `${label}.state`);
   if (rawState === "parked") {
@@ -357,7 +381,8 @@ function parseRecord(value: unknown, index: number): AgentRecord {
     && (!Number.isInteger(raw.consecutiveFailures) || (raw.consecutiveFailures as number) < 0)) {
     throw new Error(`${label}.consecutiveFailures must be a non-negative integer.`);
   }
-  const record: AgentRecord = {
+  const record: LlmAgentRecord = {
+    kind: "llm",
     address: string(raw.address, `${label}.address`).toLowerCase(),
     name: string(raw.name, `${label}.name`),
     taskSlug: string(raw.taskSlug, `${label}.taskSlug`),
@@ -422,18 +447,20 @@ function parseRecord(value: unknown, index: number): AgentRecord {
 
 export function parseRegistry(value: unknown): BrokerRegistry {
   const raw = object(value, "registry");
-  if (raw.version !== 1) throw new Error("registry.version must be 1.");
+  if (raw.version !== 1 && raw.version !== 2) throw new Error("registry.version must be 1 or 2.");
   const aliases = stringArray(raw.mainAliases, "registry.mainAliases").map((alias) => alias.toLowerCase());
   if (!Array.isArray(raw.agents)) throw new Error("registry.agents must be an array.");
-  const agents = raw.agents.map(parseRecord);
+  const mainAddress = string(raw.mainAddress, "registry.mainAddress").toLowerCase();
+  if ([mainAddress, ...aliases].some(isMechanisticAddress)) throw new Error("mechanistic.com is reserved; main identity collision.");
+  const agents = raw.agents.map((record, index) => parseRecord(record, index, raw.version as number));
   const addresses = new Set<string>();
   for (const record of agents) {
     if (addresses.has(record.address)) throw new Error(`registry contains duplicate agent ${record.address}.`);
     addresses.add(record.address);
   }
   return {
-    version: 1,
-    mainAddress: string(raw.mainAddress, "registry.mainAddress").toLowerCase(),
+    version: 2,
+    mainAddress,
     mainAliases: [...new Set(aliases)],
     agents,
     updatedAt: string(raw.updatedAt, "registry.updatedAt"),
@@ -449,7 +476,8 @@ export class RegistryStore {
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
     try { await chmod(dirname(this.path), 0o700); } catch { /* unsupported platform */ }
     if (!existsSync(this.path)) {
-      return { version: 1, mainAddress: defaultMainAddress, mainAliases: [defaultMainAddress], agents: [], updatedAt: nowIso() };
+      if (isMechanisticAddress(defaultMainAddress)) throw new Error("mechanistic.com is reserved for scripts, not main.");
+      return { version: 2, mainAddress: defaultMainAddress, mainAliases: [defaultMainAddress], agents: [], updatedAt: nowIso() };
     }
     let parsed: unknown;
     try {

@@ -1,3 +1,4 @@
+import { llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,9 +35,9 @@ it("serializes the final identity lease across different unknown addresses befor
     const rejected = attempts.find((attempt) => attempt.status === "rejected") as PromiseRejectedResult;
     assert.match(String(rejected.reason), /identity capacity.*1\/1/i);
     assert.equal(broker.mailStore.list().length, 1, "rejected final-slot send is not journaled");
-    assert.equal(broker.getSnapshot().agents.length, 1);
+    assert.equal(llmSnapshot(broker).agents.length, 1);
     assert.equal(workers.length, 1);
-    assert.deepEqual(broker.getSnapshot().capacity, {
+    assert.deepEqual(llmSnapshot(broker).capacity, {
       identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 1, runSlotsLimit: 1,
     });
   } finally {
@@ -76,7 +77,7 @@ it("singleflights concurrent sends to one unknown address", async () => {
     ]);
     assert.equal(workers.length, 1);
     assert.equal(results.filter((result) => result.spawned).length, 1);
-    assert.equal(broker.getSnapshot().agents.length, 1);
+    assert.equal(llmSnapshot(broker).agents.length, 1);
     assert.equal(workers[0]!.prompts.length, 1);
     assert.match(workers[0]!.prompts[0]!, /agent-email-batch count="2"/);
   } finally {

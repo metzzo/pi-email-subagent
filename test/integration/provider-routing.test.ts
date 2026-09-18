@@ -1,3 +1,4 @@
+import { inspectLlm, llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -64,7 +65,7 @@ async function answerAndIdle(harness: Harness, sent: SendEmailResult, workerInde
     priority: "low",
   });
   worker.settle();
-  await eventually(() => assert.equal(harness.broker.inspectAgent(sent.envelope.to).state, "idle"));
+  await eventually(() => assert.equal(inspectLlm(harness.broker, sent.envelope.to).state, "idle"));
 }
 
 describe("provider-aware durable routing", () => {
@@ -90,7 +91,7 @@ describe("provider-aware durable routing", () => {
       );
       assert.equal(preflights, 1);
       assert.equal(harness.broker.mailStore.list().length, 0);
-      assert.equal(harness.broker.getSnapshot().agents.length, 0);
+      assert.equal(llmSnapshot(harness.broker).agents.length, 0);
       assert.equal(harness.workers.length, 0);
     } finally {
       await harness.broker.shutdown();
@@ -134,7 +135,7 @@ describe("provider-aware durable routing", () => {
         }),
         /persisted but delivery failed.*credential source.*environment.*stored/i,
       );
-      const failed = harness.broker.inspectAgent(initial.envelope.to);
+      const failed = inspectLlm(harness.broker, initial.envelope.to);
       assert.equal(failed.state, "failed");
       assert.match(failed.failure ?? "", /credential source.*environment.*stored/i);
       const restore = harness.broker.mailStore.list().find((email) => email.subject === "Restore");
@@ -170,7 +171,7 @@ describe("provider-aware durable routing", () => {
           new RegExp(`current main provider \\"${preferred ?? "none"}\\" does not identify exactly one candidate.*no email was accepted`, "i"),
         );
         assert.equal(harness.broker.mailStore.list().length, 0);
-        assert.equal(harness.broker.getSnapshot().agents.length, 0);
+        assert.equal(llmSnapshot(harness.broker).agents.length, 0);
         assert.equal(harness.workers.length, 0);
       } finally {
         await harness.broker.shutdown();
@@ -191,10 +192,10 @@ describe("provider-aware durable routing", () => {
     const restored = await start(root, [alpha(), beta()], "provider-beta");
     try {
       assert.deepEqual(restored.providers, ["provider-alpha"]);
-      const inspection = restored.broker.inspectAgent(sent.envelope.to);
+      const inspection = inspectLlm(restored.broker, sent.envelope.to);
       assert.equal(inspection.provider, "provider-alpha");
       assert.equal(inspection.modelId, "shared");
-      assert.equal(restored.broker.getSnapshot().agents[0]?.provider, "provider-alpha");
+      assert.equal(llmSnapshot(restored.broker).agents[0]?.provider, "provider-alpha");
     } finally {
       await restored.broker.shutdown();
     }
@@ -215,7 +216,7 @@ describe("provider-aware durable routing", () => {
       assert.equal(harness.broker.mainAddress, "main@shared.com");
       await harness.broker.restart(alphaSend.envelope.to);
       assert.equal(harness.providers.at(-1), "provider-alpha");
-      await eventually(() => assert.equal(harness.broker.inspectAgent(alphaSend.envelope.to).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(harness.broker, alphaSend.envelope.to).state, "idle"));
       await harness.broker.archive(alphaSend.envelope.to);
 
       const betaSend = await harness.broker.send(harness.broker.mainAddress, {
@@ -256,7 +257,7 @@ describe("provider-aware durable routing", () => {
     const missing = await start(root, [beta()], "provider-beta");
     try {
       assert.deepEqual(missing.providers, ["provider-beta"]);
-      const removed = missing.broker.inspectAgent(alphaSend.envelope.to);
+      const removed = inspectLlm(missing.broker, alphaSend.envelope.to);
       assert.equal(removed.provider, "provider-alpha");
       assert.equal(removed.modelId, "shared");
       assert.equal(removed.state, "failed");
@@ -265,7 +266,7 @@ describe("provider-aware durable routing", () => {
       assert.deepEqual(removed.tools, ["read", "legacy-tool", "send_email", "fetch_emails"]);
       assert.equal(removed.instructions, "Preserve this unavailable profile.");
       assert.match(removed.failure ?? "", /bound to provider-alpha\/shared.*not rebound/is);
-      assert.equal(missing.broker.inspectAgent(betaSend.envelope.to).provider, "provider-beta");
+      assert.equal(inspectLlm(missing.broker, betaSend.envelope.to).provider, "provider-beta");
       const before = missing.broker.mailStore.list().length;
       const queued = await missing.broker.send(missing.broker.mainAddress, {
         to: alphaSend.envelope.to, subject: "Do not substitute", message: "Accept under the failed identity only.", priority: "low",
@@ -283,12 +284,12 @@ describe("provider-aware durable routing", () => {
     const returned = await start(root, [alpha(), beta()], "provider-beta");
     try {
       assert.equal(returned.providers.includes("provider-alpha"), false, "catalog recovery does not implicitly restart a failed identity");
-      assert.equal(returned.broker.inspectAgent(alphaSend.envelope.to).provider, "provider-alpha");
-      assert.equal(returned.broker.inspectAgent(alphaSend.envelope.to).state, "failed");
+      assert.equal(inspectLlm(returned.broker, alphaSend.envelope.to).provider, "provider-alpha");
+      assert.equal(inspectLlm(returned.broker, alphaSend.envelope.to).state, "failed");
       assert.equal(returned.broker.mailStore.list().some((email) => email.subject === "Do not substitute"), true);
       await returned.broker.restart(alphaSend.envelope.to);
       assert.ok(returned.providers.includes("provider-alpha"));
-      await eventually(() => assert.notEqual(returned.broker.inspectAgent(alphaSend.envelope.to).state, "failed"));
+      await eventually(() => assert.notEqual(inspectLlm(returned.broker, alphaSend.envelope.to).state, "failed"));
     } finally {
       await returned.broker.shutdown();
     }
@@ -328,8 +329,8 @@ describe("provider-aware durable routing", () => {
 
     const recovered = await start(root, [alpha(), beta()], "provider-beta");
     try {
-      assert.equal(recovered.broker.inspectAgent("worker.bound-orphan@shared.com").provider, "provider-alpha");
-      const legacy = recovered.broker.inspectAgent("worker.legacy-orphan@shared.com");
+      assert.equal(inspectLlm(recovered.broker, "worker.bound-orphan@shared.com").provider, "provider-alpha");
+      const legacy = inspectLlm(recovered.broker, "worker.legacy-orphan@shared.com");
       assert.equal(legacy.provider, "unavailable");
       assert.equal(legacy.state, "failed");
       assert.match(legacy.failure ?? "", /original provider cannot be inferred.*no substitution/is);
@@ -357,9 +358,9 @@ describe("provider-aware durable routing", () => {
     });
     const orphan = await start(orphanRoot, [alpha()], "provider-beta");
     try {
-      const migrated = orphan.broker.inspectAgent("worker.legacy-unique@shared.com");
+      const migrated = inspectLlm(orphan.broker, "worker.legacy-unique@shared.com");
       assert.equal(migrated.provider, "provider-alpha");
-      assert.ok(orphan.broker.getSnapshot().agents[0]?.activity.some((item) => /Legacy provider binding uniquely migrated/.test(item.summary)));
+      assert.ok(llmSnapshot(orphan.broker).agents[0]?.activity.some((item) => /Legacy provider binding uniquely migrated/.test(item.summary)));
     } finally {
       await orphan.broker.shutdown();
     }
@@ -380,14 +381,14 @@ describe("provider-aware durable routing", () => {
 
     const synthetic = await start(syntheticRoot, [alpha()], "provider-beta");
     try {
-      const migrated = synthetic.broker.inspectAgent(sent.envelope.to);
+      const migrated = inspectLlm(synthetic.broker, sent.envelope.to);
       assert.equal(migrated.provider, "provider-alpha");
       assert.equal(migrated.state, "failed");
       assert.match(migrated.failure ?? "", /explicit same-identity restart is required/i);
-      assert.ok(synthetic.broker.getSnapshot().agents.find((item) => item.address === sent.envelope.to)?.activity
+      assert.ok(llmSnapshot(synthetic.broker).agents.find((item) => item.address === sent.envelope.to)?.activity
         .some((item) => /Legacy provider binding uniquely migrated to provider-alpha\/shared/.test(item.summary)));
       await synthetic.broker.restart(sent.envelope.to);
-      await eventually(() => assert.notEqual(synthetic.broker.inspectAgent(sent.envelope.to).state, "failed"));
+      await eventually(() => assert.notEqual(inspectLlm(synthetic.broker, sent.envelope.to).state, "failed"));
     } finally {
       await synthetic.broker.shutdown();
     }
@@ -466,7 +467,7 @@ describe("provider-aware durable routing", () => {
       assert.deepEqual(sent.envelope.modelBindingIntent, { provider: "provider-alpha", modelId: "shared" });
       assert.equal(concurrentSent.envelope.modelBindingIntent, undefined);
       assert.equal(harness.providers[0], "provider-alpha");
-      assert.equal(harness.broker.getSnapshot().agents.filter((record) => record.address === sent.envelope.to).length, 1);
+      assert.equal(llmSnapshot(harness.broker).agents.filter((record) => record.address === sent.envelope.to).length, 1);
     } finally {
       release();
       harness.broker.mailStore.accept = realAccept;

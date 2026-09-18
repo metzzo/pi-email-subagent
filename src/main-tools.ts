@@ -53,6 +53,7 @@ function inspectionRecovery(inspection: AgentInspection): string {
   const blockers = inspection.archiveBlockers.queued.count
     + inspection.archiveBlockers.incomingUnanswered.count
     + inspection.archiveBlockers.pendingReplies.count;
+  if (inspection.kind === "mechanistic") return "Only queued, never-claimed jobs may run after restart. Inspect direct-child cleanup evidence before explicit clear_failure; this does not prove detached or remote effects stopped.";
   if (inspection.cleanup) return "Pi session/tool cleanup settlement is unknown for this exact address. Wait for its live cleanup operation to settle; restart/archive remain blocked only for this identity and queued mail is preserved.";
   if (!inspection.exists && !inspection.capacityAvailable) return "Reuse a known relevant identity only for the same feature, worktree, or review-repair cycle; otherwise ask main to resolve real obligations and archive a clean identity before retrying.";
   if (inspection.state === "archived") return "Restoration needs a free identity lease; reuse a leased identity only for the same continuing cycle, or archive another clean identity first.";
@@ -98,6 +99,18 @@ export function createMainCoordinationTools(
         const broker = await getBroker();
         if (!broker) throw new Error("Email broker is not ready.");
         const inspection = broker.inspectAgent(params.address, params.effort);
+        if (inspection.kind === "mechanistic") {
+          return textResult([
+            `Send-only Python agent: ${inspection.address} · ${inspection.state}`,
+            `Binding (${inspection.bindingReady}): ${JSON.stringify(inspection.binding)}`,
+            `Allowed callers: ${inspection.allowedCallers.join(", ")}`,
+            `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit}; run slots: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit}`,
+            `Queued jobs: ${inspection.queued}; cleanup unknown: ${inspection.cleanupUnknown}; archive eligible: ${inspection.archiveEligible}`,
+            `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
+            ...inspection.jobs.map((job) => JSON.stringify(job)),
+            inspectionRecovery(inspection),
+          ].join("\n"), { inspection } satisfies InspectAgentToolDetails);
+        }
         const lines = [
           `${inspection.exists ? "Existing" : "Prospective"} agent: ${inspection.address}`,
           `State: ${inspection.state}`,
@@ -114,7 +127,7 @@ export function createMainCoordinationTools(
           `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
         ];
         if (inspection.budgets) {
-          lines.push(`Current run budget: ${inspection.budgets.currentRun.turns}/${inspection.budgets.limits.maxTurns} turns · ${inspection.budgets.currentRun.toolCalls}/${inspection.budgets.limits.maxToolCalls} tools · ${inspection.budgets.currentRun.tokens}/${inspection.budgets.limits.maxTokens} tokens · circuit ${broker.getSnapshot().agents.find((agent) => agent.address === inspection.address)?.consecutiveFailures ?? 0}/${inspection.budgets.limits.maxConsecutiveFailures}`);
+          lines.push(`Current run budget: ${inspection.budgets.currentRun.turns}/${inspection.budgets.limits.maxTurns} turns · ${inspection.budgets.currentRun.toolCalls}/${inspection.budgets.limits.maxToolCalls} tools · ${inspection.budgets.currentRun.tokens}/${inspection.budgets.limits.maxTokens} tokens · circuit ${broker.getSnapshot().agents.filter((agent) => agent.kind === "llm").find((agent) => agent.address === inspection.address)?.consecutiveFailures ?? 0}/${inspection.budgets.limits.maxConsecutiveFailures}`);
         }
         const blockerDetails = [
           inspection.archiveBlockers.active ? "active worker" : undefined,
@@ -132,7 +145,7 @@ export function createMainCoordinationTools(
         if (inspection.failure) {
           lines.push(`Last failure: ${inspection.failure}`);
           const record = broker.getSnapshot().agents.find((agent) => agent.address === inspection.address);
-          if (record?.activity.some((item) => item.summary === "Agent run failed")) {
+          if (record?.kind === "llm" && record.activity.some((item) => item.summary === "Agent run failed")) {
             const open = broker.openDeliveredRequestCount(inspection.address);
             const obligation = open === 0
               ? "No delivered requests remain unanswered."
@@ -284,7 +297,7 @@ export function createMainCoordinationTools(
         const actionText = params.action === "stop"
           ? `Identity lease remains ${inspection.holdsActivationLease ? "held" : "free"}; stop alone does not free maxAgents identity capacity.`
           : params.action === "restart"
-            ? "The same persistent session and mailbox are resumed; genuine obligations remain authoritative."
+            ? inspection.kind === "mechanistic" ? "Only never-claimed queued jobs may start. No interrupted job is replayed." : "The same persistent session and mailbox are resumed; genuine obligations remain authoritative."
             : params.action === "archive"
               ? `Identity lease released: ${inspection.holdsActivationLease ? "no" : "yes"}.`
               : "Clearing a failure diagnostic does not resolve or cancel any obligation.";

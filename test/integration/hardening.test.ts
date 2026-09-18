@@ -1,3 +1,4 @@
+import { inspectLlm, llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -35,7 +36,7 @@ async function answerAndSettle(broker: AgentBroker, worker: FakeWorker, request:
     priority: "low",
   });
   worker.settle();
-  await eventually(() => assert.equal(broker.inspectAgent(worker.record!.address).state, "idle"));
+  await eventually(() => assert.equal(inspectLlm(broker, worker.record!.address).state, "idle"));
 }
 
 describe("broker hardening", () => {
@@ -126,7 +127,7 @@ describe("broker hardening", () => {
       assert.equal(restored.workers.length, 1);
       await eventually(() => assert.match(restored.workers[0]!.prompts[0]!, /mail_orphaned_recipient/));
       assert.equal(restored.broker.mailStore.get("mail_orphaned_recipient")?.deliveryState, "delivered");
-      assert.equal(restored.broker.inspectAgent("worker.orphaned@gpt-5.4.com").exists, true);
+      assert.equal(inspectLlm(restored.broker, "worker.orphaned@gpt-5.4.com").exists, true);
     } finally {
       await restored.broker.shutdown();
     }
@@ -198,9 +199,9 @@ describe("broker hardening", () => {
         priority: "low",
       });
       workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(initial.envelope.to).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(broker, initial.envelope.to).state, "idle"));
       workers[0]!.fail("terminal provider failure");
-      await eventually(() => assert.equal(broker.inspectAgent(initial.envelope.to).state, "failed"));
+      await eventually(() => assert.equal(inspectLlm(broker, initial.envelope.to).state, "failed"));
 
       const firstQueued = await broker.send(broker.mainAddress, {
         to: initial.envelope.to, subject: "Queued one", message: "Preserve this accepted ID.", priority: "low",
@@ -235,7 +236,7 @@ describe("broker hardening", () => {
         to: "worker.failed-attached@gpt-5.4.com", subject: "Initial", message: "Remain attached.", priority: "low",
       });
       workers[0]!.emit({ type: "state", state: "failed" });
-      assert.equal(broker.inspectAgent(initial.envelope.to).state, "failed");
+      assert.equal(inspectLlm(broker, initial.envelope.to).state, "failed");
 
       const queued = await broker.send(broker.mainAddress, {
         to: initial.envelope.to, subject: "Must queue", message: "Do not route to the attached worker.", priority: "high",
@@ -274,7 +275,7 @@ describe("broker hardening", () => {
       to: "worker.removed-failed@gpt-5.4.com", subject: "Persist", message: "Persist the identity.", priority: "low",
     });
     first.workers[0]!.fail("terminal before model removal");
-    await eventually(() => assert.equal(first.broker.inspectAgent("worker.removed-failed@gpt-5.4.com").state, "failed"));
+    await eventually(() => assert.equal(inspectLlm(first.broker, "worker.removed-failed@gpt-5.4.com").state, "failed"));
     await first.broker.shutdown();
 
     const registryPath = join(first.root, "state", "registry.json");
@@ -436,16 +437,16 @@ describe("broker hardening", () => {
 
     const second = await setup({ maxAgents: 1, maxConcurrent: 1 }, first.root);
     try {
-      const snapshot = second.broker.getSnapshot();
+      const snapshot = llmSnapshot(second.broker);
       assert.equal(snapshot.agents.length, 2);
       assert.deepEqual(snapshot.capacity, {
         identitiesUsed: 1, identitiesLimit: 1, runSlotsUsed: 1, runSlotsLimit: 1,
       });
       assert.equal(second.workers.length, 1);
-      assert.equal(second.broker.inspectAgent("worker.one@gpt-5.4.com").holdsActivationLease, true);
-      assert.equal(second.broker.inspectAgent("worker.two@gpt-5.4.com").holdsActivationLease, false);
-      assert.equal(second.broker.inspectAgent("worker.two@gpt-5.4.com").capacityAvailable, false);
-      assert.match(second.broker.inspectAgent("worker.two@gpt-5.4.com").currentActivity ?? "", /Paused by maxAgents capacity/);
+      assert.equal(inspectLlm(second.broker, "worker.one@gpt-5.4.com").holdsActivationLease, true);
+      assert.equal(inspectLlm(second.broker, "worker.two@gpt-5.4.com").holdsActivationLease, false);
+      assert.equal(inspectLlm(second.broker, "worker.two@gpt-5.4.com").capacityAvailable, false);
+      assert.match(inspectLlm(second.broker, "worker.two@gpt-5.4.com").currentActivity ?? "", /Paused by maxAgents capacity/);
       await assert.rejects(second.broker.send(second.broker.mainAddress, {
         to: "worker.two@gpt-5.4.com", subject: "Activate overflow", message: "Must remain paused.", priority: "low",
       }), /Agent limit reached/);
@@ -492,7 +493,7 @@ describe("broker hardening", () => {
     });
     await broker.init();
     try {
-      const preview = broker.inspectAgent("worker.activated-tools@gpt-5.4.com");
+      const preview = inspectLlm(broker, "worker.activated-tools@gpt-5.4.com");
       assert.equal(preview.writable, true);
       assert.equal(preview.activeTools, undefined);
       assert.equal(preview.tools.includes("write"), true);
@@ -504,11 +505,11 @@ describe("broker hardening", () => {
         priority: "low",
       });
       assert.equal(sent.recipientTools?.includes("write"), false, "send reports live activation, not configured intent");
-      const live = broker.inspectAgent(preview.address);
+      const live = inspectLlm(broker, preview.address);
       assert.equal(live.tools.includes("write"), true, "configured intent remains explicit");
       assert.equal(live.activeTools?.includes("write"), false);
       assert.equal(live.writable, false);
-      const snapshot = broker.getSnapshot().agents[0]!;
+      const snapshot = llmSnapshot(broker).agents[0]!;
       assert.equal(snapshot.tools.includes("write"), true);
       assert.equal(snapshot.activeTools?.includes("write"), false);
       const durable = JSON.parse(await readFile(registryPath, "utf8")) as any;
@@ -524,13 +525,13 @@ describe("broker hardening", () => {
       });
       worker.settle();
       await eventually(async () => {
-        assert.equal(broker.inspectAgent(preview.address).state, "idle");
+        assert.equal(inspectLlm(broker, preview.address).state, "idle");
         const settled = JSON.parse(await readFile(registryPath, "utf8")) as any;
         assert.equal(settled.agents[0].workerEpoch.phase, "activated");
         assert.equal(settled.agents[0].workerEpoch.runSlotHeld, false);
       });
       await broker.stop(preview.address);
-      assert.equal(broker.inspectAgent(preview.address).activeTools, undefined);
+      assert.equal(inspectLlm(broker, preview.address).activeTools, undefined);
       const cleaned = JSON.parse(await readFile(registryPath, "utf8")) as any;
       assert.equal(cleaned.agents[0].workerEpoch.phase, "session-settled");
       assert.equal(cleaned.agents[0].workerEpoch.runSlotHeld, false);
@@ -542,12 +543,12 @@ describe("broker hardening", () => {
   it("previews without spawning, enriches send results, joins replies, and archives clean identities", async () => {
     const { broker, workers, main } = await setup({ maxAgents: 1 });
     try {
-      const preview = broker.inspectAgent("worker.tools@gpt-5.4.com");
+      const preview = inspectLlm(broker, "worker.tools@gpt-5.4.com");
       assert.equal(preview.exists, false);
       assert.equal(preview.wouldSpawn, true);
       assert.equal(preview.writable, true);
       assert.equal(workers.length, 0);
-      assert.equal(broker.getSnapshot().agents.length, 0);
+      assert.equal(llmSnapshot(broker).agents.length, 0);
 
       const request = await broker.send(broker.mainAddress, {
         to: preview.address, subject: "Use tools", message: "Return result.", priority: "low",
@@ -575,10 +576,10 @@ describe("broker hardening", () => {
       assert.equal(joined.items[0]?.reply?.message, "Joined result.");
       assert.equal(main.deliveries.length, 0, "collected replies are rendered by the wait tool, not injected as a second turn");
       workers[0]!.settle();
-      await eventually(() => assert.equal(broker.inspectAgent(preview.address).state, "idle"));
+      await eventually(() => assert.equal(inspectLlm(broker, preview.address).state, "idle"));
 
       await broker.archive(preview.address);
-      assert.equal(broker.inspectAgent(preview.address).state, "archived");
+      assert.equal(inspectLlm(broker, preview.address).state, "archived");
       const restored = await broker.send(broker.mainAddress, {
         to: preview.address, subject: "Restore context", message: "Resume the archived identity.", priority: "low",
       });
@@ -605,7 +606,7 @@ describe("broker hardening", () => {
       });
       workers[0]!.fail("provider unavailable");
       await eventually(() => {
-        const inspection = broker.inspectAgent(request.envelope.to);
+        const inspection = inspectLlm(broker, request.envelope.to);
         assert.equal(inspection.state, "failed");
         assert.equal(inspection.cleanup, undefined);
         assert.equal(workers[0]?.disposed, true, "provider-failure worker disposal completed");
@@ -614,7 +615,7 @@ describe("broker hardening", () => {
       await assert.rejects(broker.clearFailure(request.envelope.to), /idle, stopped, or archived/);
       await broker.stop(request.envelope.to);
       await broker.clearFailure(request.envelope.to);
-      assert.equal(broker.inspectAgent(request.envelope.to).failure, undefined);
+      assert.equal(inspectLlm(broker, request.envelope.to).failure, undefined);
     } finally {
       await broker.shutdown();
     }
@@ -787,7 +788,7 @@ describe("broker hardening", () => {
 
     const second = await setup({ maxAgents: 1 }, first.root);
     try {
-      assert.equal(second.broker.inspectAgent("worker.two@gpt-5.4.com").state, "paused");
+      assert.equal(inspectLlm(second.broker, "worker.two@gpt-5.4.com").state, "paused");
       const result = await second.broker.waitForReplies([pending.envelope.id], 0, true);
       assert.equal(result.complete, true);
       assert.equal(result.timedOut, false);
@@ -818,14 +819,14 @@ describe("broker hardening", () => {
     const restored = await setup({}, first.root);
     try {
       assert.equal(restored.workers.length, 1, "valid record still restores");
-      const staleInspection = restored.broker.inspectAgent("worker.stale-restore@removed-model.com");
+      const staleInspection = inspectLlm(restored.broker, "worker.stale-restore@removed-model.com");
       assert.equal(staleInspection.state, "failed");
       assert.equal(staleInspection.provider, "removed-provider");
       assert.match(staleInspection.failure ?? "", /model unavailable/i);
       await assert.rejects(restored.broker.restart(staleInspection.address), /bound to removed-provider\/removed-model.*not rebound/is);
-      assert.equal(restored.broker.inspectAgent(staleInspection.address).state, "failed");
+      assert.equal(inspectLlm(restored.broker, staleInspection.address).state, "failed");
       await restored.broker.archive(staleInspection.address);
-      assert.equal(restored.broker.inspectAgent(staleInspection.address).state, "archived");
+      assert.equal(inspectLlm(restored.broker, staleInspection.address).state, "archived");
     } finally {
       await restored.broker.shutdown();
     }
@@ -842,7 +843,7 @@ describe("broker hardening", () => {
         to: "worker.failed-count@gpt-5.4.com", subject: "Start", message: "small", priority: "low",
       });
       await broker.mailStore.markFailed(result.envelope.id, "forced terminal failure");
-      assert.equal(broker.inspectAgent(result.envelope.to).unanswered, 0);
+      assert.equal(inspectLlm(broker, result.envelope.to).unanswered, 0);
     } finally {
       await broker.shutdown();
     }

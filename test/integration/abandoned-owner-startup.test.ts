@@ -1,3 +1,4 @@
+import { inspectLlm } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
@@ -155,7 +156,7 @@ it("retries exact-dead takeover safely after failures before and immediately aft
     const restored = brokerAt(root, restoredWorkers);
     await restored.init();
     try {
-      const inspection = restored.inspectAgent(ADDRESS);
+      const inspection = inspectLlm(restored, ADDRESS);
       assert.equal(inspection.state, "failed", `${stage}: retry remains inactive`);
       const persisted = JSON.parse(await readFile(registryPath, "utf8")) as any;
       const normalized = persisted.agents.find((candidate: any) => candidate.address === ADDRESS);
@@ -245,7 +246,7 @@ it("automatically reclaims an exact dead owner, preserves queued mail/session, a
   const restored = brokerAt(root, restoredWorkers);
   await restored.init();
   try {
-    const inspection = restored.inspectAgent(ADDRESS);
+    const inspection = inspectLlm(restored, ADDRESS);
     assert.equal(inspection.state, "failed");
     assert.equal(inspection.cleanup, undefined);
     assert.equal(restoredWorkers.length, 0, "dead-owner normalization never auto-restores a worker");
@@ -260,7 +261,7 @@ it("automatically reclaims an exact dead owner, preserves queued mail/session, a
 
     await restored.restart(ADDRESS);
     assert.equal(restoredWorkers.length, 1, "one explicit restart creates the next same-identity session");
-    assert.equal(restored.inspectAgent(ADDRESS).cleanup, undefined);
+    assert.equal(inspectLlm(restored, ADDRESS).cleanup, undefined);
   } finally {
     await restored.shutdown().catch(() => undefined);
   }

@@ -1,7 +1,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type {
   ActivityItem,
-  AgentRecord,
+  LlmAgentRecord as AgentRecord,
   BrokerSnapshot,
   EmailEnvelope,
   MainAdapter,

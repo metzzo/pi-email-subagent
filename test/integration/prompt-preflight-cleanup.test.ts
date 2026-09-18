@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
-import type { AgentRecord, WorkerStartConfig } from "../../src/types.ts";
+import type { LlmAgentRecord as AgentRecord, WorkerStartConfig } from "../../src/types.ts";
 import { emptyWorkState } from "../../src/work-ledger.ts";
 import { eventually, FakeMainAdapter, fakeModel } from "../helpers/fakes.ts";
 

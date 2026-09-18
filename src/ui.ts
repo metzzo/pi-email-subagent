@@ -506,7 +506,7 @@ export class DashboardComponent {
       if (index >= 0) this.selected = index;
     }
     this.refreshTimer = setInterval(() => {
-      if (this.getSnapshot().agents.some((agent) => (agent.work?.active.length ?? 0) > 0)) this.requestRender();
+      if (this.getSnapshot().agents.some((agent) => agent.kind === "llm" && (agent.work?.active.length ?? 0) > 0)) this.requestRender();
     }, 1_000);
     this.refreshTimer.unref?.();
   }
@@ -517,6 +517,7 @@ export class DashboardComponent {
   }
 
   private visualWorkItems(agent: AgentRecord): WorkItem[] {
+    if (agent.kind === "mechanistic") return [];
     const recent = [...(agent.work?.recent ?? [])].reverse();
     return [...(agent.work?.active ?? []), ...recent.filter((item) => item.attribution === "explicit"), ...recent.filter((item) => item.attribution === "unverified")];
   }
@@ -574,6 +575,13 @@ export class DashboardComponent {
         const selected = index === this.selected;
         const color = agent.state === "failed" ? "error" : agent.state === "running" ? "success" : selected ? "accent" : "text";
         const prefix = selected ? ">" : " ";
+        if (agent.kind === "mechanistic") {
+          const job = agent.jobs?.at(-1);
+          lines.push(this.theme.fg(color, `${prefix} ${statusIcon(agent.state)} ${sanitizeConversationLabel(agent.address)}`));
+          lines.push(this.theme.fg("dim", `    ${agent.state} · Python · ${sanitizeConversationLabel(job?.id ?? "no job")} · ${job?.phase ?? "inactive"}`));
+          lines.push(this.theme.fg(agent.cleanupUnknown ? "error" : "muted", `    ${sanitizeConversationLabel(job?.progress?.message ?? agent.currentActivity ?? "idle")} · ${job?.result ?? "pending"} · cleanup ${job?.cleanup?.state ?? "pending"}`));
+          continue;
+        }
         const usage = `${formatTokens(agent.usage.input)}↑ ${formatTokens(agent.usage.output)}↓ ctx:${formatTokens(agent.usage.contextTokens)} $${agent.usage.cost.toFixed(4)}`;
         const address = sanitizeConversationLabel(agent.address);
         const modelId = sanitizeConversationLabel(agent.modelId);
@@ -597,7 +605,21 @@ export class DashboardComponent {
       }
     } else {
       const agent = agents[this.selected];
-      if (agent) {
+      if (agent?.kind === "mechanistic") {
+        lines.push(this.theme.fg("accent", sanitizeConversationLabel(agent.address)));
+        lines.push(this.theme.fg("muted", `${agent.state} · send-only Python · no inbox, conversation, model, effort, or token usage`));
+        lines.push(this.theme.fg("dim", `script: ${sanitizeConversationLabel(agent.binding.script)} · cwd: ${sanitizeConversationLabel(agent.binding.cwd)}`));
+        lines.push(this.theme.fg("dim", `callers: ${agent.allowedCallers.join(", ")} · run ${agent.lifecycle.runTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));
+        if (agent.failure) lines.push(this.theme.fg("error", sanitizeConversationLabel(agent.failure)));
+        for (const job of [...(agent.jobs ?? [])].reverse()) {
+          lines.push(this.theme.fg("toolTitle", `Job ${job.id} · ${job.phase} · ${job.result ?? "pending"}`));
+          if (job.progress) lines.push(this.theme.fg("muted", `progress: ${sanitizeConversationLabel(job.progress.message)}${job.progress.percent === undefined ? "" : ` (${job.progress.percent}%)`}`));
+          lines.push(this.theme.fg("dim", `script report: ${job.reported?.status ?? "none"} · cleanup: ${job.cleanup?.state ?? "pending"} · direct child only · exit ${job.exitCode ?? "unknown"} ${job.signal ?? ""}`));
+          if (job.reported) lines.push(this.theme.fg("text", sanitizeConversationLabel(job.reported.summary)));
+          if (job.outcomeMailId) lines.push(this.theme.fg("dim", `outcome ${job.outcomeMailId} · ${job.outcomeDeliveryState ?? "unknown"} · not a reply`));
+          if (job.stderr) lines.push(...sanitizeConversationBody(job.stderr).split("\n").slice(-5).map((line) => this.theme.fg("muted", line)));
+        }
+      } else if (agent) {
         const address = sanitizeConversationLabel(agent.address);
         const provider = sanitizeConversationLabel(agent.provider);
         const modelId = sanitizeConversationLabel(agent.modelId);
@@ -666,7 +688,7 @@ export class DashboardComponent {
           lines.push(this.theme.fg("dim", `internal state: ${agent.state}`));
           let inspection: AgentInspection | undefined;
           try { inspection = this.getInspection?.(agent.address); } catch { /* current snapshot remains renderable */ }
-          if (inspection) {
+          if (inspection?.kind === "llm") {
             lines.push(this.theme.fg(
               inspection.providerReady === "unavailable" ? "error" : "dim",
               `binding: persisted ${provider}/${modelId}${inspection.providerReady === "unavailable" ? " · unavailable · no provider substitution" : " · preserved across main-provider changes"}`,
@@ -691,7 +713,7 @@ export class DashboardComponent {
           }
           if (agent.failure) {
             lines.push(this.theme.fg("error", `failure: ${sanitizeConversationLabel(agent.failure)}`));
-            if (inspection && agent.activity.some((item) => item.summary === "Agent run failed")) {
+            if (inspection?.kind === "llm" && agent.activity.some((item) => item.summary === "Agent run failed")) {
               const obligation = inspection.unanswered === 0
                 ? "No delivered requests remain unanswered."
                 : `${inspection.unanswered} delivered request${inspection.unanswered === 1 ? "" : "s"} remain${inspection.unanswered === 1 ? "s" : ""} unanswered.`;
@@ -728,6 +750,9 @@ export class DashboardComponent {
   handleInput(data: string): void {
     const snapshot = this.getSnapshot();
     const agents = snapshot.agents;
+    if (agents[this.selected]?.kind === "mechanistic" && (this.isConversationKey(data) || data === "i" || data === "m")) {
+      this.feedback = "Send-only Python identities have no conversation, inbox, or effort controls."; this.requestRender(); return;
+    }
     if (this.isConversationKey(data) && agents[this.selected]) {
       this.done({ kind: "conversation", address: agents[this.selected]!.address });
       return;
@@ -805,9 +830,9 @@ export class UIController {
       const idle = agents.filter((agent) => agent.state === "idle").length;
       const failed = agents.filter((agent) => agent.state === "failed").length;
       const spawning = agents.filter((agent) => agent.state === "spawning").length;
-      const cleanupUnknown = agents.filter((agent) => Boolean(agent.cleanup)).length;
+      const cleanupUnknown = agents.filter((agent) => agent.kind === "mechanistic" ? agent.cleanupUnknown : Boolean(agent.cleanup)).length;
       const closed = agents.filter((agent) => CLOSED_STATES.has(agent.state)).length;
-      const activeMutations = agents.flatMap((agent) => (agent.work?.active ?? []).filter((item) => item.attribution === "explicit").map((item) => sanitizeConversationLabel(`${agent.name}: ${item.kind} ${item.displayPath ?? "unknown"}`)));
+      const activeMutations = agents.filter((agent) => agent.kind === "llm").flatMap((agent) => (agent.work?.active ?? []).filter((item) => item.attribution === "explicit").map((item) => sanitizeConversationLabel(`${agent.name}: ${item.kind} ${item.displayPath ?? "unknown"}`)));
       const conflicts = activePathConflicts(agents);
       const work = activeMutations.length ? ` · now ${activeMutations.slice(0, 2).join("; ")}${activeMutations.length > 2 ? ` +${activeMutations.length - 2}` : ""}` : "";
       const warning = conflicts.size ? ` · ⚠ ${conflicts.size} path conflict${conflicts.size === 1 ? "" : "s"}` : "";
@@ -861,7 +886,7 @@ export class UIController {
 
   private async showDiff(ctx: ExtensionContext, broker: AgentBroker, address: string, item: WorkItem): Promise<void> {
     let displayItem = broker.getWorkItem(address, item.toolCallId) ?? item;
-    const sessionFile = broker.getSnapshot().agents.find((agent) => agent.address === address)?.sessionFile;
+    const sessionFile = broker.getSnapshot().agents.filter((agent) => agent.kind === "llm").find((agent) => agent.address === address)?.sessionFile;
     if (sessionFile) {
       try {
         const persisted = await readPersistedEditPatch(sessionFile, item.toolCallId);
@@ -876,7 +901,7 @@ export class UIController {
   private async showConversation(ctx: ExtensionContext, broker: AgentBroker, address: string): Promise<void> {
     const record = broker.getSnapshot().agents.find((agent) => agent.address === address);
     if (!record) throw new Error(`Unknown agent ${address}.`);
-    if (!record.sessionFile) throw new Error(`${address} does not have a recorded session yet.`);
+    if (record.kind !== "llm" || !record.sessionFile) throw new Error(`${address} does not have a recorded LLM session.`);
     const source = new ConversationSource(record.sessionFile);
     await source.refresh(true);
     if (source.error && source.blocks.length === 0) throw new Error(`Could not read ${address} conversation: ${source.error}`);

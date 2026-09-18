@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { it } from "node:test";
 import { transitionAbandonedOwnerRecovery } from "../../src/abandoned-owner-recovery.ts";
 import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
-import type { AgentRecord } from "../../src/types.ts";
+import type { LlmAgentRecord as AgentRecord } from "../../src/types.ts";
 
 function record(): AgentRecord {
   return {
+    kind: "llm",
     address: "worker.abandoned@gpt-5.4.com",
     name: "worker",
     taskSlug: "abandoned",

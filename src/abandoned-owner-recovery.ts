@@ -1,4 +1,4 @@
-import type { AgentRecord } from "./types.ts";
+import type { LlmAgentRecord as AgentRecord } from "./types.ts";
 import { clone, nowIso, truncateText } from "./util.ts";
 
 export interface AbandonedOwnerRecoveryTransition {

@@ -1,3 +1,4 @@
+import { inspectLlm, llmSnapshot } from "../helpers/llm.ts";
 import assert from "node:assert/strict";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,10 +37,10 @@ describe("initial delegation effort", () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-initial-effort-"));
     const { broker, workers } = await setup(root);
     try {
-      const prospective = broker.inspectAgent("worker.deep@gpt-5.6-sol.com", "xhigh");
+      const prospective = inspectLlm(broker, "worker.deep@gpt-5.6-sol.com", "xhigh");
       assert.equal(prospective.exists, false);
       assert.equal(prospective.effort, "xhigh");
-      assert.equal(broker.getSnapshot().agents.length, 0, "inspection remains side-effect free");
+      assert.equal(llmSnapshot(broker).agents.length, 0, "inspection remains side-effect free");
 
       const sent = await broker.send(broker.mainAddress, {
         to: "worker.deep@gpt-5.6-sol.com",
@@ -51,8 +52,8 @@ describe("initial delegation effort", () => {
       assert.equal(sent.spawned, true);
       assert.equal(sent.recipientEffort, "xhigh");
       assert.equal(sent.envelope.effortIntent, "xhigh");
-      assert.equal(broker.inspectAgent(sent.envelope.to).effort, "xhigh");
-      assert.equal(broker.getSnapshot().agents[0]?.effort, "xhigh");
+      assert.equal(inspectLlm(broker, sent.envelope.to).effort, "xhigh");
+      assert.equal(llmSnapshot(broker).agents[0]?.effort, "xhigh");
       assert.equal(workers[0]?.record?.effort, "xhigh");
     } finally {
       await broker.shutdown();
@@ -81,7 +82,7 @@ describe("initial delegation effort", () => {
         /effort overrides are accepted only on the first delegation.*already exists/i,
       );
       assert.throws(
-        () => broker.inspectAgent(sent.envelope.to, "high"),
+        () => inspectLlm(broker, sent.envelope.to, "high"),
         /effort override.*prospective unknown agent/i,
       );
       await assert.rejects(
@@ -111,7 +112,7 @@ describe("initial delegation effort", () => {
         message: "Done.",
         priority: "low",
       });
-      assert.equal(broker.inspectAgent(sent.envelope.to).effort, "xhigh");
+      assert.equal(inspectLlm(broker, sent.envelope.to).effort, "xhigh");
     } finally {
       await broker.shutdown();
     }
@@ -137,7 +138,7 @@ describe("initial delegation effort", () => {
 
     const { broker, workers } = await setup(root);
     try {
-      assert.equal(broker.inspectAgent("worker.recover@gpt-5.6-sol.com").effort, "xhigh");
+      assert.equal(inspectLlm(broker, "worker.recover@gpt-5.6-sol.com").effort, "xhigh");
       assert.equal(workers[0]?.record?.effort, "xhigh");
     } finally {
       await broker.shutdown();
