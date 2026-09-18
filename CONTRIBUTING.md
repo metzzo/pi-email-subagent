@@ -1,5 +1,15 @@
 # Contributing
 
+Coverage runs the ordinary TSX tests and real Pi/Jiti runtime tests. These loaders
+compile the same TypeScript source differently. The coverage-only URL hook gives
+TSX scripts a distinct generated URL so Node cannot overwrite one compiler's
+source map with the other's. `scripts/merge-coverage.ts` unions original-source
+line hits and retains every reported function/branch obligation before the
+unchanged coverage gate runs. Raw and normalized LCOV are retained separately;
+`test/unit/coverage-loader.test.ts` exercises both real loaders and verifies that
+normalization discards no function or branch obligations.
+
+
 Thanks for improving `pi-email-subagent`.
 
 ## Development setup

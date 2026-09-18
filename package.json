@@ -42,7 +42,7 @@
     "test:unit": "tsx --test test/unit/**/*.test.ts",
     "test:integration": "tsx --test test/integration/**/*.test.ts",
     "test:e2e": "tsx --test test/e2e/**/*.test.ts",
-    "test:coverage": "mkdir -p .test-workspaces && tsx --test --test-concurrency=1 --experimental-test-isolation=none --experimental-test-coverage --test-reporter=spec --test-reporter-destination=.test-workspaces/coverage-tests.log --test-reporter=lcov --test-reporter-destination=.test-workspaces/coverage.lcov test/**/*.test.ts && tsx scripts/coverage-gate.ts .test-workspaces/coverage.lcov coverage-thresholds.json",
+    "test:coverage": "mkdir -p .test-workspaces && NODE_OPTIONS=\"--import=$PWD/scripts/coverage-register.mjs\" tsx --test --test-concurrency=1 --experimental-test-isolation=none --experimental-test-coverage --test-reporter=spec --test-reporter-destination=.test-workspaces/coverage-tests.log --test-reporter=lcov --test-reporter-destination=.test-workspaces/coverage-raw.lcov test/**/*.test.ts && tsx scripts/merge-coverage.ts .test-workspaces/coverage-raw.lcov .test-workspaces/coverage.lcov && tsx scripts/coverage-gate.ts .test-workspaces/coverage.lcov coverage-thresholds.json",
     "test:package": "tsx scripts/package-smoke.ts",
     "check:package": "tsx scripts/package-policy.ts",
     "test:live": "tsx scripts/live-e2e.ts",
