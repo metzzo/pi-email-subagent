@@ -163,3 +163,12 @@ Provider/catalog changes require extension reload. The current 0.1.0 candidate s
 - `CONTRIBUTING.md`: development and pull-request expectations.
 - `SECURITY.md`: vulnerability reporting, sensitive data, and the current trusted-worker threat boundary.
 - `CHANGELOG.md`: release changes and the `v0.1.0` initial-tag strategy.
+
+## Send-only Python programs
+
+Trusted global/trusted-project registrations can run Python jobs at
+`<program>.<task-slug>@mechanistic.com`. Each accepted notification is one job;
+Python identities have no inbox, reply obligations, model or effort. See the
+[registration, helper, examples and recovery guide](docs/mechanistic-usage.md).
+Trusted Python is not sandboxed; cleanup covers the direct child, not all
+descendant or external effects.

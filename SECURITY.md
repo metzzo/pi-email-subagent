@@ -42,3 +42,18 @@ Mail bodies, subjects, agent activity, usage, and worker session transcripts are
 ## Security roadmap
 
 Future workspace isolation, subprocess boundaries, and stronger cross-parent coordination are not part of version 0.1.0. Track security work in the repository issue tracker; internal implementation plans are intentionally excluded from the npm artifact.
+
+## Trusted Python jobs
+
+Mechanistic registrations are allowed only in global or explicitly trusted
+project configuration, and default to main-only callers. They execute fixed
+Python/script/cwd bindings with ordinary host credentials and permissions. This
+is not a sandbox. Program authors must validate input and avoid turning email
+text into shell commands, executable paths or arbitrary argv. The bundled
+examples use a fixed Git operation and a bounded local status-file observation.
+
+The broker owns only its exact direct child and observed stdio. Bounded child
+termination does not prove descendant, network, or detached effects are settled.
+Unknown cleanup quarantines the identity. Review evidence before explicitly
+clearing failure; never replay an accepted job that may already have started.
+Script reports, artifact references and progress are unverified program output.

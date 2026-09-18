@@ -19,6 +19,10 @@ const REQUIRED = [
   "SECURITY.md",
   "CONTRIBUTING.md",
   "src/index.ts",
+  "src/python/pi_mechanistic.py",
+  "src/python/examples/command.py",
+  "src/python/examples/status_file.py",
+  "docs/mechanistic-usage.md",
 ];
 
 function pack(overrides: Partial<PackResult> = {}): PackResult {

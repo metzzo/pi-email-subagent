@@ -15,8 +15,8 @@ export interface PackResult {
   files: PackedFile[];
 }
 
-export const PACKAGE_MAX_ENTRIES = 51;
-export const PACKAGE_MAX_SIZE_BYTES = 200_000;
+export const PACKAGE_MAX_ENTRIES = 60;
+export const PACKAGE_MAX_SIZE_BYTES = 220_000;
 
 const REQUIRED_PATHS = [
   "package.json",
@@ -26,8 +26,12 @@ const REQUIRED_PATHS = [
   "SECURITY.md",
   "CONTRIBUTING.md",
   "src/index.ts",
+  "src/python/pi_mechanistic.py",
+  "src/python/examples/command.py",
+  "src/python/examples/status_file.py",
+  "docs/mechanistic-usage.md",
 ] as const;
-const FORBIDDEN_PATH = /^(?:test|scripts|\.github|plans)(?:\/|$)/;
+const FORBIDDEN_PATH = /^(?:test|scripts|\.github|plans)(?:\/|$)|(?:^|\/)__pycache__(?:\/|$)|\.py[co]$/;
 const ALLOWED_ROOT_PATHS = new Set<string>(REQUIRED_PATHS);
 
 export function assertPackageSurface(pack: PackResult): void {
