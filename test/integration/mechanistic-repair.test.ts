@@ -37,6 +37,82 @@ const send = (broker: AgentBroker, task = "test", message = "{}") => broker.send
 const settled = (broker: AgentBroker) => until(() => broker.getSnapshot().capacity.runSlotsUsed === 0);
 const effect = "from pi_mechanistic import *\nfrom pathlib import Path\nimport time\na=arguments()\nwith open('effects','a') as f: f.write(invocation()['jobId']+'\\n')\nif a.get('hold'): time.sleep(5)\nsuccess('done')\n";
 
+for (const cleanupUnknown of [true, false]) it(`queued abandonment preserves older identity failure and quarantine (cleanup unknown=${cleanupUnknown})`, { timeout: 15000 }, async () => {
+  const f = await fixture("from pi_mechanistic import *\nimport subprocess,sys\nwith open('effects','a') as f: f.write(invocation()['jobId']+'\\n')\nif arguments().get('uncertain'):\n subprocess.Popen([sys.executable,'-c',\"import time; from pathlib import Path; time.sleep(.8); Path('descendant.done').touch()\"])\nsuccess('direct child done')\n");
+  let watching = false;
+  try {
+    const first = await send(f.broker, "test", JSON.stringify({ uncertain: cleanupUnknown }));
+    await until(() => f.broker.mailStore.getJob(first.envelope.id)?.phase === "terminal"); await settled(f.broker);
+    if (!cleanupUnknown) await f.broker.clearFailure(first.envelope.to); // retains a prior cleanup audit timestamp
+    const abandoned = await send(f.broker); const next = await send(f.broker);
+    if (!cleanupUnknown) {
+      const registered = f.config.mechanisticPrograms;
+      f.config.mechanisticPrograms = {}; await f.reopen(); // actual missing-binding failure, no cleanup quarantine
+      f.config.mechanisticPrograms = registered; // binding is usable, but failure still requires explicit restart
+    }
+    const identity = (snapshot = f.broker.getSnapshot()) => {
+      const record = snapshot.agents.find((agent) => agent.address === first.envelope.to);
+      assert.ok(record?.kind === "mechanistic");
+      const { jobs: _jobs, ...state } = record; return state;
+    };
+    const before = identity(); const olderJob = f.broker.mailStore.getJob(first.envelope.id)!;
+    assert.equal(before.state, "failed"); assert.equal(Boolean(before.cleanupUnknown), cleanupUnknown); assert.ok(before.failure);
+    assert.equal(olderJob.cleanup?.state, cleanupUnknown ? "cleanup-unknown" : "confirmed");
+    assert.equal(f.broker.mailStore.getJob(next.envelope.id)?.phase, "queued");
+    assert.equal(f.broker.getSnapshot().capacity.runSlotsUsed, 0, "durable quarantine releases the run slot, not the identity lease");
+    const identitiesUsed = f.broker.getSnapshot().capacity.identitiesUsed;
+    const publications: ReturnType<typeof identity>[] = [];
+    f.options.mainAdapter.updateState = (snapshot) => { if (watching) publications.push(identity(snapshot)); };
+    watching = true;
+    await f.broker.cancelRequest(abandoned.envelope.id, "User abandons only this queued job, not the older uncertain work.");
+    const immediatelyAfter = identity();
+    // A subsequent accepted job must not accidentally unblock the earlier queued
+    // job either. Unrelated real work proves the released run slot remains usable.
+    const later = await send(f.broker);
+    const unrelated = await send(f.broker, "unrelated");
+    await until(() => f.broker.mailStore.getJob(unrelated.envelope.id)?.phase === "terminal"); await settled(f.broker);
+    watching = false;
+    const effects = await readFile(join(f.root, "effects"), "utf8");
+    console.log(JSON.stringify({ cleanupUnknown, before, immediatelyAfter, nextPhase: f.broker.mailStore.getJob(next.envelope.id)?.phase, nextExecuted: effects.includes(next.envelope.id), laterExecuted: effects.includes(later.envelope.id) }));
+    assert.deepEqual(immediatelyAfter, before, "abandonment cannot clear another job's identity failure or cleanup evidence");
+    assert.deepEqual(identity(), before);
+    assert.ok(publications.length > 0);
+    for (const published of publications) assert.deepEqual(published, before, "no transient publication may reactivate the identity");
+    assert.equal(f.broker.mailStore.getJob(next.envelope.id)?.phase, "queued");
+    assert.equal(f.broker.mailStore.getJob(later.envelope.id)?.phase, "queued");
+    assert.equal(effects.includes(next.envelope.id), false); assert.equal(effects.includes(abandoned.envelope.id), false);
+    assert.equal(f.broker.mailStore.getJob(unrelated.envelope.id)?.result, "success");
+    assert.equal(f.broker.getSnapshot().capacity.runSlotsUsed, 0);
+    assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, identitiesUsed + 1);
+    const inspection = f.broker.inspectAgent(first.envelope.to);
+    assert.equal(inspection.holdsActivationLease, true); assert.equal(inspection.state, "failed");
+    const terminal = f.broker.mailStore.getJob(abandoned.envelope.id)!;
+    assert.equal(terminal.result, "abandoned"); assert.equal(terminal.cleanup?.state, "confirmed");
+    assert.equal(f.broker.mailStore.get(abandoned.envelope.id)?.deliveryState, "cancelled");
+    assert.equal(f.broker.mailStore.list().filter((mail) => mail.id === terminal.outcomeMailId).length, 1);
+    assert.deepEqual(f.broker.mailStore.getJob(first.envelope.id), olderJob);
+    if (cleanupUnknown) await assert.rejects(f.broker.restart(first.envelope.to), /cleanup.*unknown/i);
+    await f.broker.mailStore.compact(); await f.reopen();
+    assert.equal(identity().state, "failed"); assert.equal(Boolean(identity().cleanupUnknown), cleanupUnknown);
+    assert.equal(f.broker.mailStore.getJob(next.envelope.id)?.phase, "queued");
+    assert.equal(f.broker.mailStore.getJob(abandoned.envelope.id)?.outcomeMailId, terminal.outcomeMailId);
+    // Observe the deliberately finite inherited-pipe descendant settle before
+    // the operator explicitly releases the historical identity quarantine.
+    if (cleanupUnknown) await until(async () => (await readFile(join(f.root, "descendant.done")).catch(() => undefined)) !== undefined);
+    await f.broker.clearFailure(first.envelope.to);
+    assert.equal(identity().state, "stopped"); assert.equal(f.broker.mailStore.getJob(next.envelope.id)?.phase, "queued");
+    await f.broker.restart(first.envelope.to);
+    await until(() => f.broker.mailStore.getJob(later.envelope.id)?.phase === "terminal"); await settled(f.broker);
+    assert.equal(f.broker.mailStore.getJob(next.envelope.id)?.result, "success");
+    assert.equal(f.broker.mailStore.getJob(later.envelope.id)?.result, "success");
+    assert.deepEqual(f.broker.mailStore.getJob(first.envelope.id), olderJob);
+  } finally {
+    watching = false;
+    if (cleanupUnknown) await until(async () => (await readFile(join(f.root, "descendant.done")).catch(() => undefined)) !== undefined);
+    await f.close();
+  }
+});
+
 for (const removed of [false, true]) it(`abandons exactly one stopped queued Python job with durable audit and no process effect (binding removed=${removed})`, { timeout: 15000 }, async () => {
   const f = await fixture(effect);
   try {

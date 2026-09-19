@@ -854,13 +854,17 @@ export class AgentBroker {
     // The journal atomically replaces that reservation; never re-admit terminal
     // work or wait for busy main to make room for an already accepted job.
     await this.withMailSerialization(() => this.mailStore.finishJob(terminal, notification));
-    const record = this.mechanisticRecords.get(job.address)!;
-    record.cleanupUnknown = terminal.cleanup?.state === "cleanup-unknown";
-    record.currentActivity = `Job ${job.id}: ${terminal.result}`;
-    record.updatedAt = terminal.updatedAt;
-    if (record.cleanupUnknown) { record.state = "failed"; record.failure = "Direct-child cleanup unknown; inspect job evidence before explicit clear_failure. Never replay this job."; }
-    else if (!["stopped", "paused", "archived"].includes(record.state)) record.state = "idle";
-    await this.persistRegistry(true);
+    // Abandonment settles only this never-started job. Its confirmed cleanup
+    // cannot clear a different job's identity quarantine or reactivate failure.
+    if (!abandoned) {
+      const record = this.mechanisticRecords.get(job.address)!;
+      record.cleanupUnknown = terminal.cleanup?.state === "cleanup-unknown";
+      record.currentActivity = `Job ${job.id}: ${terminal.result}`;
+      record.updatedAt = terminal.updatedAt;
+      if (record.cleanupUnknown) { record.state = "failed"; record.failure = "Direct-child cleanup unknown; inspect job evidence before explicit clear_failure. Never replay this job."; }
+      else if (!["stopped", "paused", "archived"].includes(record.state)) record.state = "idle";
+      await this.persistRegistry(true);
+    }
     if (!this.disposed && this.lifecycle === "active") {
       await this.routeMainEnvelope(notification);
       this.scheduleMailMaintenance(); this.publish();
