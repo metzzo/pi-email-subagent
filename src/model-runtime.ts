@@ -106,7 +106,7 @@ function assertStaticNativeProvider(providerId: string, provider: NativeProvider
   }
 }
 
-function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
+function requestModelSnapshot(model: Model<Api>, registered: boolean): RequestModelSnapshot {
   const {
     id,
     name,
@@ -122,7 +122,7 @@ function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
     samplingParams,
     compat,
   } = model;
-  return structuredClone({
+  const snapshot = structuredClone({
     id,
     name,
     api,
@@ -137,6 +137,16 @@ function requestModelSnapshot(model: Model<Api>): RequestModelSnapshot {
     ...(samplingParams !== undefined ? { samplingParams } : {}),
     ...(compat !== undefined ? { compat } : {}),
   }) as RequestModelSnapshot;
+  // Pi 0.85.1 does not consume this remote-catalog annotation. Its background
+  // refresh can add `true` after extension startup without changing a request.
+  // Normalize only that additive value for built-in transports; false/unknown
+  // values and registered provider callbacks retain exact metadata checks.
+  const compatibility = snapshot.compat as Record<string, unknown> | undefined;
+  if (!registered && compatibility) {
+    if (compatibility.supportsMidConvoSystemMessages === true) delete compatibility.supportsMidConvoSystemMessages;
+    if (Object.keys(compatibility).length === 0) delete snapshot.compat;
+  }
+  return snapshot;
 }
 
 function freezeRequestModel<T>(value: T, seen = new WeakSet<object>()): T {
@@ -183,7 +193,7 @@ export class WorkerRuntimeFactory {
       }
       const key = modelKey(model.provider, model.id);
       if (hasModelHeaders(model)) this.headerModels.add(key);
-      this.requestModels.set(key, requestModelSnapshot(model));
+      this.requestModels.set(key, requestModelSnapshot(model, this.registeredProviders.has(model.provider)));
     }
   }
 
@@ -261,7 +271,7 @@ export class WorkerRuntimeFactory {
       );
     }
     if (hasModelHeaders(model)) throw headerProvenanceError(providerId, modelId);
-    const workerRequest = requestModelSnapshot(model);
+    const workerRequest = requestModelSnapshot(model, registered !== undefined);
     if (!isDeepStrictEqual(parentRequest, workerRequest)) {
       throw new ProviderReadinessError(
         providerId,
