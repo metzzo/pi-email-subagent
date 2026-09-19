@@ -116,6 +116,16 @@ for the direct child and observed pipes. Trusted scripts may launch descendants,
 use credentials, access the network or change arbitrary files; detached effects
 are not sandboxed or automatically proven settled. Design scripts accordingly.
 
+## Opt-in live validation
+
+The paid live chain is opt-in and uses disposable temporary files only:
+
+```sh
+LIVE_MODEL=openai-codex/gpt-5.6-luna npm run test:live:mechanistic
+```
+
+The runner starts a fresh Pi RPC process, asks a real LLM to delegate through an LLM worker to the trusted `evidence` Python program, and retains bounded JSON evidence under `.test-workspaces/mechanistic-subagents/`. It asserts notification kinds, broker IDs, authenticated senders, no response obligations, and that the final notification contains the nonce read from the disposable evidence file. A failed run retains its complete diagnostic log; no external or destructive action is performed.
+
 ## Validation limits
 
 Automated tests use real Python processes and disposable files. They cover

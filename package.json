@@ -46,6 +46,7 @@
     "test:package": "tsx scripts/package-smoke.ts",
     "check:package": "tsx scripts/package-policy.ts",
     "test:live": "tsx scripts/live-e2e.ts",
+    "test:live:mechanistic": "tsx scripts/live-mechanistic-e2e.ts",
     "check:secrets": "gitleaks git --config=.gitleaks.toml --redact --no-banner .",
     "check:licenses": "tsx scripts/check-dependency-licenses.ts",
     "validate": "npm run check && npm run check:licenses && npm run test:coverage && npm run test:package",
