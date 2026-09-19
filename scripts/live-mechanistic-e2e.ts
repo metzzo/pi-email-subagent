@@ -29,16 +29,32 @@ interface RpcSummary {
   toolEnds: Array<{ toolName: string; isError: boolean }>;
   extensionErrors: number;
 }
+async function waitForExitWithin(
+  client: PiRpcClient,
+  milliseconds: number,
+): Promise<{ exited: true; code: number | null } | { exited: false }> {
+  const controller = new AbortController();
+  const exit = client.waitForExit().then(
+    (code) => ({ exited: true as const, code }),
+    () => ({ exited: true as const, code: null }),
+  );
+  const deadline = delay(milliseconds, undefined, {
+    signal: controller.signal,
+  }).then(
+    () => ({ exited: false as const }),
+    () => ({ exited: false as const }),
+  );
+  const result = await Promise.race([exit, deadline]);
+  controller.abort();
+  return result;
+}
 async function stopClient(client: PiRpcClient): Promise<number | null> {
   client.kill("SIGTERM");
-  const result = await Promise.race([
-    client.waitForExit().catch(() => null),
-    delay(5000).then(() => undefined),
-  ]);
-  if (result === undefined) {
-    client.kill("SIGKILL");
-  }
-  return await client.waitForExit().catch(() => null);
+  const term = await waitForExitWithin(client, 5000);
+  if (term.exited) return term.code;
+  client.kill("SIGKILL");
+  const killed = await waitForExitWithin(client, 5000);
+  return killed.exited ? killed.code : null;
 }
 async function writeFixture(
   root: string,
@@ -75,7 +91,7 @@ function summarizeRpc(
     command?: string;
     toolName?: unknown;
     isError?: unknown;
-  }>, 
+  }>,
 ): RpcSummary {
   return {
     getStateResponses: events.filter(
