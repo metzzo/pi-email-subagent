@@ -26,6 +26,8 @@ interface RpcSummary {
   getStateResponses: number;
   promptResponses: number;
   settled: number;
+  agentStarts: number;
+  agentEnds: number;
   toolEnds: Array<{ toolName: string; isError: boolean }>;
   extensionErrors: number;
 }
@@ -101,6 +103,8 @@ function summarizeRpc(
       (e) => e.type === "response" && e.command === "prompt",
     ).length,
     settled: events.filter((e) => e.type === "agent_settled").length,
+    agentStarts: events.filter((e) => e.type === "agent_start").length,
+    agentEnds: events.filter((e) => e.type === "agent_end").length,
     toolEnds: events
       .filter((e) => e.type === "tool_execution_end")
       .map((e) => ({
@@ -206,9 +210,6 @@ async function main(): Promise<number> {
     pollController?.abort();
     timeoutController?.abort();
     if (pollPromise) await pollPromise.catch(() => undefined);
-    if (client) {
-      await client.waitForExit().catch(() => null);
-    }
   }
   if (journal) {
     try {
@@ -217,9 +218,7 @@ async function main(): Promise<number> {
       category = category ?? "final journal unavailable or malformed";
     }
   }
-  const childExitCode = client
-    ? await client.waitForExit().catch(() => null)
-    : null;
+  const childExitCode: number | null = null;
   const validation = validateLiveGraph({
     events,
     worker,
