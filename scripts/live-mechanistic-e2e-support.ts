@@ -19,6 +19,8 @@ export function parseFiniteEnv(value: string | undefined, fallback: number, min 
   if (!Number.isSafeInteger(number) || number < min || number > max) throw new Error(`timeout must be an integer from ${min} to ${max}`);
   return number;
 }
+export function safeSessionId(value: unknown): string { if(typeof value!=="string"||!/^[A-Za-z0-9-]{1,128}$/.test(value)) throw new Error("unsafe or missing session ID"); return value; }
+export function childJournalPath(agentDir: string, sessionId: unknown): string { return `${agentDir}/subagents/${safeSessionId(sessionId)}/mail.jsonl`; }
 export function parseLiveModel(value: string | undefined): { provider: string; modelId: string } {
   if (!value) throw new Error("LIVE_MODEL is required");
   const separator = value.indexOf("/");
