@@ -1,17 +1,279 @@
-import { mkdtemp, mkdir, writeFile, readFile, chmod, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  chmod,
+  rm,
+} from "node:fs/promises";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
-import { childJournalPath, parseFiniteEnv, parseLiveModel, parseLfJournal, collectEnvelopes, hasDurableFinal, validateLiveGraph } from "./live-mechanistic-e2e-support.ts";
+import {
+  childJournalPath,
+  parseFiniteEnv,
+  parseLiveModel,
+  parseLfJournal,
+  collectEnvelopes,
+  hasDurableFinal,
+  validateLiveGraph,
+} from "./live-mechanistic-e2e-support.ts";
 import type { MailEvent } from "../src/mail-store.ts";
 
-interface RpcSummary { getStateResponses:number; promptResponses:number; settled:number; toolEnds:number; extensionErrors:number; }
-async function stopClient(client:PiRpcClient):Promise<number|null>{ client.kill("SIGTERM"); const result=await Promise.race([client.waitForExit().catch(()=>null),delay(5000).then(()=>undefined)]); if(result===undefined){client.kill("SIGKILL");} return await client.waitForExit().catch(()=>null); }
-async function writeFixture(root:string,main:string,worker:string):Promise<void>{ const script=join(root,"evidence.py"); await writeFile(join(root,"evidence.txt"),"NONCE-"+Math.random().toString(36).slice(2,12)); await writeFile(script,`import json\nfrom pathlib import Path\nfrom pi_mechanistic import arguments,invocation,send_email,success\na=arguments(); n=Path('evidence.txt').read_text().strip(); j=invocation()['jobId']; ack=send_email(a['notify_to'],'MECHANISTIC_EVIDENCE',"Call send_email(to='${main}', subject='MECHANISTIC_CHAIN_COMPLETE', message=<exact JSON {nonce,jobId}>, requires_response=false): "+json.dumps({'nonce':n,'jobId':j},separators=(',',':'))); assert ack['accepted']; success('evidence processed: '+n)\n`); await mkdir(join(root,".pi"),{recursive:true}); await writeFile(join(root,".pi","subagents.json"),JSON.stringify({mechanisticPrograms:{evidence:{python:"/usr/bin/python3",script,cwd:root,allowedCallers:["main"]}}})); }
-function summarizeRpc(events:ReadonlyArray<{type?:string;command?:string;toolName?:unknown}>):RpcSummary{return {getStateResponses:events.filter(e=>e.type==="response"&&e.command==="get_state").length,promptResponses:events.filter(e=>e.type==="response"&&e.command==="prompt").length,settled:events.filter(e=>e.type==="agent_settled").length,toolEnds:events.filter(e=>e.type==="tool_execution_end").length,extensionErrors:events.filter(e=>e.type==="extension_error").length};}
-async function main():Promise<number>{ const model=parseLiveModel(process.env.LIVE_MODEL); const timeout=parseFiniteEnv(process.env.LIVE_TIMEOUT_MS,240000); const agentDir=process.env.PI_CODING_AGENT_DIR??join(process.env.HOME??tmpdir(),".pi","agent"); const root=await mkdtemp(join(tmpdir(),"pi-mechanistic-live-")); await chmod(root,0o700); const mainAddress=`main@${model.modelId}.com`; const worker=`evidence-worker.nonce@${model.modelId}.com`; const mechanistic="evidence.nonce@mechanistic.com"; let client:PiRpcClient|undefined; let sessionId:string|undefined; let journal:string|undefined; let events:MailEvent[]=[]; let finalObserved=false; let timedOut=false; let shutdown="failure"; let category:string|undefined;
- try { await writeFixture(root,mainAddress,worker); client=PiRpcClient.launch({cwd:root,agentDir,model:`${model.provider}/${model.modelId}`,extensions:[resolve("./src/index.ts")],approveProject:true}); const state=await client.getState(); if(state.success!==true)throw new Error("startup"); sessionId=String((state.data as {sessionId?:unknown}).sessionId); if(!sessionId)throw new Error("startup"); journal=childJournalPath(agentDir,sessionId); const prompt=`You MUST make one send_email tool call before any final answer. Call ${mechanistic} exactly once as a notification with requires_response:false and JSON {"notify_to":"${worker}"}; do not merely describe or wait. The worker must send exact subject MECHANISTIC_CHAIN_COMPLETE to ${mainAddress} with exact structured nonce/job JSON.`; await client.prompt(prompt); const poll=async()=>{while(true){try{events=parseLfJournal(await readFile(journal!,"utf8"));if(hasDurableFinal(collectEnvelopes(events),worker,mainAddress)&&client!.events().some(e=>e.type==="agent_settled")){finalObserved=true;return;}}catch(error){if((error as NodeJS.ErrnoException).code!=="ENOENT"&&!/truncated/.test(String(error))){category="journal polling failed";return;}} await delay(250);}}; const timer=delay(timeout).then(()=>{timedOut=true;category="timeout";}); await Promise.race([poll(),timer]); if(finalObserved){shutdown="completed";await client.close();}else{shutdown=category??"failure";await stopClient(client);} }catch{category="lifecycle failure";if(client)await stopClient(client);}finally{if(client){await client.waitForExit().catch(()=>null);}}
- if(journal){try{events=parseLfJournal(await readFile(journal,"utf8"));}catch{category=category??"final journal unavailable or malformed";}}
- const childExitCode=client?await client.waitForExit().catch(()=>null):null; const validation=validateLiveGraph({events,worker,main:mainAddress,mechanistic,childExitCode,timedOut,durableFinalObserved:finalObserved,mainSettled:client?.events().some(e=>e.type==="agent_settled")===true,pollError:category}); const runnerExitCode=validation.ok?0:1; const output=resolve(process.env.LIVE_EVIDENCE_DIR??".test-workspaces/mechanistic-subagents"); await mkdir(output,{recursive:true}); const log=join(output,`live-mechanistic-${Date.now()}.json`); await writeFile(log,JSON.stringify({model:`${model.provider}/${model.modelId}`,runnerExitCode,childExitCode,timedOut,shutdown,mainSettled:client?.events().some(e=>e.type==="agent_settled")===true,finalObserved,sessionId,rpcSummary:client?summarizeRpc(client.events()):undefined,envelopes:collectEnvelopes(events).map(e=>({id:e.id,from:e.from,to:e.to,subject:e.subject,kind:e.kind,requiresResponse:e.requiresResponse,inReplyTo:e.inReplyTo,completion:e.completion,deliveryState:e.deliveryState})),validation},null,2)); const namespace=journal?dirname(journal):undefined; if(runnerExitCode===0){if(namespace)await rm(namespace,{recursive:true,force:true});await rm(root,{recursive:true,force:true});}else{await chmod(root,0o700);if(namespace)await chmod(namespace,0o700);console.error(`preserved project: ${root}${namespace?`; namespace: ${namespace}`:""}`);} console.log(JSON.stringify({passed:runnerExitCode===0,runnerExitCode,childExitCode,log})); return runnerExitCode; }
-try{process.exitCode=await main();}catch{process.exitCode=1;}
+interface RpcSummary {
+  getStateResponses: number;
+  promptResponses: number;
+  settled: number;
+  toolEnds: number;
+  extensionErrors: number;
+}
+async function stopClient(client: PiRpcClient): Promise<number | null> {
+  client.kill("SIGTERM");
+  const result = await Promise.race([
+    client.waitForExit().catch(() => null),
+    delay(5000).then(() => undefined),
+  ]);
+  if (result === undefined) {
+    client.kill("SIGKILL");
+  }
+  return await client.waitForExit().catch(() => null);
+}
+async function writeFixture(
+  root: string,
+  main: string,
+  worker: string,
+): Promise<void> {
+  const script = join(root, "evidence.py");
+  await writeFile(
+    join(root, "evidence.txt"),
+    "NONCE-" + Math.random().toString(36).slice(2, 12),
+  );
+  await writeFile(
+    script,
+    `import json\nfrom pathlib import Path\nfrom pi_mechanistic import arguments,invocation,send_email,success\na=arguments(); n=Path('evidence.txt').read_text().strip(); j=invocation()['jobId']; ack=send_email(a['notify_to'],'MECHANISTIC_EVIDENCE',"Call send_email(to='${main}', subject='MECHANISTIC_CHAIN_COMPLETE', message=<exact JSON {nonce,jobId}>, requires_response=false): "+json.dumps({'nonce':n,'jobId':j},separators=(',',':'))); assert ack['accepted']; success('evidence processed: '+n)\n`,
+  );
+  await mkdir(join(root, ".pi"), { recursive: true });
+  await writeFile(
+    join(root, ".pi", "subagents.json"),
+    JSON.stringify({
+      mechanisticPrograms: {
+        evidence: {
+          python: "/usr/bin/python3",
+          script,
+          cwd: root,
+          allowedCallers: ["main"],
+        },
+      },
+    }),
+  );
+}
+function summarizeRpc(
+  events: ReadonlyArray<{
+    type?: string;
+    command?: string;
+    toolName?: unknown;
+  }>,
+): RpcSummary {
+  return {
+    getStateResponses: events.filter(
+      (e) => e.type === "response" && e.command === "get_state",
+    ).length,
+    promptResponses: events.filter(
+      (e) => e.type === "response" && e.command === "prompt",
+    ).length,
+    settled: events.filter((e) => e.type === "agent_settled").length,
+    toolEnds: events.filter((e) => e.type === "tool_execution_end").length,
+    extensionErrors: events.filter((e) => e.type === "extension_error").length,
+  };
+}
+async function main(): Promise<number> {
+  const model = parseLiveModel(process.env.LIVE_MODEL);
+  const timeout = parseFiniteEnv(process.env.LIVE_TIMEOUT_MS, 240000);
+  const agentDir =
+    process.env.PI_CODING_AGENT_DIR ??
+    join(process.env.HOME ?? tmpdir(), ".pi", "agent");
+  const root = await mkdtemp(join(tmpdir(), "pi-mechanistic-live-"));
+  await chmod(root, 0o700);
+  const mainAddress = `main@${model.modelId}.com`;
+  const worker = `evidence-worker.nonce@${model.modelId}.com`;
+  const mechanistic = "evidence.nonce@mechanistic.com";
+  let client: PiRpcClient | undefined;
+  let sessionId: string | undefined;
+  let journal: string | undefined;
+  let events: MailEvent[] = [];
+  let finalObserved = false;
+  let timedOut = false;
+  let shutdown = "failure";
+  let category: string | undefined;
+  try {
+    await writeFixture(root, mainAddress, worker);
+    client = PiRpcClient.launch({
+      cwd: root,
+      agentDir,
+      model: `${model.provider}/${model.modelId}`,
+      extensions: [resolve("./src/index.ts")],
+      approveProject: true,
+    });
+    const state = await client.getState();
+    if (state.success !== true) throw new Error("startup");
+    sessionId = String((state.data as { sessionId?: unknown }).sessionId);
+    if (!sessionId) throw new Error("startup");
+    journal = childJournalPath(agentDir, sessionId);
+    const prompt = `You MUST make one send_email tool call before any final answer. Call ${mechanistic} exactly once as a notification with requires_response:false and JSON {"notify_to":"${worker}"}; do not merely describe or wait. The worker must send exact subject MECHANISTIC_CHAIN_COMPLETE to ${mainAddress} with exact structured nonce/job JSON.`;
+    await client.prompt(prompt);
+    const poll = async () => {
+      while (true) {
+        try {
+          events = parseLfJournal(await readFile(journal!, "utf8"));
+          if (
+            hasDurableFinal(collectEnvelopes(events), worker, mainAddress) &&
+            client?.events().some((e) => e.type === "agent_settled")
+          ) {
+            finalObserved = true;
+            return;
+          }
+        } catch (error) {
+          if (
+            (error as NodeJS.ErrnoException).code !== "ENOENT" &&
+            !/truncated/.test(String(error))
+          ) {
+            category = "journal polling failed";
+            return;
+          }
+        }
+        await delay(250);
+      }
+    };
+    const timer = delay(timeout).then(() => {
+      timedOut = true;
+      category = "timeout";
+    });
+    await Promise.race([poll(), timer]);
+    if (finalObserved) {
+      shutdown = "completed";
+      await client.close();
+    } else {
+      shutdown = category ?? "failure";
+      await stopClient(client);
+    }
+  } catch {
+    category = "lifecycle failure";
+    if (client) await stopClient(client);
+  } finally {
+    if (client) {
+      await client.waitForExit().catch(() => null);
+    }
+  }
+  if (journal) {
+    try {
+      events = parseLfJournal(await readFile(journal, "utf8"));
+    } catch {
+      category = category ?? "final journal unavailable or malformed";
+    }
+  }
+  const childExitCode = client
+    ? await client.waitForExit().catch(() => null)
+    : null;
+  const validation = validateLiveGraph({
+    events,
+    worker,
+    main: mainAddress,
+    mechanistic,
+    childExitCode,
+    timedOut,
+    durableFinalObserved: finalObserved,
+    mainSettled:
+      client?.events().some((e) => e.type === "agent_settled") === true,
+    pollError: category,
+  });
+  const runnerExitCode = validation.ok ? 0 : 1;
+  const output = resolve(
+    process.env.LIVE_EVIDENCE_DIR ?? ".test-workspaces/mechanistic-subagents",
+  );
+  await mkdir(output, { recursive: true });
+  const terminalJobs = events
+    .filter((event) => event.type === "job.terminal")
+    .map((event) => {
+      const job = (
+        event as {
+          job: {
+            id: string;
+            result?: string;
+            reported?: { status?: string };
+            outcomeMailId?: string;
+            exitCode?: number | null;
+            signal?: string | null;
+            cleanup?: unknown;
+          };
+        }
+      ).job;
+      return {
+        id: job.id,
+        result: job.result,
+        reported: job.reported?.status,
+        outcomeMailId: job.outcomeMailId,
+        exitCode: job.exitCode,
+        signal: job.signal,
+        cleanup: job.cleanup,
+      };
+    });
+  const log = join(output, `live-mechanistic-${Date.now()}.json`);
+  await writeFile(
+    log,
+    JSON.stringify(
+      {
+        model: `${model.provider}/${model.modelId}`,
+        runnerExitCode,
+        childExitCode,
+        timedOut,
+        shutdown,
+        mainSettled:
+          client?.events().some((e) => e.type === "agent_settled") === true,
+        finalObserved,
+        sessionId,
+        rpcSummary: client ? summarizeRpc(client.events()) : undefined,
+        jobs: terminalJobs,
+        envelopes: collectEnvelopes(events).map((e) => ({
+          id: e.id,
+          from: e.from,
+          to: e.to,
+          subject: e.subject,
+          kind: e.kind,
+          requiresResponse: e.requiresResponse,
+          inReplyTo: e.inReplyTo,
+          completion: e.completion,
+          deliveryState: e.deliveryState,
+        })),
+        validation,
+      },
+      null,
+      2,
+    ),
+  );
+  const namespace = journal ? dirname(journal) : undefined;
+  if (runnerExitCode === 0) {
+    if (namespace) await rm(namespace, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  } else {
+    await chmod(root, 0o700);
+    if (namespace) await chmod(namespace, 0o700);
+    console.error(
+      `preserved project: ${root}${namespace ? `; namespace: ${namespace}` : ""}`,
+    );
+  }
+  console.log(
+    JSON.stringify({
+      passed: runnerExitCode === 0,
+      runnerExitCode,
+      childExitCode,
+      log,
+    }),
+  );
+  return runnerExitCode;
+}
+try {
+  process.exitCode = await main();
+} catch {
+  process.exitCode = 1;
+}
