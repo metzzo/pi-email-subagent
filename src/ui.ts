@@ -616,6 +616,7 @@ export class DashboardComponent {
           if (job.progress) lines.push(this.theme.fg("muted", `progress: ${sanitizeConversationLabel(job.progress.message)}${job.progress.percent === undefined ? "" : ` (${job.progress.percent}%)`}`));
           lines.push(this.theme.fg("dim", `script report: ${job.reported?.status ?? "none"} · cleanup: ${job.cleanup?.state ?? "pending"} · direct child only · exit ${job.exitCode ?? "unknown"} ${job.signal ?? ""}`));
           if (job.reported) lines.push(this.theme.fg("text", sanitizeConversationLabel(job.reported.summary)));
+          if (job.abandoned) lines.push(this.theme.fg("muted", `abandoned by ${sanitizeConversationLabel(job.abandoned.by)}: ${sanitizeConversationLabel(job.abandoned.reason)}`));
           if (job.outcomeMailId) lines.push(this.theme.fg("dim", `outcome ${job.outcomeMailId} · ${job.outcomeDeliveryState ?? "unknown"} · not a reply`));
           if (job.stderr) lines.push(...sanitizeConversationBody(job.stderr).split("\n").slice(-5).map((line) => this.theme.fg("muted", line)));
         }

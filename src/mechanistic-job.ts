@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isEmailModelId } from "./address.ts";
 import { LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
 import { ARTIFACT_BYTES, MAX_ARTIFACTS, PROTOCOL_BYTES, SUMMARY_BYTES, isMechanisticAddress, parseMechanisticBinding, parseMechanisticCallers } from "./mechanistic.ts";
 import type { LifecyclePolicy, MechanisticCleanup, MechanisticJob, MechanisticProgress, MechanisticResult, MechanisticTerminal } from "./types.ts";
@@ -27,7 +27,8 @@ export function parseTerminal(value: unknown): MechanisticTerminal {
   if (raw.invalidArguments !== undefined && (raw.invalidArguments !== true || raw.status !== "failure")) throw new Error("Invalid argument classification.");
   return { status: raw.status, summary, artifacts: artifacts.map((item) => boundedProtocolString(item, ARTIFACT_BYTES)), ...(raw.invalidArguments ? { invalidArguments: true } : {}) };
 }
-const RESULTS: MechanisticResult[] = ["success", "task_failure", "invalid_arguments", "spawn_failure", "crash", "timeout", "forced_stop", "protocol_failure", "missing_terminal", "interrupted"];
+export const MAX_CANCELLATION_REASON_BYTES = 1_024;
+const RESULTS: MechanisticResult[] = ["success", "task_failure", "invalid_arguments", "spawn_failure", "crash", "timeout", "forced_stop", "protocol_failure", "missing_terminal", "interrupted", "abandoned"];
 export function parseJob(value: unknown): MechanisticJob {
   const raw = protocolObject(value);
   const text = (key: string, maximum = 254) => boundedProtocolString(raw[key], maximum);
@@ -73,7 +74,19 @@ export function parseJob(value: unknown): MechanisticJob {
   if (phase === "terminal" && (!job.result || !job.cleanup || !job.outcomeMailId)) throw new Error("Terminal job needs runtime result, cleanup evidence, and outcome ID.");
   if (phase !== "terminal" && (job.result || job.outcomeMailId)) throw new Error("Nonterminal job cannot have a runtime outcome.");
   if (phase === "queued" && (job.generation || job.pid)) throw new Error("Queued jobs cannot have process evidence.");
-  if (phase !== "queued" && !job.generation) throw new Error("Claimed jobs need a generation.");
+  if (raw.abandoned !== undefined) {
+    const audit = protocolObject(raw.abandoned);
+    const by = boundedProtocolString(audit.by, 254);
+    const reason = boundedProtocolString(audit.reason, MAX_CANCELLATION_REASON_BYTES);
+    if (!by.startsWith("main@") || !by.endsWith(".com") || !isEmailModelId(by.slice(5, -4)) || reason.trim().length < 8) throw new Error("Invalid abandonment audit.");
+    job.abandoned = { by, reason };
+  }
+  if (job.result === "abandoned") {
+    if (!job.abandoned || job.generation || job.pid || job.reported || job.progress || job.stderr || job.exitCode !== undefined || job.signal !== undefined || job.cleanup?.state !== "confirmed") throw new Error("Only never-started jobs can be abandoned.");
+  } else {
+    if (job.abandoned) throw new Error("Abandonment audit requires an abandoned outcome.");
+    if (phase !== "queued" && !job.generation) throw new Error("Claimed jobs need a generation.");
+  }
   return job;
 }
 
@@ -85,6 +98,7 @@ export function outcomeText(job: MechanisticJob, artifactLimit = MAX_ARTIFACTS, 
     `Job ${job.id} · ${job.address}`,
     `Runtime: ${job.result}. Script report: ${job.reported?.status ?? "none"}.`,
     job.reported && summaryLimit > 0 ? truncateText(job.reported.summary, summaryLimit) : undefined,
+    job.abandoned ? `Abandoned before start by ${job.abandoned.by}; audit reason remains in the job journal.` : undefined,
     `Direct-child cleanup: ${job.cleanup?.state}; child exited: ${job.cleanup?.childExited}; pipes closed: ${job.cleanup?.pipesClosed}.`,
     `Exit: ${job.exitCode ?? "unknown"}; signal: ${job.signal ?? "none"}.`,
     "This notification is not a reply. It creates no response obligation. Detached descendants and remote effects are not covered by cleanup proof.",

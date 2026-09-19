@@ -12,7 +12,7 @@ const boundary = process.env.PI_MECHANISTIC_BOUNDARY;
 const marker = process.env.PI_MECHANISTIC_MARKER;
 let broker: AgentBroker | undefined;
 function hold(phase: string, job: MechanisticJob): Promise<void> {
-  if (boundary !== phase || !marker) return Promise.resolve();
+  if ((boundary === "archived-accepted" ? phase !== "accepted" || !broker?.mailStore.listJobs().some((prior) => prior.phase === "terminal") : boundary !== phase) || !marker) return Promise.resolve();
   writeFileSync(marker, JSON.stringify({ phase, job, pid: process.pid }));
   return new Promise(() => undefined);
 }
@@ -43,6 +43,16 @@ export default function mechanisticProbe(pi: ExtensionAPI): void {
     handler: async (_args, ctx) => {
       assert.ok(broker, "production broker initialized");
       const sendTool = tools.get("send_email")!;
+      if (boundary === "archived-accepted") {
+        const first = await broker.send(broker.mainAddress, { to: "monitor.probe@mechanistic.com", subject: "before archive", message: "{}", priority: "low" });
+        const deadline = Date.now() + 10000;
+        while (broker.mailStore.getJob(first.envelope.id)?.phase !== "terminal" || broker.getSnapshot().capacity.runSlotsUsed !== 0) {
+          if (Date.now() > deadline) throw new Error("First real job did not settle before archive");
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        await broker.stop(first.envelope.to); await broker.archive(first.envelope.to);
+        assert.equal(broker.inspectAgent(first.envelope.to).state, "archived");
+      }
       const sent = await sendTool.execute("probe-send", {
         to: "monitor.probe@mechanistic.com", subject: "Observe installed local input", message: '{"expected":"ready","attempts":2}', priority: "low",
       }, undefined, undefined, ctx);
@@ -106,7 +116,22 @@ export default function mechanisticProbe(pi: ExtensionAPI): void {
           if (!job.reported) assert.match(rendered, /script report: none/);
         } finally { dashboard.dispose(); }
       }
-      if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ jobs }));
+      const address = "monitor.matrix@mechanistic.com";
+      await broker.stop(address);
+      const queued = await broker.send(broker.mainAddress, { to: address, subject: "never start", message: "{}", priority: "low" });
+      const reason = "User abandoned this queued scope.\n\u001b]52;c;untrusted\u0007";
+      await tools.get("cancel_request")!.execute("abandon", { request_id: queued.envelope.id, reason }, undefined, undefined, ctx);
+      const abandoned = broker.mailStore.getJob(queued.envelope.id)!;
+      assert.equal(abandoned.result, "abandoned"); assert.equal(abandoned.generation, undefined); assert.equal(abandoned.reported, undefined);
+      assert.equal(broker.mailStore.get(abandoned.id)?.cancellationReason, reason);
+      const inspected = await tools.get("inspect_agent")!.execute("abandoned-inspect", { address }, undefined, undefined, ctx);
+      assert.match(JSON.stringify(inspected.content), /abandoned by/);
+      const dashboard = new DashboardComponent(() => broker!.getSnapshot(), () => [], () => {}, () => {}, ctx.ui.theme, address, undefined, 80, (selected) => broker!.inspectAgent(selected));
+      try {
+        dashboard.handleInput("\r"); const rendered = dashboard.render(200).join("\n");
+        assert.match(rendered, /abandoned/); assert.equal(rendered.includes("\u001b]52"), false);
+      } finally { dashboard.dispose(); }
+      if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ jobs, abandoned }));
       ctx.shutdown();
     },
   });

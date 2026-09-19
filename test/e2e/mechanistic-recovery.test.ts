@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +11,17 @@ import type { MechanisticJob } from "../../src/types.ts";
 import { PiRpcClient } from "./helpers/rpc-client.ts";
 
 const extensions = [resolve("test/e2e/helpers/mock-provider-extension.ts"), resolve("test/e2e/helpers/mechanistic-probe-extension.ts")];
+for (const phase of ["running", "progress", "terminal"]) it(`isolated owner retains namespace authority after bounded shutdown with stalled ${phase} callback`, { timeout: 15000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "python-stall-shutdown-"));
+  try {
+    await promisify(execFile)(process.execPath, ["--import", "tsx", resolve("test/e2e/helpers/mechanistic-stall-shutdown.ts"), root, phase], { timeout: 10000, killSignal: "SIGKILL", signal: t.signal });
+    const proof = JSON.parse(await readFile(join(root, "proof.json"), "utf8"));
+    assert.throws(() => process.kill(proof.pid, 0), /ESRCH/);
+    assert.ok(proof.elapsed < 1500);
+    assert.equal(proof.job.phase === "terminal", phase === "terminal");
+    assert.equal(proof.journal.includes('"result":"interrupted"'), false, "a live stalled owner must not synthesize recovery");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 async function eventually<T>(read: () => Promise<T | undefined>): Promise<T> {
   const end = Date.now() + 15_000;
   while (Date.now() < end) {
@@ -49,7 +62,7 @@ it("fresh Pi executes the real Python tool path and renders honest script inspec
   }
 });
 
-for (const boundary of ["accepted", "starting", "running", "effect", "terminal"] as const) {
+for (const boundary of ["accepted", "archived-accepted", "starting", "running", "effect", "terminal"] as const) {
   it(`real Pi owner loss after ${boundary} preserves one accepted ID and never replays a start claim`, { timeout: 45_000 }, async (t) => {
     const root = await mkdtemp(join(tmpdir(), `python-owner-${boundary}-`));
     const marker = join(root, "marker.json"); const proof = join(root, "proof.json");
@@ -71,7 +84,7 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       const journal = join(root, "subagents", state.sessionId, "mail.jsonl");
       const before = await eventually(async () => {
         await readFile(boundary === "effect" ? join(root, "effect.json") : marker, "utf8");
-        const store = new MailStore(journal); await store.init(); return store.listJobs()[0];
+        const store = new MailStore(journal); await store.init(); return store.listJobs().at(-1);
       });
       assert.equal(client.kill("SIGKILL"), true); await exitWithin(client);
       // The deliberately interrupted child is finite and receives EOF when the
@@ -81,7 +94,7 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       restored = PiRpcClient.launch({ cwd: root, agentDir: root, model: "mock-e2e/mock-e2e", extensions, persistSession: true, session: state.sessionFile, env: { PI_MECHANISTIC_PROOF: proof } });
       const restoredState = (await restored.getState()).data as { sessionId: string };
       assert.equal(restoredState.sessionId, state.sessionId, "resume the exact persisted session/namespace");
-      if (boundary === "accepted") {
+      if (boundary === "accepted" || boundary === "archived-accepted") {
         await eventually(async () => { const store = new MailStore(journal); await store.init(); return store.getJob(before.id)?.phase === "terminal" ? true : undefined; });
       }
       await restored.prompt("/mechanistic-inspect");
@@ -90,13 +103,13 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       // asynchronous inspection can finish after that check; once its proof is
       // committed, stdin EOF is the real RPC shutdown boundary, not a timer.
       assert.equal(await exitWithin(restored, restored.close()), 0, "restored Pi closes normally through RPC EOF, not a forced cleanup");
-      assert.equal(result.jobs.length, 1); const after = result.jobs[0]!; assert.equal(after.id, before.id);
+      assert.equal(result.jobs.length, boundary === "archived-accepted" ? 2 : 1); const after = result.jobs.at(-1)!; assert.equal(after.id, before.id);
       assert.equal(after.phase, "terminal"); assert.ok(after.outcomeMailId);
       assert.equal(result.mail.filter((mail) => mail.id === after.outcomeMailId).length, 1);
       assert.equal(result.mail.find((mail) => mail.id === after.outcomeMailId)?.kind, "notification");
       assert.equal(result.mail.find((mail) => mail.id === after.outcomeMailId)?.inReplyTo, undefined);
       const effects = await readFile(join(root, "effects"), "utf8").catch(() => "");
-      if (boundary === "accepted" || boundary === "terminal") { assert.equal(after.result, "success"); assert.equal(effects, "once\n"); }
+      if (boundary === "accepted" || boundary === "archived-accepted" || boundary === "terminal") { assert.equal(after.result, "success"); assert.equal(effects, boundary === "archived-accepted" ? "once\nonce\n" : "once\n"); }
       else {
         assert.equal(after.result, "interrupted"); assert.equal(after.cleanup?.state, "cleanup-unknown");
         assert.equal(effects, boundary === "effect" ? "once\n" : "");

@@ -25,7 +25,7 @@ import {
 } from "./config.ts";
 import { EmailProtocolError } from "./email-error.ts";
 import { createMailId } from "./id.ts";
-import { MailStore } from "./mail-store.ts";
+import { MailJournalPoisonError, MailStore } from "./mail-store.ts";
 import { isCorrelatedMainReply as correlatedMainReply } from "./main-mail-routing.ts";
 import { ProviderReadinessError } from "./model-runtime.ts";
 import { NamespaceLock } from "./namespace-lock.ts";
@@ -75,11 +75,11 @@ import { byteLength, clone, nowIso, truncateText } from "./util.ts";
 import { currentBatchHasEffectfulWork, emptyWorkState, interruptActive, recoverMutationWork } from "./work-ledger.ts";
 import { isInactiveWorkerState, workerCleanupDeadline } from "./worker-lifecycle.ts";
 import { isMechanisticAddress, preflightMechanisticBinding, sameMechanisticBinding, PROTOCOL_BYTES } from "./mechanistic.ts";
-import { outcomeText } from "./mechanistic-job.ts";
+import { MAX_CANCELLATION_REASON_BYTES, outcomeText } from "./mechanistic-job.ts";
 import { PythonProcess, type PythonOutcome } from "./python-process.ts";
 
 export const MAX_REPLY_WAIT_MS = MAX_REPLY_WAIT_SECONDS * 1_000;
-export const MAX_CANCELLATION_REASON_BYTES = 1_024;
+export { MAX_CANCELLATION_REASON_BYTES } from "./mechanistic-job.ts";
 
 /**
  * Conservative byte budget: reserve declared output and 75% of remaining context
@@ -654,6 +654,7 @@ export class AgentBroker {
         this.mechanisticRecords.set(record.address, record);
       }
       if (!sameMechanisticBinding(record.binding, job.binding)) throw new Error("Durable mechanistic binding collision between registry and journal.");
+      if (job.phase === "queued" && record.state === "archived") record.state = "idle";
       if (job.phase !== "terminal") this.validateMechanisticOutcomeSize(this.mechanisticOutcomeEnvelope(job));
       if (job.phase !== "queued" && job.phase !== "terminal") {
         await this.finishMechanistic(job, { result: "interrupted", reported: job.reported, progress: job.progress, stderr: job.stderr, cleanup: { state: "cleanup-unknown", childExited: false, pipesClosed: false, boundary: "direct-child-only", detail: "Owner lost after durable start claim; no exact direct-child cleanup proof. Never replay this job." } });
@@ -711,6 +712,7 @@ export class AgentBroker {
     } catch (error) {
       if (envelope && this.mailStore.get(envelope.id)) throw new EmailProtocolError("EMAIL_DELIVERY_FAILED", `Email ${envelope.id} was accepted; bookkeeping failed. Do not resend: ${errorMessage(error)}`, { email_id: envelope.id });
       if (acquired) this.activationLeases.delete(shape.address);
+      if (error instanceof MailJournalPoisonError && error.mayHaveCommitted && error.emailId && error.emailId === envelope?.id) throw this.uncertainAppend(error.emailId);
       throw error;
     }
     const record = this.mechanisticRecords.get(shape.address)!;
@@ -824,9 +826,13 @@ export class AgentBroker {
     }
   }
 
-  private async finishMechanistic(job: MechanisticJob, outcome: PythonOutcome): Promise<void> {
+  private uncertainAppend(emailId: string): EmailProtocolError {
+    return new EmailProtocolError("EMAIL_DELIVERY_FAILED", `Email ${emailId} may have been accepted. Do not resend; restart and inspect this exact mail ID.`, { email_id: emailId });
+  }
+
+  private async finishMechanistic(job: MechanisticJob, outcome: PythonOutcome, abandoned?: MechanisticJob["abandoned"]): Promise<void> {
     if (job.phase === "terminal") return;
-    const terminal: MechanisticJob = { ...job, ...outcome, phase: "terminal", updatedAt: nowIso(), outcomeMailId: createMailId() };
+    const terminal: MechanisticJob = { ...job, ...outcome, ...(abandoned ? { abandoned } : {}), phase: "terminal", updatedAt: nowIso(), outcomeMailId: createMailId() };
     const notification = this.mechanisticOutcomeEnvelope(terminal);
     const fallback = notification.message;
     let artifacts = terminal.reported?.artifacts.length ?? 0;
@@ -892,9 +898,15 @@ export class AgentBroker {
         if (record.state === "archived") throw new Error(`Agent ${address} is archived.`);
         record.state = "stopped";
         const job = this.mailStore.listJobs(address).find((candidate) => ["starting", "running", "stopping"].includes(candidate.phase));
-        if (job) await this.mailStore.updateJob({ ...job, phase: "stopping", updatedAt: nowIso() });
-        await this.pythonProcesses.get(address)?.stop();
-        await this.pythonRuns.get(address);
+        // Stop the exact child independently of journal/callback settlement.
+        // A timeout must not release its run slot or fabricate terminal evidence.
+        const stopped = this.pythonProcesses.get(address)?.stop();
+        const settlement = (async () => {
+          if (job) await this.mailStore.updateJob({ ...job, phase: "stopping", updatedAt: nowIso() });
+          await stopped;
+          await this.pythonRuns.get(address);
+        })();
+        await bounded(settlement, workerCleanupDeadline(record.lifecycle), "LIFECYCLE_MECHANISTIC_SETTLEMENT_TIMEOUT");
       } else {
         if (record.cleanupUnknown) throw new Error("Direct-child cleanup is unknown; inspect evidence and explicitly clear_failure before restart.");
         if (this.pythonProcesses.has(address) || this.scheduling.has(address)) throw new Error("Stop and settle the running job before restart.");
@@ -1932,6 +1944,7 @@ export class AgentBroker {
       });
     } catch (error) {
       if (acquiredLease) this.activationLeases.delete(to);
+      if (error instanceof MailJournalPoisonError && error.mayHaveCommitted && error.emailId && error.emailId === envelope?.id) throw this.uncertainAppend(error.emailId);
       throw error;
     }
 
@@ -3240,6 +3253,17 @@ export class AgentBroker {
     }
     const initial = this.mailStore.get(requestId);
     if (!initial) throw new Error(`Unknown request ${requestId}.`);
+    if (this.mailStore.getJob(requestId)) {
+      return this.withAddressOperation(initial.to, async () => {
+        const job = this.mailStore.getJob(requestId)!;
+        if (job.phase !== "queued" || job.generation !== undefined) throw new Error("Only an unclaimed queued job can be abandoned; starting or terminal work cannot be cancelled.");
+        const record = this.mechanisticRecords.get(initial.to);
+        if (!record || !isInactiveWorkerState(record.state) || this.active.has(initial.to) || this.scheduling.has(initial.to) || this.pythonProcesses.has(initial.to)) throw new Error("Only queued jobs assigned to an inactive recipient can be abandoned; stop and settle the agent first.");
+        await this.finishMechanistic(job, { result: "abandoned", stderr: "", cleanup: { state: "confirmed", childExited: true, pipesClosed: true, boundary: "direct-child-only", detail: "Abandoned before any start claim; no Python child was launched." } }, { by: this.mainAddress, reason });
+        this.scheduleMailMaintenance(); this.publish(); this.pump();
+        return this.mailStore.get(requestId)!;
+      });
+    }
     if (!initial.requiresResponse || initial.kind !== "request") {
       throw new Error(`${requestId} has no response obligation to cancel.`);
     }

@@ -83,6 +83,17 @@ export async function mechanisticParserCases(): Promise<void> {
     ];
     for (const field of fields) assert.throws(() => parseJob({ ...job, ...field }), JSON.stringify(field));
     const terminal = parseJob({ ...job, phase: "terminal", generation: 1, pid: process.pid, exitCode: 0, signal: null, result: "success", outcomeMailId: "mail_outcome", progress: { message: "finished", percent: 100 }, reported: { status: "success", summary: "done", artifacts: [script] }, cleanup: { state: "confirmed", boundary: "direct-child-only", childExited: true, pipesClosed: true } });
+    const abandoned = { ...job, phase: "terminal", result: "abandoned", outcomeMailId: "mail_abandoned", cleanup: terminal.cleanup, abandoned: { by: "main@test.com", reason: "User abandoned queued observation." } };
+    assert.equal(parseJob(abandoned).result, "abandoned");
+    assert.match(outcomeText(parseJob(abandoned)), /Abandoned before start by main@test.com/);
+    for (const invalid of [
+      { abandoned: undefined }, { abandoned: { by: "worker@test.com", reason: "User abandoned queued work." } },
+      { abandoned: { by: "main@test\u001b.com", reason: "User abandoned queued work." } },
+      { abandoned: { by: "main@test.invalid", reason: "User abandoned queued work." } },
+      { abandoned: { by: "main@test.com", reason: "short" } }, { abandoned: { by: "main@test.com", reason: "x".repeat(1025) } },
+      { generation: 1 }, { pid: 1 }, { reported: terminal.reported }, { progress: terminal.progress }, { stderr: "log" },
+      { signal: null }, { exitCode: 0 }, { cleanup: { ...terminal.cleanup, state: "cleanup-unknown" } }, { result: "success" },
+    ]) assert.throws(() => parseJob({ ...abandoned, ...invalid }));
     assert.match(outcomeText(terminal), /Artifact references \(not verified\)/);
     assert.match(outcomeText(job), /Script report: none/);
     assert.equal(parseJob({ ...terminal, exitCode: null, signal: "SIGKILL", cleanup: { state: "cleanup-unknown", childExited: true, pipesClosed: false, boundary: "direct-child-only", detail: "pipe still open" } }).signal, "SIGKILL");

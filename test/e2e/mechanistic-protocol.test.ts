@@ -33,6 +33,7 @@ it("fresh Pi classifies real Python protocol failures, reports and bounded progr
     await client.getState(); await client.prompt("/mechanistic-matrix");
     const result = JSON.parse(await readFile(proof, "utf8")); assert.equal(result.jobs.length, cases.length);
     assert.equal(new Set(result.jobs.map((job: { id: string }) => job.id)).size, cases.length);
+    assert.equal(result.abandoned.result, "abandoned"); assert.equal(result.abandoned.generation, undefined); assert.ok(result.abandoned.outcomeMailId);
     assert.match(result.jobs.at(-1).progress.message, /tick/); assert.ok(result.jobs.at(-1).stderr.endsWith("tail"));
   } finally { await client.close().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
 });

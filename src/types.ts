@@ -253,7 +253,7 @@ export interface MechanisticBinding { key: string; python: string; script: strin
 export interface MechanisticProgram extends MechanisticBinding { allowedCallers: MechanisticCaller[] }
 export interface MechanisticAddress { kind: "mechanistic"; address: string; name: string; taskSlug: string; binding: MechanisticBinding }
 export type AgentAddress = ParsedAddress | MechanisticAddress;
-export type MechanisticResult = "success" | "task_failure" | "invalid_arguments" | "spawn_failure" | "crash" | "timeout" | "forced_stop" | "protocol_failure" | "missing_terminal" | "interrupted";
+export type MechanisticResult = "success" | "task_failure" | "invalid_arguments" | "spawn_failure" | "crash" | "timeout" | "forced_stop" | "protocol_failure" | "missing_terminal" | "interrupted" | "abandoned";
 export interface MechanisticProgress { message: string; percent?: number }
 export interface MechanisticTerminal { status: "success" | "failure"; summary: string; artifacts: string[]; invalidArguments?: boolean }
 export interface MechanisticCleanup {
@@ -277,6 +277,8 @@ export interface MechanisticJob {
   progress?: MechanisticProgress;
   reported?: MechanisticTerminal;
   result?: MechanisticResult;
+  /** Main-only abandonment of an unclaimed queued invocation. */
+  abandoned?: { by: string; reason: string };
   exitCode?: number | null;
   signal?: string | null;
   stderr: string;

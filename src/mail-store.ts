@@ -235,8 +235,8 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
 // Rewrite the journal as a snapshot once it grows past this many events.
 export const MAIL_JOURNAL_COMPACT_THRESHOLD = 8192;
 
-class MailJournalPoisonError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+export class MailJournalPoisonError extends Error {
+  constructor(message: string, readonly mayHaveCommitted = false, readonly emailId?: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "MailJournalPoisonError";
   }
@@ -326,7 +326,11 @@ export class MailStore {
       if (!trigger || trigger.to !== job.address || !trigger.mechanisticBindingIntent) throw new Error("Job trigger/binding missing from journal.");
       if (event.type === "job.queued" && (job.phase !== "queued" || event.email?.id !== job.id || this.jobs.has(job.id))) throw new Error("Invalid queued job event.");
       if (event.type === "job.terminal" && (job.phase !== "terminal" || !event.email || event.email.id !== job.outcomeMailId || event.email.kind !== "notification" || event.email.inReplyTo || event.email.requiresResponse)) throw new Error("Invalid job outcome notification.");
-      if (event.type === "job.updated") this.assertJobTransition(job);
+      if (event.type === "job.updated" || event.type === "job.terminal") this.assertJobTransition(job);
+      if (job.result === "abandoned") {
+        trigger.deliveryState = "cancelled"; trigger.cancelledAt = job.updatedAt;
+        trigger.cancelledBy = job.abandoned!.by; trigger.cancellationReason = job.abandoned!.reason;
+      }
       if (job.phase !== "queued" && trigger.deliveryState === "queued") this.apply({ type: "email.delivered", id: job.id, at: job.updatedAt });
       this.jobs.set(job.id, clone(job));
       return;
@@ -440,7 +444,7 @@ export class MailStore {
     try {
       handle = await open(this.path, "a+", 0o600);
     } catch (error) {
-      throw new MailJournalPoisonError("Mail journal append could not open its file; this store is poisoned until restart.", { cause: error });
+      throw new MailJournalPoisonError("Mail journal append could not open its file; this store is poisoned until restart.", false, undefined, { cause: error });
     }
     let offset: number | undefined;
     try {
@@ -455,12 +459,8 @@ export class MailStore {
           rollbackError = rollbackFailure;
         }
       }
-      const detail = offset === undefined
-        ? " The pre-append offset could not be established."
-        : rollbackError
-          ? ` Append rollback to byte ${offset} also failed: ${String(rollbackError)}`
-          : ` The journal was rolled back to byte ${offset}.`;
-      throw new MailJournalPoisonError(`Mail journal append failed; this store is poisoned until restart.${detail}`, { cause: error });
+      const detail = rollbackError ? " Append may have committed; rollback failed." : offset === undefined ? " No append was attempted." : " The journal was rolled back; no append remains from this attempt.";
+      throw new MailJournalPoisonError(`Mail journal append failed; this store is poisoned until restart.${detail}`, Boolean(rollbackError), undefined, { cause: error });
     } finally {
       await handle.close().catch(() => undefined);
     }
@@ -482,7 +482,14 @@ export class MailStore {
       const events = build();
       if (events.length === 0) return;
       const payload = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
-      await this.appendJournal(payload);
+      try { await this.appendJournal(payload); }
+      catch (error) {
+        if (error instanceof MailJournalPoisonError) {
+          const creation = events.find((event) => event.type === "email.created" || event.type === "job.queued");
+          throw new MailJournalPoisonError(error.message, error.mayHaveCommitted, creation && "email" in creation ? creation.email?.id : undefined, { cause: error });
+        }
+        throw error;
+      }
       for (const event of events) this.apply(event);
     });
     // Only an append failure remains the head of the chain. No later operation
@@ -515,7 +522,8 @@ export class MailStore {
     const prior = this.jobs.get(job.id);
     if (!prior || prior.phase === "terminal" || job.phase === "queued"
       || prior.address !== job.address || JSON.stringify(prior.binding) !== JSON.stringify(job.binding)
-      || (prior.phase === "queued" && job.phase !== "starting")
+      || (prior.phase === "queued" && job.phase !== "starting" && job.result !== "abandoned")
+      || (job.result === "abandoned" && (prior.phase !== "queued" || prior.generation !== undefined || this.emails.get(job.id)?.deliveryState !== "queued"))
       || (prior.phase !== "queued" && prior.generation !== job.generation)
       || (prior.phase === "running" && job.phase === "starting")
       || (prior.phase === "stopping" && job.phase !== "stopping" && job.phase !== "terminal")) throw new Error("Invalid durable job transition; started jobs cannot replay.");

@@ -88,7 +88,11 @@ The broker adds the installed package's `src/python` directory to PYTHONPATH;
 do not copy the helper from a checkout. `invocation()` exposes the original
 envelope and accepted job ID. `send_email(to, subject, message, priority="low")`
 returns structured acceptance evidence, including the accepted ID when known;
-it is not recipient completion and the helper never resends. Use stderr for
+it is not recipient completion and the helper never resends. If an append and its
+rollback both fail, the error/ack retains the generated mail ID and says acceptance
+is uncertain. Do not resend: restart and inspect that exact ID. The poisoned store
+rejects further appends until restart; recovery may find the complete accepted
+record even when its final newline was missing. Use stderr for
 ordinary logs: stdout belongs to the versioned, bounded JSONL protocol.
 `success(summary, artifacts)` and `failure(summary, artifacts)` are terminal
 reports. No command is legal afterward. Summaries/progress are limited to
@@ -142,6 +146,29 @@ success. Stop prevents pending work from starting and finitely terminates the
 current direct child; it retains the identity lease and queued work. Restart
 runs only not-yet-started queued jobs, never a previous accepted ID. Archive
 requires no active work, pending mail or cleanup quarantine.
+
+To explicitly abandon one **never-started queued** job, stop and settle the identity,
+then use `cancel_request(request_id, reason)` with its exact accepted mail ID and a
+substantive reason (8 characters minimum, 1024 UTF-8 bytes maximum). This also works
+when the trusted program binding has been removed. The journal atomically marks
+the trigger cancelled, records main's actor/reason, and terminalizes the job as
+`abandoned` with one stable, uncorrelated outcome replacing its queue reservation.
+No Python process is launched. Already-claimed or terminal jobs cannot be abandoned;
+a concurrent start claim wins over cancellation. Ordinary LLM request cancellation
+is unchanged. A script cannot report or forge the `abandoned` runtime result.
+
+If a committed spawn/progress/finalization callback remains unsettled, stop returns
+`LIFECYCLE_MECHANISTIC_SETTLEMENT_TIMEOUT` after the identity's abort-plus-dispose
+deadline. The direct child is stopped independently, but its active claim, run slot,
+and namespace ownership remain held until settlement or owner-death recovery.
+Restart is rejected while settlement is outstanding; no synthetic terminal record
+is written to hide the stall. Broker shutdown remains bounded and retains ownership
+when these callbacks do not settle.
+
+On restore, an accepted queued job reactivates an archived identity's exact binding
+through normal identity capacity checks. Acceptance remains durable even if the
+archived-to-queued registry save never completed. It is the same job ID, not a new
+invocation; unavailable bindings still fail closed.
 
 A durable start claim found after owner loss is interrupted and cleanup-unknown,
 not replayed. Review files/process evidence before explicit `clear_failure`;

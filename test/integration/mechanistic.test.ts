@@ -61,6 +61,8 @@ for (const [name, code, expected] of [
   ["task failure", "from pi_mechanistic import failure\nfailure('task rejected')\n", "task_failure"],
   ["invalid arguments", "from pi_mechanistic import run, InvalidArguments\ndef main(args):\n raise InvalidArguments('missing operation')\nrun(main)\n", "invalid_arguments"],
   ["missing terminal", "pass\n", "missing_terminal"],
+  ["forged abandonment operation", "print('{\"v\":1,\"id\":1,\"op\":\"abandoned\",\"summary\":\"not allowed\"}',flush=True)\n", "protocol_failure"],
+  ["forged abandonment result", "print('{\"v\":1,\"id\":1,\"op\":\"success\",\"summary\":\"not allowed\",\"result\":\"abandoned\"}',flush=True)\n", "protocol_failure"],
   ["crash contradicts success", "from pi_mechanistic import success\nsuccess('reported success')\nraise RuntimeError('crash after report')\n", "crash"],
   ["invalid frame", "print('not-json', flush=True)\n", "protocol_failure"],
   ["unterminated frame", "import sys\nsys.stdout.write('{}')\n", "protocol_failure"],

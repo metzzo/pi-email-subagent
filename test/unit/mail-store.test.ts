@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, type FileHandle } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { MailStore } from "../../src/mail-store.ts";
+import { MailJournalPoisonError, MailStore } from "../../src/mail-store.ts";
 import type { EmailEnvelope } from "../../src/types.ts";
 
 class FaultInjectedMailStore extends MailStore {
@@ -41,6 +41,23 @@ function email(id: string, priority: "high" | "low" = "low"): EmailEnvelope {
 }
 
 describe("durable mail store", () => {
+  it("keeps typed append uncertainty and its exact generated ID when the real rollback descriptor is closed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-email-uncertain-"));
+    class ClosedAppend extends MailStore {
+      protected override async appendJournalPayload(handle: FileHandle, payload: string): Promise<void> {
+        await handle.writeFile(payload.trimEnd()); await handle.close(); throw new Error("private filesystem detail");
+      }
+    }
+    const store = new ClosedAppend(join(root, "mail.jsonl")); await store.init();
+    await assert.rejects(store.accept(email("mail_uncertain")), (error: unknown) => {
+      assert.ok(error instanceof MailJournalPoisonError); assert.equal(error.mayHaveCommitted, true); assert.equal(error.emailId, "mail_uncertain");
+      assert.doesNotMatch(error.message, /private|EBADF/); assert.ok(Buffer.byteLength(error.message) < 512); return true;
+    });
+    assert.equal(store.get("mail_uncertain"), undefined);
+    const restored = new MailStore(store.path); await restored.init();
+    assert.equal(restored.list().length, 1); assert.equal(restored.get("mail_uncertain")?.deliveryState, "queued");
+    await rm(root, { recursive: true, force: true });
+  });
   it("persists creation, delivery, and atomic reply answer state", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-mail-"));
     const path = join(root, "mail.jsonl");

@@ -110,6 +110,7 @@ export function createMainCoordinationTools(
             ...recent.map((job) => [
               `Job ${job.id} · ${job.phase} · ${job.result ?? "pending"} · script report: ${job.reported?.status ?? "none"} · cleanup: ${job.cleanup?.state ?? "pending"}`,
               `  summary: ${truncateText(JSON.stringify(job.reported?.summary ?? ""), 256)} · artifacts: ${job.reported?.artifacts.length ?? 0} · exit: ${job.exitCode ?? "unknown"} ${job.signal ?? ""} · outcome: ${job.outcomeMailId ?? "pending"} (${job.outcomeDeliveryState ?? "pending"})`,
+              job.abandoned ? `  abandoned by ${job.abandoned.by}: ${truncateText(JSON.stringify(job.abandoned.reason), 256)}` : undefined,
               job.progress ? `  progress: ${truncateText(JSON.stringify(job.progress.message), 128)} (${job.progress.percent ?? "unknown"}%)` : undefined,
               job.cleanup?.detail ? `  cleanup detail: ${truncateText(JSON.stringify(job.cleanup.detail), 128)}` : undefined,
             ].filter(Boolean).join("\n")),
@@ -239,8 +240,8 @@ export function createMainCoordinationTools(
     name: "cancel_request",
     label: "Cancel request",
     description:
-      "Administratively close one exact response obligation without fabricating a reply. Main-thread only. The recipient must already be inactive (failed, stopped, paused, or archived), and a bounded substantive audit reason is required. This does not stop active work; stop the recipient first.",
-    promptSnippet: "Cancel an abandoned request to an inactive subagent by its real correlation ID.",
+      "Administratively close one exact response obligation, or abandon one never-started queued Python job by its accepted mail ID, without fabricating a reply. Main-thread only. The recipient must already be inactive (failed, stopped, paused, or archived), and a bounded substantive audit reason is required. This does not stop active work; stop the recipient first.",
+    promptSnippet: "Cancel an abandoned request or unclaimed queued Python job assigned to an inactive subagent by its exact mail ID.",
     promptGuidelines: [
       "Cancel only when the user has explicitly abandoned the request or its inactive recipient cannot safely resume.",
       "Never cancel merely to hide an unanswered count; preserve the substantive reason for the audit journal.",
@@ -260,7 +261,7 @@ export function createMainCoordinationTools(
           reason: request.cancellationReason,
         };
         return textResult(
-          `Cancelled request ${request.id} to ${request.to}.\nReason: ${request.cancellationReason}`,
+          `Cancelled request ${request.id} to ${request.to}.\nReason: ${JSON.stringify(request.cancellationReason)}`,
           details,
         );
       } catch (error) {
