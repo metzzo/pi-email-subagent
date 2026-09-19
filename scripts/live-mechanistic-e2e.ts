@@ -249,8 +249,14 @@ async function main(): Promise<number> {
     childExitCode,
     timedOut,
     durableFinalObserved: finalObserved,
-    mainSettled:
-      client?.events().some((e) => e.type === "agent_settled") === true,
+    mainQuiescent: (() => {
+      const rpc = client?.events() ?? [];
+      return (
+        rpc.filter((e) => e.type === "agent_start").length ===
+          rpc.filter((e) => e.type === "agent_end").length &&
+        rpc.some((e) => e.type === "agent_settled")
+      );
+    })(),
     pollError: category,
   });
   const runnerExitCode = validation.ok ? 0 : 1;
@@ -297,8 +303,14 @@ async function main(): Promise<number> {
         protocolStatus: protocolFailure ? "failure" : "ok",
         timedOut,
         shutdown,
-        mainSettled:
-          client?.events().some((e) => e.type === "agent_settled") === true,
+        mainQuiescent: (() => {
+          const rpc = client?.events() ?? [];
+          return (
+            rpc.filter((e) => e.type === "agent_start").length ===
+              rpc.filter((e) => e.type === "agent_end").length &&
+            rpc.some((e) => e.type === "agent_settled")
+          );
+        })(),
         finalObserved,
         sessionId,
         rpcSummary: client ? summarizeRpc(client.events()) : undefined,
