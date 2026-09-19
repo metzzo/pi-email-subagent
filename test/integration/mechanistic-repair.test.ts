@@ -9,6 +9,7 @@ import { emailErrorDetails } from "../../src/email-error.ts";
 import { MailStore } from "../../src/mail-store.ts";
 import { mergeMechanisticPrograms } from "../../src/mechanistic.ts";
 import { createMainCoordinationTools } from "../../src/main-tools.ts";
+import { CancelRequestSchema } from "../../src/tool-schemas.ts";
 import type { MainAdapter, MechanisticJob } from "../../src/types.ts";
 
 const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -123,6 +124,8 @@ for (const removed of [false, true]) it(`abandons exactly one stopped queued Pyt
     if (removed) { f.config.mechanisticPrograms = {}; await f.reopen(); }
     const reason = "User explicitly abandons this queued observation.\nNo replacement is requested.";
     const cancel = createMainCoordinationTools(async () => f.broker).find((tool) => tool.name === "cancel_request")!;
+    assert.match(Reflect.get(CancelRequestSchema.properties.request_id, "description"), /accepted mail ID.*queued Python job/);
+    assert.match(Reflect.get(CancelRequestSchema.properties.reason, "description"), /never-started queued Python job.*1024 UTF-8 bytes/);
     await cancel.execute("cancel", { request_id: abandoned.envelope.id, reason }, undefined, undefined, undefined as never);
     const job = f.broker.mailStore.getJob(abandoned.envelope.id)!;
     assert.equal(job.result, "abandoned"); assert.equal(job.generation, undefined); assert.equal(job.pid, undefined); assert.equal(job.reported, undefined);
@@ -152,9 +155,14 @@ for (const phase of ["running", "progress", "terminal"] as const) it(`stop remai
   const f = await fixture(phase === "terminal" ? "from pi_mechanistic import success\nsuccess('done')\n" : "from pi_mechanistic import progress\nimport time\nprogress('committed')\ntime.sleep(5)\n");
   const held = gate(); let committed = false;
   const update = f.broker.mailStore.updateJob.bind(f.broker.mailStore);
-  const finish = f.broker.mailStore.finishJob.bind(f.broker.mailStore);
+  const save = f.broker.registryStore.save.bind(f.broker.registryStore);
   f.broker.mailStore.updateJob = async (job) => { await update(job); if (!committed && ((phase === "running" && job.phase === "running") || (phase === "progress" && job.progress))) { committed = true; await held.promise; } };
-  f.broker.mailStore.finishJob = async (job, mail) => { await finish(job, mail); if (phase === "terminal") { committed = true; await held.promise; } };
+  // Hold committed finalization after its mail-serialization gate releases:
+  // main can deliver the outcome while this exact Python run remains unsettled.
+  f.broker.registryStore.save = async (registry) => {
+    await save(registry);
+    if (phase === "terminal" && !committed && f.broker.mailStore.listJobs().some((job) => job.phase === "terminal")) { committed = true; await held.promise; }
+  };
   try {
     const accepted = await send(f.broker); await until(() => committed);
     const before = f.broker.mailStore.getJob(accepted.envelope.id)!; assert.ok(before.pid);
@@ -166,11 +174,34 @@ for (const phase of ["running", "progress", "terminal"] as const) it(`stop remai
     assert.equal(f.broker.getSnapshot().capacity.runSlotsUsed, 1);
     assert.equal(f.broker.mailStore.getJob(before.id)?.phase === "terminal", phase === "terminal");
     await assert.rejects(f.broker.restart(accepted.envelope.to), /Stop and settle/);
+    // Even a committed outcome may already be delivered while its callback is
+    // still held. Remove that independent mail blocker to test exact authority.
+    f.setIdle(); await f.broker.flushQueuedMainMail();
+    const blocked = f.broker.inspectAgent(accepted.envelope.to);
+    const identitiesUsed = f.broker.getSnapshot().capacity.identitiesUsed;
+    assert.equal(blocked.archiveBlockers.queued.count, 0);
+    const archiveAttempt = await f.broker.archive(accepted.envelope.to).then(() => "archived", (error: unknown) => String(error));
+    console.log(JSON.stringify({ phase, beforeArchive: blocked, archiveAttempt, afterArchive: f.broker.inspectAgent(accepted.envelope.to), capacity: f.broker.getSnapshot().capacity }));
+    assert.equal(blocked.archiveEligible, false, "retained mechanistic settlement authority blocks archival even after stop and outcome delivery");
+    assert.equal(blocked.archiveBlockers.active, true);
+    assert.match(archiveAttempt, /cannot be archived.*active worker/i);
+    assert.equal(f.broker.inspectAgent(accepted.envelope.to).holdsActivationLease, true);
+    assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, identitiesUsed);
+    assert.equal(f.broker.getSnapshot().capacity.runSlotsUsed, 1);
     const rival = new AgentBroker(f.options); await assert.rejects(rival.init(), /owner|locked|ownership/i); await rival.shutdown().catch(() => undefined);
     held.release(); await stop; await until(() => f.broker.mailStore.getJob(before.id)?.phase === "terminal"); await settled(f.broker);
     const after = f.broker.mailStore.getJob(before.id)!;
     assert.equal(after.result, phase === "terminal" ? "success" : "forced_stop");
     if (phase === "terminal") assert.equal(after.outcomeMailId, before.outcomeMailId);
+    const ready = f.broker.inspectAgent(accepted.envelope.to);
+    assert.equal(ready.state, "stopped"); assert.equal(ready.archiveBlockers.active, false); assert.equal(ready.archiveEligible, true);
+    assert.equal(ready.holdsActivationLease, true); assert.equal(ready.capacity.runSlotsUsed, 0);
+    await f.broker.archive(accepted.envelope.to);
+    assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, identitiesUsed - 1);
+    await f.reopen();
+    assert.equal(f.broker.inspectAgent(accepted.envelope.to).state, "archived");
+    assert.equal(f.broker.mailStore.getJob(before.id)?.outcomeMailId, after.outcomeMailId);
+    assert.equal(f.broker.mailStore.listJobs().length, 1);
   } finally { held.release(); await settled(f.broker); await f.close(); }
 });
 

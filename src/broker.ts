@@ -1456,7 +1456,10 @@ export class AgentBroker {
       if (email.to === address) incomingUnanswered.push(email.id);
     }
     return {
-      active: record?.state === "running" || record?.state === "spawning" || Boolean(worker?.getSnapshot().isStreaming),
+      active: record?.state === "running" || record?.state === "spawning" || Boolean(worker?.getSnapshot().isStreaming)
+        // A stopped Python identity may still own unsettled durable callbacks.
+        || (record?.kind === "mechanistic" && (this.active.has(address) || this.scheduling.has(address)
+          || this.pythonProcesses.has(address) || this.pythonRuns.has(address))),
       cleanupQuarantine: Boolean((record?.kind === "mechanistic" ? record.cleanupUnknown : record?.cleanup) || this.cleanupQuarantines.has(address)),
       queued: this.boundedRequestIds(queued),
       incomingUnanswered: this.boundedRequestIds(incomingUnanswered),
@@ -1471,10 +1474,9 @@ export class AgentBroker {
   }
 
   private archiveEligible(record: RegisteredAgent | undefined, blockers: AgentArchiveBlockers): boolean {
-    if (!record) return false;
+    if (!record || blockers.active) return false;
     if (record.state === "archived") return true;
-    return !blockers.active
-      && !blockers.cleanupQuarantine
+    return !blockers.cleanupQuarantine
       && blockers.queued.count === 0
       && blockers.incomingUnanswered.count === 0
       && blockers.pendingReplies.count === 0;

@@ -52,8 +52,8 @@ export const WaitForRepliesSchema = Type.Object({
 }, { additionalProperties: false });
 
 export const CancelRequestSchema = Type.Object({
-  request_id: Type.String({ minLength: 1, description: "Exact request/correlation ID returned by send_email" }),
-  reason: Type.String({ minLength: 8, description: "Why this obligation is being intentionally abandoned (maximum 1024 UTF-8 bytes)" }),
+  request_id: Type.String({ minLength: 1, description: "Exact accepted mail ID returned by send_email for the request or queued Python job" }),
+  reason: Type.String({ minLength: 8, description: "Why this request or never-started queued Python job is being intentionally abandoned (maximum 1024 UTF-8 bytes)" }),
 }, { additionalProperties: false });
 
 export const ManageAgentSchema = Type.Object({
