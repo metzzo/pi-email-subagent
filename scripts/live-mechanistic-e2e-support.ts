@@ -63,7 +63,7 @@ export function parseLfJournal(text: string): MailEvent[] {
 export function collectEnvelopes(events: MailEvent[]): EmailEnvelope[] {
   const unique = new Map<string, EmailEnvelope>();
   for (const event of events) {
-    if (event.type === "email.created" && event.email)
+    if ("email" in event && event.email)
       unique.set(event.email.id, { ...event.email });
     if (event.type === "email.delivered") {
       const email = unique.get(event.id);
