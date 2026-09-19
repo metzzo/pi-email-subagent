@@ -73,7 +73,7 @@ async function writeFixture(
   );
   await writeFile(
     script,
-    `import json\nfrom pathlib import Path\nfrom pi_mechanistic import arguments,invocation,send_email,success\na=arguments(); n=Path('evidence.txt').read_text().strip(); j=invocation()['jobId']; ack=send_email(a['notify_to'],'MECHANISTIC_EVIDENCE',"Call send_email(to='${main}', subject='MECHANISTIC_CHAIN_COMPLETE', message=<exact JSON {nonce,jobId}>, requires_response=false): "+json.dumps({'nonce':n,'jobId':j},separators=(',',':'))); assert ack['accepted']; success('evidence processed: '+n)\n`,
+    `import json\nfrom pathlib import Path\nfrom pi_mechanistic import arguments,invocation,send_email,success\na=arguments(); n=Path('evidence.txt').read_text().strip(); j=invocation()['jobId']; ack=send_email(a['notify_to'],'MECHANISTIC_EVIDENCE',"Call send_email(to='${main}', subject='MECHANISTIC_CHAIN_COMPLETE', message=<exact JSON {nonce,jobId}>, requires_response=false). Structured: "+json.dumps({'nonce':n,'jobId':j},separators=(',',':'))); assert ack['accepted']; success('evidence processed: '+n)\n`,
   );
   await mkdir(join(root, ".pi"), { recursive: true });
   await writeFile(
