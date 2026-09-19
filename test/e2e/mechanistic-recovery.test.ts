@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { it } from "node:test";
 import { MailStore } from "../../src/mail-store.ts";
+import { deadlineSignal } from "../../src/runtime-timers.ts";
 import type { MechanisticJob } from "../../src/types.ts";
 import { PiRpcClient } from "./helpers/rpc-client.ts";
 
@@ -16,29 +17,50 @@ async function eventually<T>(read: () => Promise<T | undefined>): Promise<T> {
   }
   throw new Error("No durable mechanistic crash/restore evidence within deadline");
 }
-it("fresh Pi executes the real Python tool path and renders honest script inspection/dashboard/results", { timeout: 30_000 }, async () => {
+async function exitWithin(client: PiRpcClient, operation = client.waitForExit()): Promise<number | null> {
+  const deadline = deadlineSignal(5000);
+  try {
+    return await Promise.race([operation, deadline.promise.then(() => {
+      client.kill("SIGKILL");
+      throw new Error("Real Pi did not exit within the five-second test cleanup deadline");
+    })]);
+  } finally { deadline.cancel(); }
+}
+
+it("fresh Pi executes the real Python tool path and renders honest script inspection/dashboard/results", { timeout: 30_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "python-host-view-")); const proof = join(root, "proof.json");
   await writeFile(join(root, "status.txt"), "ready\n");
   await writeFile(join(root, "subagents.json"), JSON.stringify({ mechanisticPrograms: { monitor: { python: "python3", script: resolve("src/python/examples/status_file.py"), cwd: root } } }));
+  t.signal.throwIfAborted();
   const client = PiRpcClient.launch({ cwd: root, agentDir: root, model: "mock-e2e/mock-e2e", extensions, env: { PI_MECHANISTIC_PROOF: proof } });
+  const abort = () => { client.kill("SIGKILL"); };
+  t.signal.addEventListener("abort", abort, { once: true });
   try {
     await client.getState(); await client.prompt("/mechanistic-run");
     const result = JSON.parse(await readFile(proof, "utf8"));
     assert.equal(result.job.result, "success"); assert.equal(result.inspection.kind, "mechanistic");
     assert.match(result.rendered, /confirmed/); assert.ok(result.rendered.includes(result.job.id));
     assert.equal(result.snapshot.agents[0].state, "idle", "a settled empty Python queue must not be displayed as queued");
-  } finally { await client.close().catch(() => undefined); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    t.signal.removeEventListener("abort", abort);
+    await exitWithin(client, client.close()).catch(() => undefined);
+    await exitWithin(client).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 for (const boundary of ["accepted", "starting", "running", "effect", "terminal"] as const) {
-  it(`real Pi owner loss after ${boundary} preserves one accepted ID and never replays a start claim`, { timeout: 45_000 }, async () => {
+  it(`real Pi owner loss after ${boundary} preserves one accepted ID and never replays a start claim`, { timeout: 45_000 }, async (t) => {
     const root = await mkdtemp(join(tmpdir(), `python-owner-${boundary}-`));
     const marker = join(root, "marker.json"); const proof = join(root, "proof.json");
     const script = join(root, "job.py");
     await writeFile(script, `from pi_mechanistic import run, success\nfrom pathlib import Path\nimport os,time,json\ndef main(args):\n with open('effects','a') as f: f.write('once\\n')\n if ${boundary === "effect" ? "True" : "False"}:\n  Path('effect.json').write_text(json.dumps({'pid':os.getpid()}))\n  time.sleep(.5)\n success('done')\nrun(main)\n`);
     await writeFile(join(root, "subagents.json"), JSON.stringify({ mechanisticPrograms: { monitor: { python: "python3", script, cwd: root } } }));
+    t.signal.throwIfAborted();
     const client = PiRpcClient.launch({ cwd: root, agentDir: root, model: "mock-e2e/mock-e2e", extensions, persistSession: true, env: { PI_MECHANISTIC_BOUNDARY: boundary, PI_MECHANISTIC_MARKER: marker } });
     let restored: PiRpcClient | undefined;
+    const abort = () => { client.kill("SIGKILL"); restored?.kill("SIGKILL"); };
+    t.signal.addEventListener("abort", abort, { once: true });
     try {
       const mark = client.mark();
       await client.prompt("E2E PING"); await client.waitForSettlement(mark);
@@ -51,10 +73,11 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
         await readFile(boundary === "effect" ? join(root, "effect.json") : marker, "utf8");
         const store = new MailStore(journal); await store.init(); return store.listJobs()[0];
       });
-      assert.equal(client.kill("SIGKILL"), true); await client.waitForExit();
+      assert.equal(client.kill("SIGKILL"), true); await exitWithin(client);
       // The deliberately interrupted child is finite and receives EOF when the
       // owner dies. Do not leave a test-created orphan running during restore.
       await new Promise((r) => setTimeout(r, 650));
+      t.signal.throwIfAborted();
       restored = PiRpcClient.launch({ cwd: root, agentDir: root, model: "mock-e2e/mock-e2e", extensions, persistSession: true, session: state.sessionFile, env: { PI_MECHANISTIC_PROOF: proof } });
       const restoredState = (await restored.getState()).data as { sessionId: string };
       assert.equal(restoredState.sessionId, state.sessionId, "resume the exact persisted session/namespace");
@@ -66,7 +89,7 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       // Pi 0.85.1 checks ctx.shutdown only at an RPC command boundary. The
       // asynchronous inspection can finish after that check; once its proof is
       // committed, stdin EOF is the real RPC shutdown boundary, not a timer.
-      await restored.close();
+      await exitWithin(restored, restored.close());
       assert.equal(result.jobs.length, 1); const after = result.jobs[0]!; assert.equal(after.id, before.id);
       assert.equal(after.phase, "terminal"); assert.ok(after.outcomeMailId);
       assert.equal(result.mail.filter((mail) => mail.id === after.outcomeMailId).length, 1);
@@ -80,8 +103,9 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       }
       if (boundary === "terminal") assert.equal(after.outcomeMailId, before.outcomeMailId, "restore reuses the durable outcome ID");
     } finally {
-      client.kill("SIGKILL"); await client.waitForExit().catch(() => undefined);
-      restored?.kill("SIGKILL"); await restored?.waitForExit().catch(() => undefined);
+      t.signal.removeEventListener("abort", abort);
+      abort();
+      await Promise.all([exitWithin(client).catch(() => undefined), restored ? exitWithin(restored).catch(() => undefined) : undefined]);
       await rm(root, { recursive: true, force: true });
     }
   });
