@@ -7,6 +7,17 @@ async function text(path: string): Promise<string> {
 }
 
 describe("release contract truth", () => {
+  it("keeps the runtime, all Pi development pins, CI and current support statements exact", async () => {
+    const version = (await text("src/pi-compat.ts")).match(/SUPPORTED_PI_VERSION = "([^"]+)"/)![1]!;
+    const pkg = JSON.parse(await text("package.json"));
+    for (const [name, pinned] of Object.entries(pkg.devDependencies)) if (name.startsWith("@earendil-works/pi-")) assert.equal(pinned, version, name);
+    assert.ok((await text(".github/workflows/ci.yml")).includes(`pi: ["${version}"]`));
+    assert.ok((await text("README.md")).includes(`supports exactly Pi ${version} on Node`));
+    assert.ok((await text("CONTRIBUTING.md")).includes(`development dependencies pin Pi ${version}`));
+    assert.ok((await text("CONTRIBUTING.md")).includes(`@earendil-works/pi-server@${version}`));
+    assert.ok((await text("CHANGELOG.md")).includes(`exact tested host baseline is Pi ${version}`));
+    assert.match(await text("scripts/package-smoke.ts"), /SUPPORTED_PI_VERSION/);
+  });
   it("documents the safe Pi 0.84.2 reload handoff", async () => {
     const readme = await text("README.md");
     assert.match(readme, /await ctx\.reload\(\); return;/i);

@@ -21,7 +21,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         # Wildcard peers are host-provided; 0.1.0 support is validated only on this Pi line.
-        pi: ["0.85.0"]
+        pi: ["0.85.1"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -42,6 +42,7 @@ jobs:
             '@earendil-works/pi-ai',
             '@earendil-works/pi-coding-agent',
             '@earendil-works/pi-tui',
+            '@earendil-works/pi-server',
           ];
           for (const name of names) {
             if (pkg.devDependencies[name] !== process.env.SUPPORTED_PI_VERSION) {
