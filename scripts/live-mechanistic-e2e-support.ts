@@ -58,7 +58,7 @@ export function validateLiveGraph(input: LiveGraphInput): LiveValidation {
     if (email.inReplyTo !== undefined) reasons.push("graph contains correlated mail");
     if (email.completion !== undefined) reasons.push("graph contains completion metadata");
   }
-  if (job?.result !== "success" || job.exitCode !== 0 || job.signal !== undefined) reasons.push("runtime did not succeed cleanly");
+  if (job?.result !== "success" || job.exitCode !== 0 || (job.signal !== undefined && job.signal !== null)) reasons.push("runtime did not succeed cleanly");
   if (job?.cleanup?.state !== "confirmed") reasons.push("direct-child cleanup is not confirmed");
   if (input.childExitCode !== undefined && input.childExitCode !== 0) reasons.push("Pi child exit was nonzero");
   if (input.timedOut) reasons.push("runner timed out");

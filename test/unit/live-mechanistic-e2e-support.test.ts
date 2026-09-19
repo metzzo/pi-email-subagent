@@ -1,25 +1,30 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { describe, it } from "node:test";
-import { parseFiniteEnv, parseLiveModel, parseLfJournal, validateLiveGraph, type LiveGraphInput } from "../../scripts/live-mechanistic-e2e-support.ts";
-
-const at = new Date().toISOString();
-const main = "main@gpt-5.6-luna.com";
-const mech = "evidence.nonce@mechanistic.com";
-const worker = "evidence-worker.nonce@gpt-5.6-luna.com";
-const invocation = { id: "mail_invocation", from: main, to: mech, subject: "invoke", message: "{}", priority: "low", kind: "notification", requiresResponse: false, createdAt: at, deliveryState: "queued" } as const;
-const evidence = { id: "mail_evidence", from: mech, to: worker, subject: "MECHANISTIC_EVIDENCE", message: "nonce NONCE-x job ID mail_invocation", priority: "low", kind: "notification", requiresResponse: false, createdAt: at, deliveryState: "queued" } as const;
-const outcome = { id: "mail_outcome", from: mech, to: main, subject: "Job mail_invocation: success", message: "success", priority: "low", kind: "notification", requiresResponse: false, createdAt: at, deliveryState: "queued" } as const;
-const final = { id: "mail_final", from: worker, to: main, subject: "MECHANISTIC_CHAIN_COMPLETE", message: "nonce NONCE-x job ID mail_invocation", priority: "low", kind: "notification", requiresResponse: false, createdAt: at, deliveryState: "queued" } as const;
-function graph(changes: Partial<LiveGraphInput> = {}): LiveGraphInput { return { events: [
-  { type: "job.terminal", job: { id: invocation.id, address: mech, binding: {} as never, allowedCallers: ["main"], lifecycle: {} as never, phase: "terminal", createdAt: at, updatedAt: at, result: "success", outcomeMailId: outcome.id, exitCode: 0, stderr: "", cleanup: { state: "confirmed", boundary: "direct-child-only", childExited: true, pipesClosed: true } }, email: invocation },
-  { type: "email.created", email: evidence }, { type: "email.created", email: outcome }, { type: "email.created", email: final },
- ], worker, main, mechanistic: mech, childExitCode: 0, durableFinalObserved: true, mainSettled: true, ...changes }; }
-
-describe("reusable live journal framing and graph matrix", () => {
- it("validates finite model and timeout inputs", () => { assert.deepEqual(parseLiveModel("openai-codex/gpt-5.6-luna"), { provider: "openai-codex", modelId: "gpt-5.6-luna" }); assert.equal(parseFiniteEnv("30000", 1), 30000); assert.throws(() => parseLiveModel("bad"), /provider\/model/); assert.throws(() => parseFiniteEnv("1", 1), /integer/); });
- it("parses production MailEvent JSONL and rejects truncation/malformed records", () => { const line = JSON.stringify({ type: "email.created", email: invocation }); assert.equal(parseLfJournal(line + "\n").length, 1); assert.throws(() => parseLfJournal(line), /truncated/); assert.throws(() => parseLfJournal("{bad}\n"), /Expected property/); });
- const cases: Array<[string, Partial<LiveGraphInput>, string]> = [
-  ["valid graph", {}, ""], ["job outbound linkage", { events: graph().events.map(e => e) }, ""], ["wrong final sender", { worker: "wrong@gpt-5.6-luna.com" }, "missing worker final"], ["reply kind", { events: graph().events.map(e => e) }, ""], ["requires response", { events: graph().events.map(e => e) }, ""], ["completion", { events: graph().events.map(e => e) }, ""], ["missing final", { events: graph().events.slice(0, 3) }, "missing worker final"], ["runtime failure", { events: graph().events.map(e => e) }, ""], ["nonzero child", { childExitCode: 1 }, "Pi child exit was nonzero"], ["signal", { events: graph().events.map(e => e) }, ""], ["cleanup unknown", { events: graph().events.map(e => e) }, ""], ["missing outcome", { events: graph().events.filter(e => !("email" in e && e.email!.id === outcome.id)) }, "missing or mismatched automatic outcome"], ["extra loop", { events: [...graph().events, { type: "email.created", email: { ...final, id: "mail_extra" } }] }, "expected exactly four unique envelopes"], ["main unsettled", { mainSettled: false }, "main did not settle"], ["timeout", { timedOut: true }, "runner timed out"], ["final not durable", { durableFinalObserved: false }, "final was not durably observed before shutdown"], ["poll error", { pollError: "bad journal" }, "journal polling failed"],
- ];
- for (const [name, changes, reason] of cases) it(name, () => { const result = validateLiveGraph(graph(changes)); if (reason) assert.ok(result.reasons.includes(reason), result.reasons.join("; ")); else assert.equal(result.ok, true); });
+import { MailStore } from "../../src/mail-store.ts";
+import { DEFAULT_CONFIG } from "../../src/config.ts";
+import type { EmailEnvelope, MechanisticJob } from "../../src/types.ts";
+import { parseFiniteEnv, parseLiveModel, parseLfJournal, validateLiveGraph } from "../../scripts/live-mechanistic-e2e-support.ts";
+const at=new Date().toISOString(), main="main@gpt-5.6-luna.com", mech="evidence.nonce@mechanistic.com", worker="evidence-worker.nonce@gpt-5.6-luna.com";
+const email=(id:string,from:string,to:string,subject:string):EmailEnvelope=>({id,from,to,subject,message:"nonce NONCE-x job ID mail_invocation",priority:"low",kind:"notification",requiresResponse:false,createdAt:at,deliveryState:"queued"});
+async function baseline(){const root=await mkdtemp(join(tmpdir(),"live-matrix-"));const path=join(root,"mail.jsonl");const store=new MailStore(path);await store.init();const invocation=email("mail_invocation",main,mech,"invoke");const evidence=email("mail_evidence",mech,worker,"MECHANISTIC_EVIDENCE");const outcome=email("mail_outcome",mech,main,"Job mail_invocation: success");const final=email("mail_final",worker,main,"MECHANISTIC_CHAIN_COMPLETE");invocation.mechanisticBindingIntent={key:"evidence",python:"/usr/bin/python3",script:"/tmp/evidence.py",cwd:"/tmp"};const job:MechanisticJob={id:invocation.id,address:mech,binding:{key:"evidence",python:"/usr/bin/python3",script:"/tmp/evidence.py",cwd:"/tmp"},allowedCallers:["main"],lifecycle:DEFAULT_CONFIG.lifecycle,phase:"terminal",createdAt:at,updatedAt:at,result:"success",exitCode:0,signal:null,stderr:"",cleanup:{state:"confirmed",boundary:"direct-child-only",childExited:true,pipesClosed:true},outcomeMailId:outcome.id};await store.acceptJob(invocation,{id:job.id,address:job.address,binding:job.binding,allowedCallers:job.allowedCallers,lifecycle:job.lifecycle,phase:"queued",createdAt:at,updatedAt:at,stderr:""});await store.accept(evidence);const {result:_,outcomeMailId:__,exitCode:___,signal:____,cleanup:_____,...queuedShape}=job;await store.updateJob({...queuedShape,phase:"starting",generation:1});await store.updateJob({...queuedShape,phase:"running",generation:1});await store.finishJob({...job,phase:"terminal",generation:1},outcome);await store.accept(final);await store.flush();const events=parseLfJournal(await readFile(path,"utf8"));await rm(root,{recursive:true,force:true});return {events,job,invocation,evidence,outcome,final};}
+function input(base:Awaited<ReturnType<typeof baseline>>):any{return {events:base.events,worker,main,mechanistic:mech,childExitCode:0,durableFinalObserved:true,mainSettled:true};}
+describe("reusable live graph real MailStore matrix",()=>{
+it("valid real MailStore graph",async()=>{const b=await baseline();const result=validateLiveGraph(input(b));assert.equal(result.ok,true,result.reasons.join("; "));});
+it("real baseline parser rejects truncation and malformed records",async()=>{const b=await baseline();const text=JSON.stringify({type:"email.created",email:b.final});assert.throws(()=>parseLfJournal(text),/truncated/);assert.throws(()=>parseLfJournal("{bad}\n"),/Expected property/);});
+const cases:[string,(b:Awaited<ReturnType<typeof baseline>>,i:any)=>void,string][]=[
+["wrong job linkage",(b,i)=>{i.events=i.events.map((e:any)=>e.type==="job.terminal"?{...e,job:{...e.job,id:b.evidence.id}}:e)},"job is not linked to invocation"],
+["wrong final sender",(b,i)=>{i.events=i.events.map((e:any)=>e.email?.id===b.final.id?{...e,email:{...e.email,from:"wrong@luna.com"}}:e)},"missing worker final"],
+["missing final",(b,i)=>{i.events=i.events.filter((e:any)=>e.email?.id!==b.final.id)},"missing worker final"],
+["runtime failure",(b,i)=>{i.events=i.events.map((e:any)=>e.type==="job.terminal"?{...e,job:{...e.job,result:"task_failure"}}:e)},"runtime did not succeed cleanly"],
+["child nonzero",(b,i)=>{i.childExitCode=1},"Pi child exit was nonzero"],
+["timeout",(b,i)=>{i.timedOut=true},"runner timed out"],
+["main unsettled",(b,i)=>{i.mainSettled=false},"main did not settle"],
+["final not durable",(b,i)=>{i.durableFinalObserved=false},"final was not durably observed before shutdown"],
+["poll error",(b,i)=>{i.pollError="bad journal"},"journal polling failed"],
+];
+for(const [name,mutate,reason] of cases)it(name,async()=>{const b=await baseline();const i=input(b);mutate(b,i);const r=validateLiveGraph(i);assert.equal(r.ok,false);assert.ok(r.reasons.includes(reason),r.reasons.join(";"));});
+it("finite model and timeout validation",()=>{assert.deepEqual(parseLiveModel("openai-codex/gpt-5.6-luna"),{provider:"openai-codex",modelId:"gpt-5.6-luna"});assert.equal(parseFiniteEnv("30000",1),30000);});
 });
