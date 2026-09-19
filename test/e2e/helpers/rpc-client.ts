@@ -118,6 +118,7 @@ export class PiRpcClient {
       }
     });
     child.stderr!.on("data", (chunk) => { this.stderr += String(chunk); });
+    child.stdin!.on("error", (error) => this.fail(error));
   }
 
   static launch(options: LaunchOptions): PiRpcClient {
