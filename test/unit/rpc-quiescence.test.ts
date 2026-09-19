@@ -7,6 +7,7 @@ const balanced = [
   { type: "agent_start" },
   { type: "agent_end" },
   { type: "agent_settled" },
+  { type: "agent_settled" },
 ];
 it("balanced initial and follow-on is quiescent", () =>
   assert.equal(summarizeRpcQuiescence(balanced).quiescent, true));

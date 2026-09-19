@@ -175,12 +175,60 @@ async function main(): Promise<number> {
       while (!activePollController.signal.aborted) {
         try {
           events = parseLfJournal(await readFile(activeJournal, "utf8"));
-          if (
-            hasDurableFinal(collectEnvelopes(events), worker, mainAddress) &&
-            client?.events().some((e) => e.type === "agent_settled")
-          ) {
-            finalObserved = true;
-            return;
+          const envelopes = collectEnvelopes(events);
+          const rpcReady = summarizeRpcQuiescence(
+            client?.events() ?? [],
+          ).quiescent;
+          const outcome = envelopes.find(
+            (email) =>
+              email.to === mainAddress &&
+              email.from === mechanistic &&
+              email.subject.startsWith("Job "),
+          );
+          const final = envelopes.find(
+            (email) =>
+              email.to === mainAddress &&
+              email.from === worker &&
+              email.subject === "MECHANISTIC_CHAIN_COMPLETE",
+          );
+          const ready =
+            hasDurableFinal(envelopes, worker, mainAddress) &&
+            outcome?.deliveryState === "delivered" &&
+            final?.deliveryState === "delivered" &&
+            rpcReady &&
+            events.some(
+              (event) =>
+                event.type === "job.terminal" && event.job.result === "success",
+            );
+          if (ready) {
+            await delay(250, undefined, {
+              signal: activePollController.signal,
+            }).catch(() => undefined);
+            events = parseLfJournal(await readFile(activeJournal, "utf8"));
+            const stable = collectEnvelopes(events);
+            const stableRpc = summarizeRpcQuiescence(
+              client?.events() ?? [],
+            ).quiescent;
+            const stableFinal = stable.find(
+              (email) =>
+                email.to === mainAddress &&
+                email.from === worker &&
+                email.subject === "MECHANISTIC_CHAIN_COMPLETE",
+            );
+            const stableOutcome = stable.find(
+              (email) =>
+                email.to === mainAddress &&
+                email.from === mechanistic &&
+                email.subject.startsWith("Job "),
+            );
+            if (
+              stableRpc &&
+              stableFinal?.deliveryState === "delivered" &&
+              stableOutcome?.deliveryState === "delivered"
+            ) {
+              finalObserved = true;
+              return;
+            }
           }
         } catch (error) {
           if (

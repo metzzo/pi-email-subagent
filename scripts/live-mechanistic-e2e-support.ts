@@ -37,7 +37,7 @@ export function summarizeRpcQuiescence(
   const quiescent =
     agentStarts >= 2 &&
     agentStarts === agentEnds &&
-    settled >= 1 &&
+    settled === agentEnds &&
     followOnEnds >= 1 &&
     !retryingEnd;
   return {
