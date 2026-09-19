@@ -22,6 +22,9 @@ import {
 } from "./live-mechanistic-e2e-support.ts";
 import type { MailEvent } from "../src/mail-store.ts";
 
+type ExitObservation =
+  | { exited: true; code: number | null }
+  | { exited: false };
 interface RpcSummary {
   getStateResponses: number;
   promptResponses: number;
@@ -50,13 +53,13 @@ async function waitForExitWithin(
   controller.abort();
   return result;
 }
-async function stopClient(client: PiRpcClient): Promise<number | null> {
+async function stopClient(client: PiRpcClient): Promise<ExitObservation> {
   client.kill("SIGTERM");
   const term = await waitForExitWithin(client, 5000);
-  if (term.exited) return term.code;
+  if (term.exited) return { exited: true, code: term.code };
   client.kill("SIGKILL");
   const killed = await waitForExitWithin(client, 5000);
-  return killed.exited ? killed.code : null;
+  return killed;
 }
 async function writeFixture(
   root: string,
@@ -133,6 +136,7 @@ async function main(): Promise<number> {
   let timedOut = false;
   let shutdown = "failure";
   let category: string | undefined;
+  let exitObservation: ExitObservation = { exited: false };
   let pollPromise: Promise<void> | undefined;
   let pollController: AbortController | undefined;
   let timeoutController: AbortController | undefined;
@@ -196,16 +200,19 @@ async function main(): Promise<number> {
       timeoutController.abort();
       pollController.abort();
       shutdown = "completed";
-      await client.close();
+      const closing = client.close().catch(() => null);
+      exitObservation = await waitForExitWithin(client, 25000);
+      if (!exitObservation.exited) exitObservation = await stopClient(client);
+      else await closing;
     } else {
       pollController.abort();
       timeoutController.abort();
       shutdown = category ?? "failure";
-      await stopClient(client);
+      exitObservation = await stopClient(client);
     }
   } catch {
     category = "lifecycle failure";
-    if (client) await stopClient(client);
+    if (client) exitObservation = await stopClient(client);
   } finally {
     pollController?.abort();
     timeoutController?.abort();
@@ -218,7 +225,8 @@ async function main(): Promise<number> {
       category = category ?? "final journal unavailable or malformed";
     }
   }
-  const childExitCode: number | null = null;
+  const childExitCode = exitObservation.exited ? exitObservation.code : null;
+  if (!exitObservation.exited) category = category ?? "exit wait deadline";
   const validation = validateLiveGraph({
     events,
     worker,
