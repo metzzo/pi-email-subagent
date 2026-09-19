@@ -68,6 +68,8 @@ export interface LaunchOptions {
   session?: string;
   /** Additional deterministic child environment for local test providers. */
   env?: Record<string, string>;
+  /** Explicitly approve the disposable project configuration. */
+  approveProject?: boolean;
 }
 
 export class PiRpcClient {
@@ -126,6 +128,7 @@ export class PiRpcClient {
     for (const extension of options.extensions) args.push("-e", extension);
     args.push("--mode", "rpc");
     if (!options.persistSession) args.push("--no-session");
+    if (options.approveProject) args.push("--approve");
     if (options.session) args.push("--session", options.session);
     args.push("--model", options.model);
     const child = spawn(options.piBin ?? process.env.PI_BIN ?? "pi", args, {
