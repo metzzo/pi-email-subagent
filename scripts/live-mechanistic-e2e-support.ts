@@ -47,11 +47,16 @@ export function validateLiveGraph(input: LiveGraphInput): LiveValidation {
   const job: MechanisticJob | undefined = terminals[0]?.job;
   const outcome = job ? envelopes.find((email) => email.id === job.outcomeMailId) : undefined;
   if (envelopes.length !== 4) reasons.push("expected exactly four unique envelopes");
-  if (!invocation) reasons.push("missing main-to-mechanistic invocation");
+  if (!invocation) reasons.push("missing main-to-mechanistic invocation"); else if (invocation.kind !== "notification") reasons.push("invocation must be notification");
+  const evidence = envelopes.find((email) => email.from === input.mechanistic && email.to === input.worker && email.subject === "MECHANISTIC_EVIDENCE");
+  if (!evidence) reasons.push("missing mechanistic evidence");
+  if (evidence && !/^nonce (NONCE-[A-Za-z0-9]+) job ID (mail_[A-Za-z0-9_]+)$/.test(evidence.message)) reasons.push("evidence nonce/job linkage mismatch");
   if (!job || job.id !== invocation?.id) reasons.push("job is not linked to invocation");
   if (!final) reasons.push("missing worker final");
   if (!outcome || outcome.to !== input.main || outcome.from !== input.mechanistic) reasons.push("missing or mismatched automatic outcome");
   if (!final || final.subject !== "MECHANISTIC_CHAIN_COMPLETE") reasons.push("worker final subject mismatch");
+  if (final && job && !final.message.includes(job.id)) reasons.push("final job-ID linkage mismatch");
+  if (evidence && job && !evidence.message.includes(job.id)) reasons.push("evidence job-ID linkage mismatch");
   for (const email of envelopes) {
     if (email.kind !== "notification") reasons.push("graph contains a reply");
     if (email.requiresResponse !== false) reasons.push("graph contains response-required mail");
