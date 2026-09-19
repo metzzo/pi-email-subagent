@@ -31,8 +31,12 @@ For example, with an installed package under `/opt/pi-email-subagent`:
 
 Use your actual installed package paths. Relative script/cwd paths resolve from
 the global agent directory or trusted project root, respectively. Python names
-are resolved through PATH during registration. The broker checks file and
-executable availability without executing registration probes.
+are resolved through PATH during registration. The selected absolute invocation
+path is retained without dereferencing the interpreter symlink, so a virtualenv's
+`bin/python` keeps its `sys.prefix` and installed modules. The broker checks file
+and executable availability without executing registration probes. Existing
+identities still require exact matching bindings; older bindings to a resolved
+system interpreter are never silently changed into virtualenv bindings.
 
 Callers default to `["main"]`. Explicit caller kinds are `main`, `llm`, and
 `mechanistic`. Opting an LLM into a named program does **not** permit LLM-to-LLM

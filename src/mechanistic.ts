@@ -1,4 +1,4 @@
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, resolve } from "node:path";
 import type { MechanisticBinding, MechanisticCaller, MechanisticProgram } from "./types.ts";
 
@@ -95,7 +95,9 @@ export function mergeMechanisticPrograms(
       }
     }
     if (!python) throw new Error(`Python executable for ${key} was not found on PATH.`);
-    const binding = parseMechanisticBinding({ key, python: realpathSync(python), script: resolve(baseDir, pathText(raw.script)), cwd: resolve(baseDir, pathText(raw.cwd ?? ".")) });
+    // Keep the selected absolute invocation path: dereferencing a venv's final
+    // interpreter symlink changes sys.prefix and its import environment.
+    const binding = parseMechanisticBinding({ key, python, script: resolve(baseDir, pathText(raw.script)), cwd: resolve(baseDir, pathText(raw.cwd ?? ".")) });
     preflightMechanisticBinding(binding);
     result[key] = { ...binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers) };
   }

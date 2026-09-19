@@ -531,3 +531,37 @@ for (const crash of [false, true]) it(`line-heavy reports are projected without 
     assert.equal(outcome.deliveryState, "delivered");
   } finally { await f.close(); }
 });
+
+for (const selection of ["absolute", "relative", "PATH"]) it(`real virtualenv imports survive ${selection} Python registration and restore`, async () => {
+  const f = await fixture("import json,sys\nfrom pi_mechanistic import success, invocation\nfrom mechanistic_venv_only import VALUE\nwith open('starts','a') as s: s.write(invocation()['jobId']+'\\n')\nsuccess(json.dumps(dict(prefix=sys.prefix,basePrefix=sys.base_prefix,executable=sys.executable,value=VALUE)))\n");
+  try {
+    const { execFileSync } = await import("node:child_process");
+    const venv = join(f.root, "venv"); const python = join(venv, "bin/python");
+    execFileSync("python3", ["-m", "venv", "--without-pip", venv]);
+    const site = execFileSync(python, ["-c", "import sysconfig; print(sysconfig.get_path('purelib'))"], { encoding: "utf8" }).trim();
+    await writeFile(join(site, "mechanistic_venv_only.py"), "VALUE = 'module exists only inside this virtualenv'\n");
+    execFileSync("python3", ["-c", "import importlib.util; assert importlib.util.find_spec('mechanistic_venv_only') is None"], { cwd: f.root });
+    const previousPath = process.env.PATH;
+    try {
+      if (selection === "PATH") process.env.PATH = `${join(venv, "bin")}:${previousPath ?? ""}`;
+      f.config.mechanisticPrograms = mergeMechanisticPrograms({}, { worker: {
+        python: selection === "PATH" ? "python" : selection === "relative" ? "venv/bin/python" : python,
+        script: join(f.root, "job.py"), cwd: f.root,
+      } }, f.root);
+    } finally { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; }
+    const ids: string[] = [];
+    for (let run = 0; run < 2; run++) {
+      const job = await terminal(f.broker, (await send(f.broker)).envelope.id);
+      await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+      assert.equal(job.result, "success", JSON.stringify(job));
+      assert.equal(job.binding.python, python); assert.equal(f.config.mechanisticPrograms.worker?.python, python);
+      const observed = JSON.parse(job.reported!.summary);
+      assert.equal(observed.prefix, venv); assert.notEqual(observed.basePrefix, venv);
+      assert.equal(observed.executable, python); assert.equal(observed.value, "module exists only inside this virtualenv");
+      ids.push(job.id);
+      await f.reopen();
+      assert.equal(f.broker.mailStore.getJob(job.id)?.binding.python, python);
+    }
+    assert.deepEqual((await readFile(join(f.root, "starts"), "utf8")).trim().split("\n"), ids, "restoring the invocation path never replays accepted work");
+  } finally { await f.close(); }
+});
