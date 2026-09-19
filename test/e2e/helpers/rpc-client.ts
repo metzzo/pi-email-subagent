@@ -20,8 +20,10 @@ export class JsonLineFramer {
   constructor(private readonly onRecord: (record: RpcLine) => void) {}
 
   write(chunk: Buffer | string): void {
-    if (this.ended) throw new Error("Pi RPC stdout arrived after the decoder was finalized.");
-    const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    if (this.ended)
+      throw new Error("Pi RPC stdout arrived after the decoder was finalized.");
+    const bytes =
+      typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
     this.consume(this.decoder.write(bytes));
   }
 
@@ -30,7 +32,9 @@ export class JsonLineFramer {
     this.ended = true;
     this.consume(this.decoder.end());
     if (this.buffer.trim()) {
-      throw new Error("Unterminated Pi RPC stdout JSONL record at process close.");
+      throw new Error(
+        "Unterminated Pi RPC stdout JSONL record at process close.",
+      );
     }
     this.buffer = "";
   }
@@ -47,7 +51,9 @@ export class JsonLineFramer {
           parsed = JSON.parse(record) as RpcLine;
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
-          throw new Error(`Malformed Pi RPC stdout JSONL record: ${detail}`, { cause: error });
+          throw new Error(`Malformed Pi RPC stdout JSONL record: ${detail}`, {
+            cause: error,
+          });
         }
         this.onRecord(parsed);
       }
@@ -86,12 +92,19 @@ export class PiRpcClient {
   stderr = "";
   private exitCode: number | null | undefined;
   private readonly exitPromise: Promise<number | null>;
+  private readonly closePromise: Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>;
   private rejectExit!: (error: Error) => void;
   private terminalError?: Error;
 
   private constructor(child: ChildProcess) {
     this.child = child;
     this.framer = new JsonLineFramer((line) => this.accept(line));
+    this.closePromise = new Promise((resolve) => {
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    });
     this.exitPromise = new Promise((resolve, reject) => {
       this.rejectExit = reject;
       child.once("error", (error) => this.fail(error));
@@ -103,7 +116,9 @@ export class PiRpcClient {
           this.fail(error instanceof Error ? error : new Error(String(error)));
         }
         if (this.terminalError) return;
-        const error = new Error(`Pi exited with code ${code} before the expected event.\n${this.stderr}`);
+        const error = new Error(
+          `Pi exited with code ${code} before the expected event.\n${this.stderr}`,
+        );
         this.rejectWaiters(error);
         resolve(code);
       });
@@ -119,7 +134,9 @@ export class PiRpcClient {
         child.kill("SIGTERM");
       }
     });
-    child.stderr!.on("data", (chunk) => { this.stderr += String(chunk); });
+    child.stderr!.on("data", (chunk) => {
+      this.stderr += String(chunk);
+    });
     child.stdin!.on("error", (error) => this.fail(error));
   }
 
@@ -134,7 +151,11 @@ export class PiRpcClient {
     const child = spawn(options.piBin ?? process.env.PI_BIN ?? "pi", args, {
       cwd: options.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...options.env, PI_CODING_AGENT_DIR: options.agentDir },
+      env: {
+        ...process.env,
+        ...options.env,
+        PI_CODING_AGENT_DIR: options.agentDir,
+      },
     });
     return new PiRpcClient(child);
   }
@@ -185,6 +206,13 @@ export class PiRpcClient {
     return this.exitPromise;
   }
 
+  waitForClose(): Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }> {
+    return this.closePromise;
+  }
+
   send(command: Record<string, unknown>): void {
     this.child.stdin!.write(`${JSON.stringify(command)}\n`);
   }
@@ -226,7 +254,10 @@ export class PiRpcClient {
     const mark = this.mark();
     this.send({ type: "switch_session", sessionPath });
     return this.waitFor(
-      (line) => line.type === "response" && line.command === "switch_session" && line.success === true,
+      (line) =>
+        line.type === "response" &&
+        line.command === "switch_session" &&
+        line.success === true,
       "switch_session response",
       30_000,
       mark,
@@ -249,7 +280,9 @@ export class PiRpcClient {
       if (matches.length >= count) return matches;
       await new Promise((resolveSleep) => setTimeout(resolveSleep, 25));
     }
-    throw new Error(`Timed out collecting ${count} × ${description}.\n${this.stderr}\nLast events: ${this.tailSummary()}`);
+    throw new Error(
+      `Timed out collecting ${count} × ${description}.\n${this.stderr}\nLast events: ${this.tailSummary()}`,
+    );
   }
 
   waitFor(
@@ -259,32 +292,56 @@ export class PiRpcClient {
     after = 0,
   ): Promise<RpcLine> {
     if (this.terminalError) return Promise.reject(this.terminalError);
-    for (let index = Math.max(after, 0); index < this.lines.length; index += 1) {
+    for (
+      let index = Math.max(after, 0);
+      index < this.lines.length;
+      index += 1
+    ) {
       if (pred(this.lines[index]!)) return Promise.resolve(this.lines[index]!);
     }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.waiters.splice(this.waiters.findIndex((w) => w.timer === timer), 1);
-        reject(new Error(`Timed out waiting for ${description}.\n${this.stderr}\nLast events: ${this.tailSummary()}`));
+        this.waiters.splice(
+          this.waiters.findIndex((w) => w.timer === timer),
+          1,
+        );
+        reject(
+          new Error(
+            `Timed out waiting for ${description}.\n${this.stderr}\nLast events: ${this.tailSummary()}`,
+          ),
+        );
       }, timeoutMs);
       this.waiters.push({ pred, after, resolve, reject, timer });
     });
   }
 
   private tailSummary(): string {
-    return this.lines.slice(-12).map((line) => {
-      const extra = line.toolName ?? (line.message as { role?: string } | undefined)?.role ?? line.command ?? "";
-      return `${line.type}${extra ? `:${String(extra)}` : ""}`;
-    }).join(", ");
+    return this.lines
+      .slice(-12)
+      .map((line) => {
+        const extra =
+          line.toolName ??
+          (line.message as { role?: string } | undefined)?.role ??
+          line.command ??
+          "";
+        return `${line.type}${extra ? `:${String(extra)}` : ""}`;
+      })
+      .join(", ");
   }
 
   /** Wait for the next main-session agent_settled emitted after `after`. */
   async waitForSettlement(after: number, timeoutMs = 90_000): Promise<RpcLine> {
-    return this.waitFor((line) => line.type === "agent_settled", "main agent_settled", timeoutMs, after);
+    return this.waitFor(
+      (line) => line.type === "agent_settled",
+      "main agent_settled",
+      timeoutMs,
+      after,
+    );
   }
 
   async close(): Promise<number | null> {
-    if (this.exitCode !== undefined && this.exitCode !== null) return this.exitPromise;
+    if (this.exitCode !== undefined && this.exitCode !== null)
+      return this.exitPromise;
     this.child.stdin!.end();
     const timeout = setTimeout(() => this.child.kill("SIGTERM"), 20_000);
     try {

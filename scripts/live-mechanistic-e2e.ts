@@ -23,7 +23,7 @@ import {
 import type { MailEvent } from "../src/mail-store.ts";
 
 type ExitObservation =
-  | { exited: true; code: number | null }
+  | { exited: true; code: number | null; signal: NodeJS.Signals | null }
   | { exited: false };
 interface RpcSummary {
   getStateResponses: number;
@@ -37,11 +37,18 @@ interface RpcSummary {
 async function waitForExitWithin(
   client: PiRpcClient,
   milliseconds: number,
-): Promise<{ exited: true; code: number | null } | { exited: false }> {
+): Promise<
+  | { exited: true; code: number | null; signal: NodeJS.Signals | null }
+  | { exited: false }
+> {
   const controller = new AbortController();
-  const exit = client.waitForExit().then(
-    (code) => ({ exited: true as const, code }),
-    () => ({ exited: true as const, code: null }),
+  const exit = client.waitForClose().then(
+    (close) => ({
+      exited: true as const,
+      code: close.code,
+      signal: close.signal,
+    }),
+    () => ({ exited: true as const, code: null, signal: null }),
   );
   const deadline = delay(milliseconds, undefined, {
     signal: controller.signal,
@@ -56,7 +63,7 @@ async function waitForExitWithin(
 async function stopClient(client: PiRpcClient): Promise<ExitObservation> {
   client.kill("SIGTERM");
   const term = await waitForExitWithin(client, 5000);
-  if (term.exited) return { exited: true, code: term.code };
+  if (term.exited) return term;
   client.kill("SIGKILL");
   const killed = await waitForExitWithin(client, 5000);
   return killed;
