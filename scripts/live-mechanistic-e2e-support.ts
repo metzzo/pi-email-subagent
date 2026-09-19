@@ -49,13 +49,14 @@ export function validateLiveGraph(input: LiveGraphInput): LiveValidation {
   if (envelopes.length !== 4) reasons.push("expected exactly four unique envelopes");
   if (!invocation) reasons.push("missing main-to-mechanistic invocation"); else if (invocation.kind !== "notification") reasons.push("invocation must be notification");
   const evidence = envelopes.find((email) => email.from === input.mechanistic && email.to === input.worker && email.subject === "MECHANISTIC_EVIDENCE");
-  if (!evidence) reasons.push("missing mechanistic evidence");
+  if (!evidence) reasons.push("missing mechanistic evidence"); else { if(evidence.from!==input.mechanistic) reasons.push("evidence sender mismatch"); if(evidence.to!==input.worker) reasons.push("evidence recipient mismatch"); if(evidence.subject!=="MECHANISTIC_EVIDENCE") reasons.push("evidence subject mismatch"); }
   if (evidence && !/^nonce (NONCE-[A-Za-z0-9]+) job ID (mail_[A-Za-z0-9_]+)$/.test(evidence.message)) reasons.push("evidence nonce/job linkage mismatch");
   if (!job || job.id !== invocation?.id) reasons.push("job is not linked to invocation");
   if (!final) reasons.push("missing worker final");
-  if (!outcome || outcome.to !== input.main || outcome.from !== input.mechanistic) reasons.push("missing or mismatched automatic outcome");
-  if (!final || final.subject !== "MECHANISTIC_CHAIN_COMPLETE") reasons.push("worker final subject mismatch");
+  if (!outcome || outcome.to !== input.main || outcome.from !== input.mechanistic) reasons.push("missing or mismatched automatic outcome"); else if(!job || outcome.subject!==`Job ${job.id}: success`) reasons.push("outcome subject mismatch");
+  if (!final || final.subject !== "MECHANISTIC_CHAIN_COMPLETE") reasons.push("worker final subject mismatch"); else if(final.to!==input.main) reasons.push("worker final recipient mismatch");
   if (final && job && !final.message.includes(job.id)) reasons.push("final job-ID linkage mismatch");
+  if (evidence && final) { const nonce=evidence.message.match(/nonce (NONCE-[A-Za-z0-9]+)/)?.[1]; if(!nonce||!final.message.includes(nonce)) reasons.push("final nonce/job linkage mismatch"); }
   if (evidence && job && !evidence.message.includes(job.id)) reasons.push("evidence job-ID linkage mismatch");
   for (const email of envelopes) {
     if (email.kind !== "notification") reasons.push("graph contains a reply");
