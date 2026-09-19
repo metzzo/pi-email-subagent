@@ -148,8 +148,10 @@ async function main(): Promise<number> {
     const activeJournal = journal;
     const prompt = `You MUST make one send_email tool call before any final answer. Call ${mechanistic} exactly once as a notification with requires_response:false and JSON {"notify_to":"${worker}"}; do not merely describe or wait. The worker must send exact subject MECHANISTIC_CHAIN_COMPLETE to ${mainAddress} with exact structured nonce/job JSON.`;
     await client.prompt(prompt);
+    const pollController = new AbortController();
+    const timeoutController = new AbortController();
     const poll = async () => {
-      while (true) {
+      while (!pollController.signal.aborted) {
         try {
           events = parseLfJournal(await readFile(activeJournal, "utf8"));
           if (
@@ -168,18 +170,26 @@ async function main(): Promise<number> {
             return;
           }
         }
-        await delay(250);
+        await delay(250, undefined, { signal: pollController.signal }).catch(
+          () => undefined,
+        );
       }
     };
-    const timer = delay(timeout).then(() => {
+    const timer = delay(timeout, undefined, {
+      signal: timeoutController.signal,
+    }).then(() => {
       timedOut = true;
       category = "timeout";
     });
     await Promise.race([poll(), timer]);
     if (finalObserved) {
+      timeoutController.abort();
+      pollController.abort();
       shutdown = "completed";
       await client.close();
     } else {
+      pollController.abort();
+      timeoutController.abort();
       shutdown = category ?? "failure";
       await stopClient(client);
     }
