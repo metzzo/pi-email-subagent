@@ -31,7 +31,7 @@ Workers always receive exactly `send_email` and `fetch_emails` on top of their c
 
 ### Reply protocol
 
-Requests carry response obligations; worker→main new mail defaults to a notification unless `requires_response: true` is explicit. Replies use `reply_to` plus structured completion metadata, and the broker generates the canonical subject. The legacy exact-subject parser remains read-compatible. Obligations use a durable reserve → deliver → commit / release protocol, so concurrent replies cannot double-answer and failed delivery reopens the request. Legacy prose replies migrate as partial, and completed reports without recorded work or validation are warned. Final assistant text never becomes mail. Nested delegation is unsupported and pre-0.1 nested-request journals fail startup explicitly. If the user abandons work assigned to an inactive recipient, [`cancel_request`](cancel-request.md) closes that exact obligation with an audit reason without fabricating an answer.
+Requests carry response obligations; worker→main new mail defaults to a notification unless `requires_response: true` is explicit. Replies use `reply_to` plus structured completion metadata, and the broker generates the canonical subject. The legacy exact-subject parser remains read-compatible. Obligations use a durable reserve → deliver → commit / release protocol, so concurrent replies cannot double-answer and failed delivery reopens the request. Legacy prose replies migrate as partial, and completed reports without recorded work or validation are warned. Final assistant text never becomes mail. Nested delegation is unsupported and pre-0.1 nested-request journals fail startup explicitly. If the user abandons work assigned to an inactive recipient, [`cancel_request`](cancel-request.md) closes that exact response obligation—or an exact never-started queued Python job—with an audit reason and without fabricating a reply.
 
 ### Durability
 
@@ -51,7 +51,7 @@ All limits, roles, address overrides, and the model-selection policy are configu
 
 ## Reviewed designs
 
-- [Mechanistic-subagents](mechanistic-subagents.md): reviewed Python-backed, send-only design; not yet implemented or runtime-tested. See the [review record](mechanistic-subagents-review.md).
+- [Mechanistic-subagents](mechanistic-subagents.md): implemented Python-backed, send-only identities with durable jobs, bounded outcomes, recovery, reusable deterministic E2E, and an opt-in real-model proof. See the [usage guide](mechanistic-usage.md) and [two-round review record](mechanistic-subagents-review.md).
 
 ## Related surfaces
 

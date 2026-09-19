@@ -106,9 +106,112 @@ effort, reviewer role, and read-only tools for each identity.
 - No feature runtime existed, so no Python, broker integration, or live-model
   behavior was claimed tested.
 
-## Final review
+## Final review — 2026-09-19
 
-Pending implementation and reusable E2E evidence. The same five identities will
-re-review the plan against the actual code, packed artifact, deterministic logs,
-and opt-in live-model evidence. Verified remaining blockers will be routed back
-to the original implementation or E2E owner before this section is finalized.
+**Verdict before repairs:** all five reviewers returned `REQUEST_CHANGES`. The
+implementation direction and reuse of the existing broker/store/scheduler were
+approved, but the reviewers found release blockers in lifecycle control,
+recovery, documentation, and the live proof. No reviewer requested another
+service, scheduler, daemon, mailbox, or plugin framework.
+
+The same read-only GPT-5.6 Sol identities and xhigh effort were used:
+
+| Focus | Correlated final-review request |
+| --- | --- |
+| Simplicity | `mail_00mu8h34y9_000_df4c2a9778` |
+| Software design | `mail_00mu8h34yc_000_153458de27` |
+| Agentic semantics | `mail_00mu8h34yf_000_0f2c76b764` |
+| Correctness | `mail_00mu8h34yi_000_58f63bd23d` |
+| Production reality | `mail_00mu8h34yl_000_e6261baba5` |
+
+The design and reality reviewers exhausted their first run budgets without a
+reply. Their exact identities were inspected and restarted; they then completed
+the original durable requests. Agentic and reality follow-ups independently
+confirmed the physical-close defect in the reusable runner.
+
+### Verified findings and repairs
+
+1. **Queued work could not be abandoned.** A stopped, never-started job retained
+   its identity lease and reserved main-mail capacity, while `cancel_request`
+   rejected its notification trigger. Commit `a15bf18` now lets main abandon an
+   exact inactive `queued` job through the existing audited cancellation
+   surface. One atomic terminal transition cancels the trigger, records the
+   bounded actor/reason, creates the usual stable non-correlated `abandoned`
+   outcome, and starts no process. Claim races, restore/compaction, removed
+   bindings, queue capacity, outcome delivery, and archive are covered. Repair
+   verification then found that a clean abandonment could overwrite an older
+   job's identity-wide cleanup quarantine; `4713544` preserves the existing
+   state, failure, cleanup audit, and identity lease for the exact identity.
+2. **Three recovery/settlement edges were incomplete.** The same commit treats a
+   queued append as durable reactivation intent when the registry still says an
+   identity was archived; preserves an exact possibly-accepted mail ID when
+   append rollback also fails; and bounds normal stop while retaining the claim,
+   run slot, and namespace if a committed spawn/progress/finalization callback
+   stalls. Claimed jobs are still never replayed. Repair verification also
+   found that a timed-out stopped record could appear archive-eligible while
+   exact process/run authority remained. Commit `a9d1fdd` makes that authority a
+   canonical archive blocker, retaining the identity lease until settlement
+   without retaining a run slot after durable cleanup-unknown quarantine or
+   blocking unrelated identities.
+3. **Generated outcomes and inspection could exceed useful bounds.** Commit
+   `78e1918` applies ordinary body/context limits to the derived notification,
+   reserves one main-queue slot per nonterminal job, retains the complete report
+   in the durable job, and orders bounded newest-first inspection summaries.
+4. **Interpreter canonicalization broke virtual environments.** Commit
+   `d48ad41` preserves the selected absolute invocation path without
+   dereferencing the final venv symlink. Real `--without-pip` venv imports cover
+   absolute, relative, PATH-selected, broker, and restored paths.
+5. **The first strict live harness could close during a later main turn and
+   treated RPC failure as physical child exit.** The Luna repair series ending
+   at `3f4d68b` reduces mail delivery transitions, requires delivered outcome and
+   final mail plus stable balanced main quiescence, and separates protocol
+   failure from the real child `close` event. A real TERM-resistant malformed-RPC
+   process test proves KILL escalation and PID removal.
+6. **Current support and status prose was stale.** Commit `3425924` aligns the
+   runtime, all Pi development pins, CI, and current support statements on Pi
+   0.85.1 and adds a release-truth invariant. The present documentation update
+   records the implemented feature, exact validation, and limits while keeping
+   clearly historical Pi 0.84.2 characterizations.
+
+### Repair verification
+
+The same five reviewers received narrow final-fix confirmations. Simplicity
+(`mail_00mu8ll3zm_000_e64ca9b420`), design
+(`mail_00mu8ll3zq_000_1d04e9d07d`), agentic semantics
+(`mail_00mu8ll3zv_000_8ceff3d430`), and correctness
+(`mail_00mu8ll402_000_52fe1f0222`) returned `APPROVE` after inspecting
+`4713544` and `a9d1fdd`. Production reality
+(`mail_00mu8ll406_000_6277e93c0a`) confirmed both lifecycle fixes and the
+current deterministic evidence, then returned `REQUEST_CHANGES` only because
+this document called the older `a15bf18` evidence index complete. The evidence
+list below now labels that index as earlier and names the final-code logs; no
+post-edit approval is claimed.
+
+### Final evidence
+
+- Production-focused repair suite: 169/169 passed after the final
+  quarantine/archival cases.
+- `npm run test:e2e`: 73/73 passed across 5 suites on the final lifecycle code
+  (`final-current-e2e.log`).
+- `npm run validate`: 591/591 passed across 38 suites; all 33 source coverage
+  thresholds, TypeScript, and production-license checks passed.
+- Packed smoke: 60 files on Pi 0.85.1 and a successful installed Python job.
+- Final-code opt-in `openai-codex/gpt-5.6-luna` run at `a9d1fdd`: outer command,
+  runner, and Pi child all exited 0. The artifact
+  `.test-workspaces/mechanistic-subagents/live-mechanistic-1789849041732.json`
+  contains exactly four notification-only envelopes, delivered outcome/final,
+  linked IDs/nonce, successful terminal evidence, confirmed cleanup, 3/3/3 main
+  starts/ends/settlements, protocol status `ok`, and observed physical close;
+  command output is in `live-mechanistic-final-code.log`.
+- The earlier `a15bf18` repair set is indexed by
+  `.test-workspaces/mechanistic-subagents/final-repair-summary.json`. Current
+  final-code deterministic evidence is in `quarantine-erasure-*`,
+  `archive-stall-*`, and `final-current-e2e.log`.
+
+### Remaining limits
+
+Trusted Python is not sandboxed. Cleanup proves only the direct child and its
+observed pipes, not detached descendants or remote effects. The journal does not
+claim sudden-power-loss/fsync durability. Pi main-message presentation remains
+at least once because the host exposes no durable append receipt. Live evidence
+covers the requested Luna model and Pi 0.85.1 only.

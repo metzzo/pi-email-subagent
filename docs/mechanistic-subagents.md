@@ -1,7 +1,7 @@
 # Mechanistic-subagents
 
-Status: reviewed implementation design; production code and runtime validation are
-not yet complete.
+Status: implemented and validated. The design below is also the production
+contract; current evidence and remaining limits are recorded at the end.
 
 ## Goal
 
@@ -194,7 +194,8 @@ A job records separately:
 - the script-reported terminal (`success` or `failure`), if any;
 - the runtime result (`success`, `task_failure`, `invalid_arguments`,
   `spawn_failure`, `crash`, `timeout`, `forced_stop`, `protocol_failure`,
-  `missing_terminal`, or `interrupted`);
+  `missing_terminal`, `interrupted`, or main-authorized `abandoned` before a
+  start claim);
 - exit code or signal and bounded logs;
 - cleanup confirmation or uncertainty; and
 - the stable outcome-notification mail ID and delivery state.
@@ -286,7 +287,12 @@ OS process manager.
 - Progress updates state/UI only. Script-selected mail and the one job outcome
   use normal broker delivery.
 - Stopping leaves later queued jobs durable but inactive. An explicit restart
-  may run jobs that were never claimed; it never reruns an interrupted job.
+  may run the same accepted IDs that were never claimed; it never reruns an
+  interrupted job.
+- Main may use `cancel_request` with the exact accepted ID and an audit reason
+  to abandon an inactive job only while it is still durably queued. The journal
+  atomically cancels its trigger, records an `abandoned` terminal job without a
+  process generation, and creates the usual stable non-correlated outcome.
 
 ## Examples, packaging, and documentation
 
@@ -401,14 +407,39 @@ reported as live-model validation.
 
 ## Validation status
 
-The five-agent GPT-5.6 Sol xhigh initial review is recorded in
-[`mechanistic-subagents-review.md`](mechanistic-subagents-review.md). It verified
-current seams and required the decisions now incorporated above.
+The initial and final five-agent GPT-5.6 Sol xhigh reviews are recorded in
+[`mechanistic-subagents-review.md`](mechanistic-subagents-review.md). The final
+review found queued-job abandonment, recovery, outcome-bound, interpreter-path,
+callback-settlement, release-truth, and live-proof gaps. Those findings were
+reproduced and repaired without adding another broker, scheduler, daemon, job
+store, or runtime-registration surface.
 
-No production runtime, Python helper, examples, or reusable/live E2E described
-here has yet been implemented or passed. Before implementation, the real
-`npm run test:package` fails because the new documentation increased the packed
-artifact above the old 51-entry cap; this is recorded evidence, not a waived
-check. Implementation must update the measured package policy and return the
-full validation suite to green without lowering unrelated coverage or weakening
-assertions.
+Current deterministic evidence at commit `a9d1fdd`:
+
+- `npm run validate`: 591 tests in 38 suites; TypeScript and the four-package
+  production license policy passed; the unchanged per-source coverage ratchet
+  passed for all 33 source files.
+- `npm run test:e2e`: 73 tests in 5 suites passed, including real Pi RPC crash,
+  restoration, callback-stall, and direct-child cleanup paths.
+- Packed-artifact smoke in `archive-stall-validate.log`: 60 files on supported
+  Pi 0.85.1; the installed Python job
+  `mail_00mu8lfbo2_000_4f9a6aae0e` succeeded.
+- Focused final production repairs: 169 tests passed after the final quarantine
+  and archive-authority regressions. Complete logs are under
+  `.test-workspaces/mechanistic-subagents/final-repair-*`,
+  `quarantine-erasure-*`, and `archive-stall-*`; the earlier repair set is
+  indexed by `final-repair-summary.json`.
+
+The final-code opt-in Luna proof also exited zero for the shell, runner, and Pi
+child at `a9d1fdd`. Its bounded artifact is
+`.test-workspaces/mechanistic-subagents/live-mechanistic-1789849041732.json` and
+the command log is `live-mechanistic-final-code.log`. It proves four unique
+notification-only envelopes, exact invocation/job/outcome/nonce linkage,
+successful script report and runtime, confirmed direct-child cleanup, delivered
+outcome and worker-final mail, three balanced main starts/ends/settlements,
+protocol health, and physical Pi close with code zero.
+
+The evidence does not claim sudden-power-loss/fsync durability, containment of
+detached descendants or remote effects, cross-parent workspace isolation,
+Windows owner-recovery behavior, alternate Pi versions, or exactly-once Pi
+message presentation. Trusted Python remains unsandboxed.

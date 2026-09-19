@@ -6,13 +6,18 @@ All notable changes to this project are documented here. The format follows [Kee
 
 Initial `0.1.0` release candidate (unpublished).
 
+### Added
+
+- Add trusted Python-backed `mechanistic.com` identities with fixed global or trusted-project registration, durable send-only jobs, bounded JSONL progress/mail/outcome protocol, direct-child lifecycle evidence, inspection/UI support, packaged helper and safe examples, and no model/effort/inbox/reply surface.
+- Add exact queued-job abandonment through the existing audited `cancel_request` surface, busy-main outcome reservations and bounded projections, no-replay crash restoration, virtualenv-preserving interpreter selection, reusable real-Pi deterministic E2E, and an opt-in real Luna evidence chain.
+
 ### Fixed
 
 - Repair a missing final mail-journal newline atomically before recovery or later appends, preserving accepted mail across subsequent restarts.
 - Preserve `EMAIL_DELIVERY_FAILED` and the accepted mail ID through registry, publication, and failure-finalization errors; final bookkeeping failure does not undo routed delivery or invite resubmission.
 - Check turn/token budgets before assistant continuation and native Pi retries while retaining per-delivery/enforcement baselines. Reported token exhaustion prevents another assistant request; admitted responses can still overshoot the token limit.
 - Share model input-budget interpretation between mail and prompts so lockstep context/output metadata preserves complete configured instructions. Insufficient capacity rejects worker mail before acceptance and blocks startup instead of removing required policy or role instructions.
-- Restore extension loading after the Pi 0.85.0 upgrade by moving the exact runtime guard, development pins, and CI baseline together from 0.84.2 to 0.85.0. Keep rejection of other host versions and the public ExtensionAPI checks. Add Pi's undeclared `pi-server` SDK dependency only for development tests.
+- Restore extension loading across the Pi upgrade by moving the exact runtime guard, development pins, and CI baseline together, with the current supported baseline at 0.85.1. Keep rejection of other host versions and the public ExtensionAPI checks. Add Pi's undeclared `pi-server` SDK dependency only for development tests.
 - Mail journal appends now use one file descriptor with exact pre-offset rollback; any append rejection poisons that store instance until restart so later writes cannot follow a torn fragment. Reply-reservation fault coverage exercises tears in both journal lines. Registry save failures remove their temporary file.
 - A request journaled as delivered no longer reports ordinary success when its exact worker generation loses prompt/steer admission: `SendEmailResult.deliveryUncertain` preserves the stable ID and open obligation for same-identity recovery. Worker mailbox closures are generation-token bound, reserved replies remain pending in reply waits, and new-identity runtime preflight is bounded before acceptance.
 - Cleanup never disposes a Pi session while idle, streaming, compaction, admitted-prompt, or active-tool quiescence is false; caller deadlines retain the exact-address quarantine while the authoritative observation continues. Namespace acquisition now releases and fails visibly if its owner-transition guard cannot be removed.
@@ -107,7 +112,7 @@ Initial `0.1.0` release candidate (unpublished).
 - The npm package excludes internal implementation plans and enforces one shared entry-count, tarball-size, required-file, forbidden-path, and package-local Markdown-link policy in local smoke and CI.
 - Conversation and persisted-diff readers use the supported `SessionManager.open(...).getBranch()` path instead of Pi test-only parsing exports.
 - The Pi RPC E2E client now decodes split UTF-8 safely and rejects malformed or unterminated JSONL stdout records.
-- The `0.1.0` release candidate is CI/load-tested against Pi 0.84.2; wildcard host peers do not imply compatibility with untested Pi versions.
+- The `0.1.0` release candidate is CI/load-tested against Pi 0.85.1; wildcard host peers do not imply compatibility with untested Pi versions.
 
 #### Security
 

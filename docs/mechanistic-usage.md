@@ -144,8 +144,9 @@ A script's success report is not runtime success: a later crash, nonzero exit,
 protocol error or deadline wins. Missing/duplicate terminal reports are not
 success. Stop prevents pending work from starting and finitely terminates the
 current direct child; it retains the identity lease and queued work. Restart
-runs only not-yet-started queued jobs, never a previous accepted ID. Archive
-requires no active work, pending mail or cleanup quarantine.
+may run the same previously accepted ID only when its durable job was never
+claimed; a claimed/interrupted ID is never replayed. Archive requires no active
+work, pending mail or cleanup quarantine.
 
 To explicitly abandon one **never-started queued** job, stop and settle the identity,
 then use `cancel_request(request_id, reason)` with its exact accepted mail ID and a
@@ -187,7 +188,16 @@ The paid live chain is opt-in and uses disposable temporary files only:
 LIVE_MODEL=openai-codex/gpt-5.6-luna npm run test:live:mechanistic
 ```
 
-The runner starts a fresh Pi RPC process, asks a real LLM to delegate through an LLM worker to the trusted `evidence` Python program, and retains bounded JSON evidence under `.test-workspaces/mechanistic-subagents/`. It asserts notification kinds, broker IDs, authenticated senders, no response obligations, and that the final notification contains the nonce read from the disposable evidence file. A failed run retains its complete diagnostic log; no external or destructive action is performed.
+The runner starts a fresh Pi RPC process and asks a real main LLM to invoke the
+trusted `evidence` Python program. Python sends structured evidence to a real LLM
+worker, which sends the exact nonce/job result back to main. The runner retains
+bounded JSON evidence under `.test-workspaces/mechanistic-subagents/`. It asserts
+four notification-only envelopes, broker/job/outcome IDs, authenticated senders,
+no response obligations, exact nonce linkage, delivered main-bound mail,
+successful runtime/cleanup, stable main quiescence, protocol health, and observed
+physical Pi close. A failed run retains only bounded structural diagnostics and
+its isolated paths—never credentials, provider stderr, full messages, session
+transcripts, or hidden reasoning. No external or destructive action is performed.
 
 ## Validation limits
 
