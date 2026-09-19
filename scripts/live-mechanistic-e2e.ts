@@ -232,6 +232,13 @@ async function main(): Promise<number> {
       category = category ?? "final journal unavailable or malformed";
     }
   }
+  const protocolFailure = exitObservation.exited
+    ? await client?.waitForExit().then(
+        () => false,
+        () => true,
+      )
+    : false;
+  if (protocolFailure) category = category ?? "protocol failure";
   const childExitCode = exitObservation.exited ? exitObservation.code : null;
   if (!exitObservation.exited) category = category ?? "exit wait deadline";
   const validation = validateLiveGraph({
@@ -285,6 +292,9 @@ async function main(): Promise<number> {
         model: `${model.provider}/${model.modelId}`,
         runnerExitCode,
         childExitCode,
+        childExitSignal: exitObservation.exited ? exitObservation.signal : null,
+        physicalCloseObserved: exitObservation.exited,
+        protocolStatus: protocolFailure ? "failure" : "ok",
         timedOut,
         shutdown,
         mainSettled:
