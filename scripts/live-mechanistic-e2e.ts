@@ -25,13 +25,13 @@ child.stdin.write(JSON.stringify({ type: "prompt", message: prompt }) + "\n");
 // Let the real process settle and close its RPC stream normally; TERM/KILL are finite fallbacks only.
 const orderly = setTimeout(() => child.stdin.end(), timeout - 30_000);
 let completionObserved = false;
-const poll = setInterval(async () => { try { const stack=[root]; while(stack.length){ const d=stack.pop()!; for(const e of await readdir(d,{withFileTypes:true})){ const p=join(d,e.name); if(e.isDirectory()) stack.push(p); else if(e.name.endsWith('.jsonl')) { const text=await readFile(p,'utf8'); if(text.includes('"subject":"MECHANISTIC_CHAIN_COMPLETE"')) completionObserved=true; } } } if(completionObserved) child.stdin.end(); } catch {} }, 2_000);
+const poll = setInterval(async () => { try { const stack=[root]; while(stack.length){ const d=stack.pop()!; for(const e of await readdir(d,{withFileTypes:true})){ const p=join(d,e.name); if(e.isDirectory()) stack.push(p); else if(e.name === 'mail.jsonl') { const text=await readFile(p,'utf8'); for(const line of text.split('\\n')) { try { const ev=JSON.parse(line); const em=ev.email; if(em && em.from===worker && em.to===main && em.subject==='MECHANISTIC_CHAIN_COMPLETE' && em.kind==='notification' && em.requiresResponse===false && em.inReplyTo===undefined) completionObserved=true; } catch {} } } } } if(completionObserved) child.stdin.end(); } catch {} }, 2_000);
 const code = await new Promise<number|null>(resolveCode => { const timer=setTimeout(()=>{ child.kill("SIGTERM"); setTimeout(()=>child.kill("SIGKILL"), 5_000); }, timeout); child.once("close", c=>{clearTimeout(timer);clearTimeout(orderly);clearInterval(poll);resolveCode(c)}); });
 const files: string[] = [];
-async function walk(d: string): Promise<void> { for (const e of await readdir(d, {withFileTypes:true})) { const p=join(d,e.name); if(e.isDirectory()) await walk(p); else if(e.name.endsWith(".jsonl")) files.push(p); } }
+async function walk(d: string): Promise<void> { for (const e of await readdir(d, {withFileTypes:true})) { const p=join(d,e.name); if(e.isDirectory()) await walk(p); else if(e.name === "mail.jsonl") files.push(p); } }
 await walk(root);
 let records: any[]=[]; for(const f of files) { try { records.push(...(await readFile(f,"utf8")).split("\n").filter(Boolean).map(x=>JSON.parse(x))); } catch {} }
-const mails = records.filter(x=>x.type === "email.created").map(x=>x.email).filter(Boolean);
+const mails = [...new Map(records.flatMap(x=>x.email ? [x.email] : []).map(x=>[x.id,x])).values()];
 const jobs = records.filter(x=>x.type === "job.terminal").map(x=>x.job).filter(Boolean);
 const trigger = mails.find(x=>x.to === worker);
 const invocation = mails.find(x=>x.to === "evidence.nonce@mechanistic.com");
