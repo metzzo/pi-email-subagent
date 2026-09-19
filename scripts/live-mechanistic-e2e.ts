@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
 import {
   childJournalPath,
+  safeSessionId,
   parseFiniteEnv,
   parseLiveModel,
   parseLfJournal,
@@ -25,7 +26,7 @@ interface RpcSummary {
   getStateResponses: number;
   promptResponses: number;
   settled: number;
-  toolEnds: number;
+  toolEnds: Array<{ toolName: string; isError: boolean }>;
   extensionErrors: number;
 }
 async function stopClient(client: PiRpcClient): Promise<number | null> {
@@ -83,7 +84,12 @@ function summarizeRpc(
       (e) => e.type === "response" && e.command === "prompt",
     ).length,
     settled: events.filter((e) => e.type === "agent_settled").length,
-    toolEnds: events.filter((e) => e.type === "tool_execution_end").length,
+    toolEnds: events
+      .filter((e) => e.type === "tool_execution_end")
+      .map((e) => ({
+        toolName: typeof e.toolName === "string" ? e.toolName : "other",
+        isError: e.isError === true,
+      })),
     extensionErrors: events.filter((e) => e.type === "extension_error").length,
   };
 }
@@ -117,15 +123,18 @@ async function main(): Promise<number> {
     });
     const state = await client.getState();
     if (state.success !== true) throw new Error("startup");
-    sessionId = String((state.data as { sessionId?: unknown }).sessionId);
+    sessionId = safeSessionId(
+      (state.data as { sessionId?: unknown }).sessionId,
+    );
     if (!sessionId) throw new Error("startup");
     journal = childJournalPath(agentDir, sessionId);
+    const activeJournal = journal;
     const prompt = `You MUST make one send_email tool call before any final answer. Call ${mechanistic} exactly once as a notification with requires_response:false and JSON {"notify_to":"${worker}"}; do not merely describe or wait. The worker must send exact subject MECHANISTIC_CHAIN_COMPLETE to ${mainAddress} with exact structured nonce/job JSON.`;
     await client.prompt(prompt);
     const poll = async () => {
       while (true) {
         try {
-          events = parseLfJournal(await readFile(journal!, "utf8"));
+          events = parseLfJournal(await readFile(activeJournal, "utf8"));
           if (
             hasDurableFinal(collectEnvelopes(events), worker, mainAddress) &&
             client?.events().some((e) => e.type === "agent_settled")
