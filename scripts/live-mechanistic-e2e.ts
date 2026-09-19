@@ -74,7 +74,8 @@ function summarizeRpc(
     type?: string;
     command?: string;
     toolName?: unknown;
-  }>,
+    isError?: unknown;
+  }>, 
 ): RpcSummary {
   return {
     getStateResponses: events.filter(
