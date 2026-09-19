@@ -36,13 +36,14 @@ export async function mechanisticParserCases(): Promise<void> {
     assert.throws(() => mergeMechanisticPrograms({}, { worker: { ...binding, unknown: true } }, root));
     assert.throws(() => mergeMechanisticPrograms({}, Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`key-${i}`, {}])), root));
     const relativePython = join(root, "python"); await symlink(program.python, relativePython);
-    assert.equal(mergeMechanisticPrograms({}, { worker: { python: "./python", script: "job.py" } }, root).worker!.python, program.python);
+    assert.equal(mergeMechanisticPrograms({}, { worker: { python: "./python", script: "job.py" } }, root).worker!.python, relativePython);
+    assert.equal(mergeMechanisticPrograms({}, { worker: { python: relativePython, script } }, root).worker!.python, relativePython);
     const oldPath = process.env.PATH;
     try {
       const first = join(root, "first"); const second = join(root, "second"); await mkdir(first); await mkdir(second);
       await mkdir(join(first, "python-contract")); await symlink(program.python, join(second, "python-contract"));
       process.env.PATH = `${first}:${second}`;
-      assert.equal(mergeMechanisticPrograms({}, { worker: { python: "python-contract", script } }, root).worker!.python, program.python);
+      assert.equal(mergeMechanisticPrograms({}, { worker: { python: "python-contract", script } }, root).worker!.python, join(second, "python-contract"));
       await writeFile(join(first, "not-executable"), "no execution"); await chmod(join(first, "not-executable"), 0o600);
       assert.throws(() => mergeMechanisticPrograms({}, { worker: { python: "not-executable", script } }, root), /not found/);
       delete process.env.PATH;

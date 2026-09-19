@@ -89,7 +89,7 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       // Pi 0.85.1 checks ctx.shutdown only at an RPC command boundary. The
       // asynchronous inspection can finish after that check; once its proof is
       // committed, stdin EOF is the real RPC shutdown boundary, not a timer.
-      await exitWithin(restored, restored.close());
+      assert.equal(await exitWithin(restored, restored.close()), 0, "restored Pi closes normally through RPC EOF, not a forced cleanup");
       assert.equal(result.jobs.length, 1); const after = result.jobs[0]!; assert.equal(after.id, before.id);
       assert.equal(after.phase, "terminal"); assert.ok(after.outcomeMailId);
       assert.equal(result.mail.filter((mail) => mail.id === after.outcomeMailId).length, 1);
