@@ -7,6 +7,7 @@ import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
 import { childJournalPath, safeSessionId, parseFiniteEnv, parseLiveModel, parseLfJournal, collectEnvelopes, hasDurableFinal, validateLiveGraph } from "./live-mechanistic-e2e-support.ts";
 
 async function stopClient(client:PiRpcClient):Promise<{exit:number|null;category:string}>{const c=new AbortController();client!.kill("SIGTERM");const result=await Promise.race([client!.waitForExit().then(code=>{c.abort();return {kind:"exit" as const,code}}),delay(5000,undefined,{signal:c.signal}).then(()=>({kind:"deadline" as const}))]);if(result.kind==="deadline"){client!.kill("SIGKILL");return {exit:await client!.waitForExit(),category:"forced-kill"};}return {exit:result.code,category:"term"};}
+process.on("uncaughtException",()=>{process.exitCode=1;});
 const model = process.env.LIVE_MODEL; const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? tmpdir(), ".pi", "agent");
 const timeout = parseFiniteEnv(process.env.LIVE_TIMEOUT_MS, 240_000); parseLiveModel(model);
 const root = await mkdtemp(join(tmpdir(), "pi-mechanistic-live-")); await chmod(root, 0o700);
