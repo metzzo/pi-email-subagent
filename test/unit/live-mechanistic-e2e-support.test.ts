@@ -21,7 +21,7 @@ const cases:[string,(b:Awaited<ReturnType<typeof baseline>>,i:any)=>void,string]
 ["runtime failure",(b,i)=>{i.events=i.events.map((e:any)=>e.type==="job.terminal"?{...e,job:{...e.job,result:"task_failure"}}:e)},"runtime did not succeed cleanly"],
 ["child nonzero",(b,i)=>{i.childExitCode=1},"Pi child exit was nonzero"],
 ["timeout",(b,i)=>{i.timedOut=true},"runner timed out"],
-["main unsettled",(b,i)=>{i.mainSettled=false},"main did not settle"],
+["main unsettled",(b,i)=>{i.mainQuiescent=false},"main was not quiescent"],
 ["final not durable",(b,i)=>{i.durableFinalObserved=false},"final was not durably observed before shutdown"],
 ["poll error",(b,i)=>{i.pollError="bad journal"},"journal polling failed"],
 ];
