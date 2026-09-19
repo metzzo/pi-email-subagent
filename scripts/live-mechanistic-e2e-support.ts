@@ -1,6 +1,8 @@
+import { StringDecoder } from "node:string_decoder";
 import { parseMailEvent, type MailEvent } from "../src/mail-store.ts";
 import type { EmailEnvelope, MechanisticJob } from "../src/types.ts";
 
+export class BoundedJsonlDecoder { private decoder=new StringDecoder("utf8"); private buffer=""; constructor(private readonly maxBytes=8*1024*1024) {} push(chunk:Buffer|string): unknown[]{ this.buffer+=this.decoder.write(typeof chunk==='string'?Buffer.from(chunk):chunk); if(Buffer.byteLength(this.buffer)>this.maxBytes)throw new Error("RPC record oversized"); const out:unknown[]=[]; let n=this.buffer.indexOf("\n"); while(n>=0){const line=this.buffer.slice(0,n);this.buffer=this.buffer.slice(n+1);if(line.trim()){const value=JSON.parse(line);if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("RPC record must be object");out.push(value);}n=this.buffer.indexOf("\n");}return out;} end():void{this.buffer+=this.decoder.end();if(this.buffer.trim())throw new Error("unterminated RPC record");} }
 export interface LiveGraphInput {
   events: MailEvent[];
   worker: string;
@@ -14,6 +16,8 @@ export interface LiveGraphInput {
 }
 export interface LiveValidation { ok: boolean; reasons: string[]; envelopes: number; jobId?: string; outcomeId?: string; }
 
+export interface SafeRpcState { sessionId?:string; getStateCount:number; promptSuccess:boolean; settled:boolean; protocolError?:string; }
+export function reduceSafeRpc(state:SafeRpcState, event:unknown):void { if(!event||typeof event!=="object"||Array.isArray(event))throw new Error("RPC event must be object"); const e=event as Record<string,unknown>; if(e.type==='response'&&e.command==='get_state'&&e.success===true){state.getStateCount++;if(state.getStateCount!==1)throw new Error("duplicate get_state");const data=e.data as Record<string,unknown>;state.sessionId=safeSessionId(data?.sessionId);} else if(e.type==='response'&&e.command==='prompt'){state.promptSuccess=e.success===true;} else if(e.type==='agent_settled')state.settled=true; else if(e.type==='extension_error')state.protocolError='extension error'; }
 export function parseFiniteEnv(value: string | undefined, fallback: number, min = 30_000, max = 900_000): number {
   const number = value === undefined || value === "" ? fallback : Number(value);
   if (!Number.isSafeInteger(number) || number < min || number > max) throw new Error(`timeout must be an integer from ${min} to ${max}`);
