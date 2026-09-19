@@ -654,6 +654,7 @@ export class AgentBroker {
         this.mechanisticRecords.set(record.address, record);
       }
       if (!sameMechanisticBinding(record.binding, job.binding)) throw new Error("Durable mechanistic binding collision between registry and journal.");
+      if (job.phase !== "terminal") this.validateMechanisticOutcomeSize(this.mechanisticOutcomeEnvelope(job));
       if (job.phase !== "queued" && job.phase !== "terminal") {
         await this.finishMechanistic(job, { result: "interrupted", reported: job.reported, progress: job.progress, stderr: job.stderr, cleanup: { state: "cleanup-unknown", childExited: false, pipesClosed: false, boundary: "direct-child-only", detail: "Owner lost after durable start claim; no exact direct-child cleanup proof. Never replay this job." } });
       }
@@ -693,8 +694,10 @@ export class AgentBroker {
         this.validateDeliverySize(envelope);
         if (byteLength(`${JSON.stringify({ v: 1, type: "invoke", jobId: envelope.id, mainAddress: this.mainAddress, envelope })}\n`) > PROTOCOL_BYTES) throw new Error("Mechanistic invocation exceeds the 64 KiB protocol line bound.");
         const job: MechanisticJob = { id: envelope.id, address: shape.address, binding, allowedCallers: [...program.allowedCallers], lifecycle: clone(lifecycle), phase: "queued", createdAt: envelope.createdAt, updatedAt: envelope.createdAt, stderr: "" };
+        this.validateMechanisticOutcomeSize(this.mechanisticOutcomeEnvelope(job));
         await this.withMailAdmission(async () => {
           this.validateQueueCapacity(shape.address, input);
+          this.validateMainQueueCapacity();
           if (authority) this.assertMailAuthority(authority);
           if (signal?.aborted) throw new Error("Email send aborted before acceptance.");
           this.takeRateQuota(sender);
@@ -793,11 +796,58 @@ export class AgentBroker {
     }
   }
 
+  private get mechanisticOutcomeQueueBytes(): number {
+    return Math.min(this.options.config.maxQueuedBytes,
+      this.options.config.maxMessageBytes + this.options.config.maxSubjectBytes, this.toolResultByteLimit);
+  }
+
+  private mechanisticOutcomeEnvelope(job: MechanisticJob): EmailEnvelope {
+    return {
+      id: job.outcomeMailId ?? job.id, from: job.address, to: this.mainAddress,
+      // Generated job IDs and runtime result names are ASCII. At admission,
+      // the longest result name proves this fallback fits before work starts.
+      subject: `Job ${job.id}: ${job.result ?? "invalid_arguments"}`.slice(0, this.options.config.maxSubjectBytes),
+      message: `Job ${job.id}; outcome details omitted. Inspect this job in the durable journal.`,
+      kind: "notification", requiresResponse: false, priority: "low", deliveryState: "queued", createdAt: job.updatedAt,
+    };
+  }
+
+  private validateMechanisticOutcomeSize(notification: EmailEnvelope): void {
+    try {
+      this.validateInput(notification, false);
+      this.validateDeliverySize(notification);
+    } catch (error) {
+      throw new Error(`Automatic job outcome cannot fit configured mail limits: ${errorMessage(error)}`);
+    }
+    if (byteLength(notification.subject) + byteLength(notification.message) > this.mechanisticOutcomeQueueBytes) {
+      throw new Error("Job outcome exceeds its main-queue byte reservation; increase the configured mail limits before accepting work.");
+    }
+  }
+
   private async finishMechanistic(job: MechanisticJob, outcome: PythonOutcome): Promise<void> {
     if (job.phase === "terminal") return;
     const terminal: MechanisticJob = { ...job, ...outcome, phase: "terminal", updatedAt: nowIso(), outcomeMailId: createMailId() };
-    const notification: EmailEnvelope = { id: terminal.outcomeMailId!, from: job.address, to: this.mainAddress, subject: `Job ${job.id}: ${outcome.result}`, message: outcomeText(terminal), kind: "notification", requiresResponse: false, priority: "low", deliveryState: "queued", createdAt: terminal.updatedAt };
-    await this.mailStore.finishJob(terminal, notification);
+    const notification = this.mechanisticOutcomeEnvelope(terminal);
+    const fallback = notification.message;
+    let artifacts = terminal.reported?.artifacts.length ?? 0;
+    let summary = terminal.reported?.summary.length ?? 0;
+    for (;;) {
+      notification.message = outcomeText(terminal, artifacts, summary);
+      try { this.validateMechanisticOutcomeSize(notification); break; }
+      catch {
+        if (artifacts > 0) artifacts--;
+        else if (summary > 0) summary = Math.floor(summary / 2);
+        else {
+          notification.message = fallback;
+          this.validateMechanisticOutcomeSize(notification);
+          break;
+        }
+      }
+    }
+    // Job admission already reserved this outcome in the ordinary main queue.
+    // The journal atomically replaces that reservation; never re-admit terminal
+    // work or wait for busy main to make room for an already accepted job.
+    await this.withMailSerialization(() => this.mailStore.finishJob(terminal, notification));
     const record = this.mechanisticRecords.get(job.address)!;
     record.cleanupUnknown = terminal.cleanup?.state === "cleanup-unknown";
     record.currentActivity = `Job ${job.id}: ${terminal.result}`;
@@ -1160,15 +1210,17 @@ export class AgentBroker {
     );
   }
 
-  private validateMainQueueCapacity(envelope: EmailEnvelope): void {
+  private validateMainQueueCapacity(envelope?: EmailEnvelope): void {
     const queued = this.queuedMainMail().filter((email) =>
       !(email.priority === "high" && this.isCorrelatedMainReply(email)));
     const bytes = queued.reduce(
       (total, email) => total + byteLength(email.subject) + byteLength(email.message),
       0,
     );
-    const nextBytes = bytes + byteLength(envelope.subject) + byteLength(envelope.message);
-    if (queued.length >= this.options.config.maxQueuedMessages || nextBytes > this.options.config.maxQueuedBytes) {
+    const reserved = this.mailStore.countPendingJobs();
+    const nextBytes = bytes + reserved * this.mechanisticOutcomeQueueBytes
+      + (envelope ? byteLength(envelope.subject) + byteLength(envelope.message) : this.mechanisticOutcomeQueueBytes);
+    if (queued.length + reserved >= this.options.config.maxQueuedMessages || nextBytes > this.options.config.maxQueuedBytes) {
       throw new Error(`Mailbox queue for main is full; wait for queued main mail to be collected or presented.`);
     }
   }
@@ -1232,6 +1284,13 @@ export class AgentBroker {
     let ordinaryPresentationAccepted = false;
     let routeError: unknown;
     try {
+      // Older journals (or reduced limits after restore) must not inject an
+      // oversized Python notification. Preserve its ID/evidence and use the
+      // ordinary failed-delivery path rather than replaying or minting mail.
+      if (isMechanisticAddress(current.from)) {
+        this.validateInput(current, false);
+        this.validateDeliverySize(current);
+      }
       const interruptsMain = current.priority === "high" && this.isCorrelatedMainReply(current);
       collectionClaim = interruptsMain ? undefined : this.claimCollection(current);
       if (!collectionClaim && !interruptsMain && !this.options.mainAdapter.isIdle()) return;

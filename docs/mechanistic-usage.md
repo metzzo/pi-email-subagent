@@ -89,7 +89,35 @@ ordinary logs: stdout belongs to the versioned, bounded JSONL protocol.
 `success(summary, artifacts)` and `failure(summary, artifacts)` are terminal
 reports. No command is legal afterward. Summaries/progress are limited to
 4096 UTF-8 bytes; at most 32 artifact references, each 2048 bytes, are accepted.
-Artifacts are unverified references, not uploaded or attested files.
+Artifacts are unverified references, not uploaded or attested files. The complete
+terminal frame must also fit 64 KiB, so the individual maxima cannot always be
+combined in one report.
+
+## Outcome size and main queue capacity
+
+Automatic outcomes use the same subject/body and escaped, formatted byte/line
+limits as ordinary main notifications. Small outcomes are unchanged. If needed,
+the broker omits artifact references, then shortens the summary, with an omitted
+count and job ID; very small limits receive a job-journal pointer instead. This
+changes only the derived notification. The complete script report and artifacts
+remain in the durable job entry in the namespace's `mail.jsonl`.
+
+Before accepting an invocation, the broker reserves one message and a conservative
+byte allowance in the existing main queue. That allowance is the minimum of
+`maxQueuedBytes`, `maxMessageBytes + maxSubjectBytes`, and the context-safe mail
+byte limit. Every nonterminal job, including stopped/queued work, holds that
+reservation. Ordinary main notifications (including a script's own `send_email`)
+count these reservations when checking queue capacity. If capacity is unavailable,
+the invocation fails before acceptance; it does not execute Python.
+
+Terminal persistence atomically replaces the existing reservation with one stable,
+non-correlated outcome. It never waits for a second admission or a separate queue.
+Reservations are derived from durable jobs after restore. Already-accepted work
+still finalizes if queue limits were reduced; new admissions wait for space. Mail
+limits too small for even the job pointer must be corrected before new work or
+nonterminal-job restoration. An older queued notification that exceeds current
+body/context limits fails delivery with its existing ID instead of being injected
+or resent; its mail and full job evidence remain available.
 
 ## Inspect, stop and recover
 
@@ -98,7 +126,11 @@ IDs, progress, script report, runtime result, bounded stderr, exit and direct-ch
 cleanup evidence, and the linked main outcome. There is no conversation view or
 model/effort control for Python identities. Every finalized job produces a new,
 non-correlated notification to main; it cannot close an LLM request or satisfy
-`wait_for_replies`.
+`wait_for_replies`. Inspection lists bounded, newest-first job summaries before
+binding/log details, followed by short tails from the three most recent jobs with
+stderr. A large old log cannot displace all recent summaries. Full reports and
+logs remain in the structured inspection and durable journal; textual previews
+are not the complete evidence.
 
 A script's success report is not runtime success: a later crash, nonzero exit,
 protocol error or deadline wins. Missing/duplicate terminal reports are not

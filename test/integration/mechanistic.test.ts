@@ -8,6 +8,10 @@ import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { createMainCoordinationTools } from "../../src/main-tools.ts";
 import { mergeMechanisticPrograms } from "../../src/mechanistic.ts";
+import { outcomeText } from "../../src/mechanistic-job.ts";
+import { formatEmail } from "../../src/prompts.ts";
+import { MAIL_TOOL_BATCH_LINES } from "../../src/tool-result.ts";
+import { DashboardComponent } from "../../src/ui.ts";
 import type { MainAdapter, MechanisticJob, SubagentConfig } from "../../src/types.ts";
 
 async function until(check: () => boolean, ms = 6000): Promise<void> {
@@ -25,15 +29,19 @@ async function fixture(code: string, overrides: Partial<SubagentConfig> = {}) {
   config.mechanisticPrograms = mergeMechanisticPrograms({}, { worker: { python: "python3", script, cwd: root, allowedCallers: ["main", "llm", "mechanistic"] } }, root);
   // Only the absent Pi presentation surface is adapted here. Real broker,
   // journal, registrations, lifecycle, helper and Python processes are exercised.
+  let mainIdle = true;
   const main: MainAdapter = {
-    getAddress: () => "main@test.com", getAliases: () => new Set(["main@test.com"]), isIdle: () => true,
-    deliver: async ({ envelope }) => { await appendFile(join(root, "main.jsonl"), `${JSON.stringify(envelope)}\n`); },
+    getAddress: () => "main@test.com", getAliases: () => new Set(["main@test.com"]), isIdle: () => mainIdle,
+    deliver: async ({ envelope, formatted }) => {
+      await appendFile(join(root, "main.jsonl"), `${JSON.stringify(envelope)}\n`);
+      await appendFile(join(root, "main-formatted.jsonl"), `${JSON.stringify({ id: envelope.id, formatted })}\n`);
+    },
     notifyFailure: (message) => { appendFileSync(join(root, "alerts.log"), `${message}\n`); }, updateState: () => {},
   };
   const options = { cwd: root, agentDir: root, namespaceDir: join(root, "state"), config, models: [], mainAdapter: main, workerFactory: () => { throw new Error("No LLM worker may be created in real-Python tests"); }, projectTrusted: true };
   let broker = new AgentBroker(options);
   await broker.init();
-  return { root, config, get broker() { return broker; }, async reopen() { await broker.shutdown(); broker = new AgentBroker(options); await broker.init(); }, async close() { await broker.shutdown(); await rm(root, { recursive: true, force: true }); } };
+  return { root, config, setMainIdle(idle: boolean) { mainIdle = idle; }, get broker() { return broker; }, async reopen() { await broker.shutdown(); broker = new AgentBroker(options); await broker.init(); }, async close() { await broker.shutdown(); await rm(root, { recursive: true, force: true }); } };
 }
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 async function file(path: string): Promise<void> {
@@ -190,6 +198,9 @@ it("unknown inherited-pipe cleanup quarantines the exact identity and explicit r
     await f.broker.clearFailure(first.envelope.to);
     assert.equal(f.broker.mailStore.getJob(job.id)?.cleanup?.state, "cleanup-unknown");
     assert.equal(f.broker.inspectAgent(first.envelope.to).state, "stopped");
+    const [inspect] = createMainCoordinationTools(async () => f.broker);
+    const inspected = await inspect.execute("cleanup", { address: first.envelope.to }, undefined, undefined, {} as never);
+    assert.match(JSON.stringify(inspected.content), /cleanup: cleanup-unknown/);
     // The intentionally inherited descendant is finite; leave no live test work.
     await new Promise((r) => setTimeout(r, 850));
   } finally { await f.close(); }
@@ -338,5 +349,185 @@ it("a SIGTERM-resistant child is finitely killed and a progress flood stays coal
     assert.equal(job.result, "forced_stop"); assert.equal(job.signal, "SIGKILL"); assert.equal(job.cleanup?.state, "confirmed");
     const events = (await readFile(join(f.root, "state/mail.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.ok(events.filter((event) => event.type === "job.updated" && event.job?.progress).length <= 12, "progress publication is time-coalesced, not one journal write per command");
+  } finally { await f.close(); }
+});
+
+for (const limits of [{}, { maxMessageBytes: 1024, maxBatchBytes: 2048 }, { maxMessageBytes: 256, maxSubjectBytes: 8 }, { maxQueuedBytes: 200 }]) {
+  it(`maximal escaped Python reports keep full durable evidence and a bounded outcome (${JSON.stringify(limits)})`, async () => {
+    const f = await fixture("from pathlib import Path\nfrom pi_mechanistic import success\nwith open('starts','a') as s: s.write('once\\n')\nsuccess('&'*4096, ['&'*2048]*29)\n", limits);
+    try {
+      const accepted = await send(f.broker);
+      const job = await terminal(f.broker, accepted.envelope.id);
+      await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+      assert.equal(job.result, "success"); assert.equal(job.reported?.summary, "&".repeat(4096));
+      assert.deepEqual(job.reported.artifacts, Array(29).fill("&".repeat(2048)));
+      const outcome = f.broker.mailStore.get(job.outcomeMailId!)!;
+      console.log(`outcome report bytes: body=${Buffer.byteLength(outcome.message)}, formatted=${Buffer.byteLength(formatEmail(outcome))}`);
+      assert.ok(Buffer.byteLength(outcome.message) <= f.config.maxMessageBytes, "derived outcome body respects normal configured mail limit");
+      assert.ok(Buffer.byteLength(formatEmail(outcome)) <= f.broker.toolResultByteLimit, "escaped outcome respects normal context limit");
+      assert.ok(formatEmail(outcome).split("\n").length <= MAIL_TOOL_BATCH_LINES);
+      assert.match(outcome.message, /omitted/); assert.ok(outcome.message.includes(job.id));
+      const references = outcome.message.split("\n").find((line) => line.startsWith("Artifact references (not verified): "));
+      const shown: string[] = references ? JSON.parse(references.slice("Artifact references (not verified): ".length)) : [];
+      assert.ok(shown.every((reference) => reference === "&".repeat(2048)));
+      if (!outcome.message.includes("outcome details omitted")) assert.ok(outcome.message.includes(`${29 - shown.length} artifact references omitted`));
+      assert.equal(outcome.deliveryState, "delivered"); assert.equal(outcome.kind, "notification");
+      const delivered = JSON.parse((await readFile(join(f.root, "main-formatted.jsonl"), "utf8")).trim());
+      assert.equal(delivered.id, outcome.id); assert.equal(delivered.formatted, formatEmail(outcome));
+      assert.equal(outcome.requiresResponse, false); assert.equal(outcome.inReplyTo, undefined);
+      await f.broker.mailStore.compact(); await f.reopen();
+      assert.deepEqual(f.broker.mailStore.getJob(job.id)?.reported, job.reported);
+      assert.equal(f.broker.mailStore.getJob(job.id)?.outcomeMailId, outcome.id);
+      assert.equal(f.broker.mailStore.list().filter((mail) => mail.id === outcome.id).length, 1);
+      assert.equal((await readFile(join(f.root, "main.jsonl"), "utf8")).trim().split("\n").filter((line) => JSON.parse(line).id === outcome.id).length, 1);
+      assert.equal(await readFile(join(f.root, "starts"), "utf8"), "once\n");
+    } finally { await f.close(); }
+  });
+}
+
+it("busy-main capacity is checked before accepting a job with an automatic outcome", async () => {
+  const f = await fixture("from pi_mechanistic import success\nsuccess('small')\n", { maxQueuedMessages: 1 });
+  try {
+    f.setMainIdle(false);
+    const first = await terminal(f.broker, (await send(f.broker)).envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    assert.equal(f.broker.mailStore.get(first.outcomeMailId!)?.deliveryState, "queued");
+    await assert.rejects(send(f.broker), /queue for main is full/i);
+    assert.equal(f.broker.mailStore.listJobs().length, 1);
+    f.setMainIdle(true); await f.broker.flushQueuedMainMail();
+    const job = await terminal(f.broker, (await send(f.broker)).envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    const outcome = f.broker.mailStore.get(job.outcomeMailId!)!;
+    assert.equal(outcome.message, outcomeText(job), "small outcome text is unchanged");
+    assert.equal(outcome.deliveryState, "delivered");
+  } finally { await f.close(); }
+});
+
+for (const logIndex of [0, 2]) it(`inspection preserves every recent summary with huge stderr in job ${logIndex}`, async () => {
+  const f = await fixture("import sys\nfrom pi_mechanistic import arguments, progress, success\na=arguments()\nprogress('observing '+a['summary'],50)\nif a.get('log'): sys.stderr.write('x'*65536+'VISIBLE_LOG_TAIL')\nsuccess(a['summary'])\n");
+  try {
+    const jobs: MechanisticJob[] = [];
+    for (const [index, summary] of ["older", "later-one", "later-two"].entries()) {
+      jobs.push(await terminal(f.broker, (await send(f.broker, JSON.stringify({ log: index === logIndex, summary }))).envelope.id));
+      await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    }
+    const [inspect] = createMainCoordinationTools(async () => f.broker);
+    const result = await inspect.execute("inspect", { address: "worker.test@mechanistic.com" }, undefined, undefined, {} as never);
+    const text = result.content.map((part) => part.type === "text" ? part.text : "").join("\n");
+    const details = result.details as { inspection: { jobs: MechanisticJob[] } };
+    assert.equal(details.inspection.jobs[logIndex]?.stderr, jobs[logIndex]?.stderr);
+    for (const job of jobs) { assert.ok(text.includes(job.id), `inspection includes job ${job.id}`); assert.ok(text.includes(job.reported!.summary)); }
+    assert.match(text, /VISIBLE_LOG_TAIL/); assert.match(text, /observing later-two/);
+    assert.ok(text.indexOf(jobs[2]!.id) < text.indexOf(jobs[0]!.id));
+    const themeModule = await import(new URL("./modes/interactive/theme/theme.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
+    themeModule.initTheme("dark", false);
+    const dashboard = new DashboardComponent(() => f.broker.getSnapshot(), () => [], () => {}, () => {}, themeModule.theme, "worker.test@mechanistic.com", undefined, 80, (address) => f.broker.inspectAgent(address));
+    try {
+      dashboard.handleInput("\r"); const rendered = dashboard.render(200).join("\n");
+      assert.ok(rendered.indexOf(jobs[2]!.id) < rendered.indexOf(jobs[0]!.id));
+      assert.match(rendered, /later-one|later-two/);
+    } finally { dashboard.dispose(); }
+  } finally { await f.close(); }
+});
+
+for (const restoredLimit of [3, 2]) it(`accepted jobs preserve main-queue reservations through stop/restore (limit ${restoredLimit})`, async () => {
+  const f = await fixture("import json,time\nfrom pathlib import Path\nfrom pi_mechanistic import *\na=arguments()\nwith open('starts','a') as s: s.write(a['tag']+'\\n')\nif a['tag']=='first':\n Path('ready').touch()\n while not Path('send').exists(): time.sleep(.01)\n acks=[send_email(invocation()['mainAddress'],'ordinary-'+str(i),'observed','high') for i in range(2)]\n Path('acks.tmp').write_text(json.dumps(acks)); Path('acks.tmp').replace('acks.json')\n while True: time.sleep(.01)\nsuccess(a['tag'])\n", { maxQueuedMessages: 3 });
+  try {
+    f.setMainIdle(false);
+    const first = await send(f.broker, '{"tag":"first"}'); await file(join(f.root, "ready"));
+    const second = await send(f.broker, '{"tag":"second"}');
+    await writeFile(join(f.root, "send"), ""); await file(join(f.root, "acks.json"));
+    const acks = JSON.parse(await readFile(join(f.root, "acks.json"), "utf8"));
+    assert.equal(acks[0].accepted, true); assert.equal(acks[1].accepted, false);
+    assert.match(acks[1].error, /queue for main is full/i); assert.equal(acks[1].mailId, undefined);
+    assert.equal(f.broker.mailStore.countPendingJobs(), 2);
+    assert.equal(f.broker.mailStore.queued(f.broker.mainAddress).length, 1);
+    await assert.rejects(send(f.broker, '{"tag":"third"}'), /queue for main is full/i);
+    await f.broker.stop(first.envelope.to);
+    const stopped = await terminal(f.broker, first.envelope.id);
+    assert.equal(stopped.result, "forced_stop"); assert.equal(f.broker.mailStore.countPendingJobs(), 1);
+    await f.broker.mailStore.compact(); f.config.maxQueuedMessages = restoredLimit; await f.reopen();
+    assert.equal(f.broker.mailStore.getJob(second.envelope.id)?.phase, "queued");
+    assert.equal(f.broker.mailStore.countPendingJobs(), 1);
+    await assert.rejects(send(f.broker, '{"tag":"third"}'), /queue for main is full/i);
+    await f.broker.restart(first.envelope.to);
+    const completed = await terminal(f.broker, second.envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    assert.equal(completed.result, "success"); assert.equal(f.broker.mailStore.countPendingJobs(), 0);
+    const queued = f.broker.mailStore.queued(f.broker.mainAddress);
+    assert.equal(queued.length, 3); assert.equal(queued[0]?.priority, "high");
+    assert.deepEqual(new Set(queued.map((mail) => mail.id)), new Set([acks[0].mailId, stopped.outcomeMailId, completed.outcomeMailId]));
+    assert.equal(await exists(join(f.root, "main.jsonl")), false, "busy main was not steered by uncorrelated notifications");
+    f.setMainIdle(true); await f.broker.flushQueuedMainMail(); await f.reopen();
+    const presented = (await readFile(join(f.root, "main.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(presented.length, 3); assert.equal(new Set(presented.map((mail) => mail.id)).size, 3);
+    assert.equal(await readFile(join(f.root, "starts"), "utf8"), "first\nsecond\n");
+  } finally { await f.close(); }
+});
+
+it("ordinary Python notifications cannot consume bytes reserved for their automatic outcome", async () => {
+  const f = await fixture("import json,time\nfrom pathlib import Path\nfrom pi_mechanistic import *\na=[send_email(invocation()['mainAddress'],'x','x'*n) for n in [60,80]]\nPath('acks.tmp').write_text(json.dumps(a)); Path('acks.tmp').replace('acks.json')\nwhile not Path('finish').exists(): time.sleep(.01)\nsuccess('small')\n", { maxQueuedMessages: 4, maxQueuedBytes: 700, maxMessageBytes: 512, maxSubjectBytes: 64 });
+  try {
+    f.setMainIdle(false);
+    const accepted = await send(f.broker); await file(join(f.root, "acks.json"));
+    const acks = JSON.parse(await readFile(join(f.root, "acks.json"), "utf8"));
+    assert.equal(acks[0].accepted, true); assert.equal(acks[1].accepted, false);
+    assert.match(acks[1].error, /queue for main is full/i);
+    await assert.rejects(send(f.broker), /queue for main is full/i);
+    await writeFile(join(f.root, "finish"), "");
+    const job = await terminal(f.broker, accepted.envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    assert.equal(job.result, "success");
+    const queued = f.broker.mailStore.queued(f.broker.mainAddress);
+    assert.equal(queued.length, 2);
+    assert.ok(queued.reduce((sum, mail) => sum + Buffer.byteLength(mail.subject) + Buffer.byteLength(mail.message), 0) <= 700);
+    assert.equal(f.broker.mailStore.get(job.outcomeMailId!)?.message, outcomeText(job));
+    f.setMainIdle(true); await f.broker.flushQueuedMainMail();
+    assert.equal(f.broker.mailStore.get(job.outcomeMailId!)?.deliveryState, "delivered");
+  } finally { await f.close(); }
+});
+
+it("unreportable mail limits reject a Python invocation before durable acceptance or execution", async () => {
+  const f = await fixture("from pathlib import Path\nPath('must-not-run').touch()\n", { maxMessageBytes: 64 });
+  try {
+    await assert.rejects(send(f.broker), /Message exceeds 64 bytes/);
+    assert.equal(f.broker.mailStore.listJobs().length, 0); assert.equal(f.broker.mailStore.list().length, 0);
+    assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, 0);
+    assert.equal(await exists(join(f.root, "must-not-run")), false);
+  } finally { await f.close(); }
+});
+
+for (const reduced of ["maxBatchBytes", "maxMessageBytes"] as const) it(`restoration never injects an older queued outcome beyond current ${reduced}`, async () => {
+  const f = await fixture("from pi_mechanistic import success\nsuccess('x'*4096)\n");
+  try {
+    f.setMainIdle(false);
+    const job = await terminal(f.broker, (await send(f.broker)).envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    const outcome = f.broker.mailStore.get(job.outcomeMailId!)!;
+    assert.equal(outcome.deliveryState, "queued");
+    f.config[reduced] = 1024; // A real restart with reduced limits.
+    f.setMainIdle(true); await f.reopen();
+    assert.equal(f.broker.mailStore.get(outcome.id)?.deliveryState, "failed");
+    assert.match(f.broker.mailStore.get(outcome.id)?.error ?? "", reduced === "maxBatchBytes" ? /context-safe envelope limit/ : /Message exceeds 1024 bytes/);
+    assert.equal(f.broker.mailStore.getJob(job.id)?.outcomeMailId, outcome.id);
+    assert.deepEqual(f.broker.mailStore.getJob(job.id)?.reported, job.reported);
+    assert.equal(await exists(join(f.root, "main.jsonl")), false);
+    assert.equal(f.broker.mailStore.listJobs().length, 1);
+  } finally { await f.close(); }
+});
+
+for (const crash of [false, true]) it(`line-heavy reports are projected without changing ${crash ? "crash precedence" : "success"}`, async () => {
+  const f = await fixture(`from pathlib import Path\nfrom pi_mechanistic import success\nPath('status.txt').write_text('ready')\nsuccess('x'+'\\n'*4095,['status.txt'])\n${crash ? "raise SystemExit(7)" : ""}\n`);
+  try {
+    const job = await terminal(f.broker, (await send(f.broker)).envelope.id);
+    await until(() => f.broker.getSnapshot().capacity.runSlotsUsed === 0);
+    assert.equal(job.result, crash ? "crash" : "success"); assert.equal(job.exitCode, crash ? 7 : 0);
+    assert.equal(job.reported?.status, "success"); assert.equal(job.reported.summary, `x${"\n".repeat(4095)}`);
+    assert.deepEqual(job.reported.artifacts, ["status.txt"]);
+    const outcome = f.broker.mailStore.get(job.outcomeMailId!)!;
+    assert.match(outcome.message, /summary shortened or omitted/);
+    assert.ok(outcome.message.includes(`Runtime: ${job.result}. Script report: success.`));
+    assert.ok(formatEmail(outcome).split("\n").length <= MAIL_TOOL_BATCH_LINES);
+    assert.equal(outcome.deliveryState, "delivered");
   } finally { await f.close(); }
 });

@@ -549,6 +549,12 @@ export class MailStore {
     return job ? { ...clone(job), ...(job.outcomeMailId ? { outcomeDeliveryState: this.emails.get(job.outcomeMailId)?.deliveryState } : {}) } : undefined;
   }
 
+  countPendingJobs(): number {
+    let count = 0;
+    for (const job of this.jobs.values()) if (job.phase !== "terminal") count++;
+    return count;
+  }
+
   listJobs(address?: string): MechanisticJob[] {
     return [...this.jobs.values()].filter((job) => !address || job.address === address).map((job) => this.getJob(job.id)!);
   }

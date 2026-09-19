@@ -100,15 +100,24 @@ export function createMainCoordinationTools(
         if (!broker) throw new Error("Email broker is not ready.");
         const inspection = broker.inspectAgent(params.address, params.effort);
         if (inspection.kind === "mechanistic") {
+          const recent = [...inspection.jobs].reverse();
           return textResult([
             `Send-only Python agent: ${inspection.address} · ${inspection.state}`,
-            `Binding (${inspection.bindingReady}): ${JSON.stringify(inspection.binding)}`,
             `Allowed callers: ${inspection.allowedCallers.join(", ")}`,
             `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit}; run slots: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit}`,
             `Queued jobs: ${inspection.queued}; cleanup unknown: ${inspection.cleanupUnknown}; archive eligible: ${inspection.archiveEligible}`,
             `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
-            ...inspection.jobs.map((job) => JSON.stringify(job)),
+            ...recent.map((job) => [
+              `Job ${job.id} · ${job.phase} · ${job.result ?? "pending"} · script report: ${job.reported?.status ?? "none"} · cleanup: ${job.cleanup?.state ?? "pending"}`,
+              `  summary: ${truncateText(JSON.stringify(job.reported?.summary ?? ""), 256)} · artifacts: ${job.reported?.artifacts.length ?? 0} · exit: ${job.exitCode ?? "unknown"} ${job.signal ?? ""} · outcome: ${job.outcomeMailId ?? "pending"} (${job.outcomeDeliveryState ?? "pending"})`,
+              job.progress ? `  progress: ${truncateText(JSON.stringify(job.progress.message), 128)} (${job.progress.percent ?? "unknown"}%)` : undefined,
+              job.cleanup?.detail ? `  cleanup detail: ${truncateText(JSON.stringify(job.cleanup.detail), 128)}` : undefined,
+            ].filter(Boolean).join("\n")),
             inspectionRecovery(inspection),
+            "Summaries/previews only; full reports, artifact references and stderr remain in the durable job journal, indexed by job ID.",
+            ...recent.filter((job) => job.stderr).slice(0, 3).map((job) =>
+              `stderr tail ${job.id} (${byteLength(job.stderr)} retained bytes): ${JSON.stringify(job.stderr.slice(-512))}`),
+            `Binding (${inspection.bindingReady}): ${JSON.stringify(inspection.binding)}`,
           ].join("\n"), { inspection } satisfies InspectAgentToolDetails);
         }
         const lines = [

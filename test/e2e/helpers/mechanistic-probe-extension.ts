@@ -163,7 +163,18 @@ export default function mechanisticProbe(pi: ExtensionAPI): void {
     description: "Persist restored production job evidence without replaying an invocation",
     handler: async (_args, ctx) => {
       assert.ok(broker);
-      if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ jobs: broker.mailStore.listJobs(), mail: broker.mailStore.list(), snapshot: broker.getSnapshot() }));
+      const jobs = broker.mailStore.listJobs();
+      const inspections = [];
+      for (const address of new Set(jobs.map((job) => job.address))) {
+        const inspected = await tools.get("inspect_agent")!.execute("inspect-restored", { address }, undefined, undefined, ctx);
+        const text = JSON.stringify(inspected.content);
+        for (const job of jobs.filter((candidate) => candidate.address === address)) {
+          assert.ok(text.includes(job.id));
+          if (job.cleanup?.detail) assert.match(text, /cleanup detail:/);
+        }
+        inspections.push(inspected.content);
+      }
+      if (process.env.PI_MECHANISTIC_PROOF) writeFileSync(process.env.PI_MECHANISTIC_PROOF, JSON.stringify({ jobs, mail: broker.mailStore.list(), snapshot: broker.getSnapshot(), inspections }));
       ctx.shutdown();
     },
   });

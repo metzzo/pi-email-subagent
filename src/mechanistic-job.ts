@@ -2,6 +2,7 @@ import { isAbsolute } from "node:path";
 import { LIFECYCLE_FIELDS, MAX_TIMER_DELAY_MS } from "./config.ts";
 import { ARTIFACT_BYTES, MAX_ARTIFACTS, PROTOCOL_BYTES, SUMMARY_BYTES, isMechanisticAddress, parseMechanisticBinding, parseMechanisticCallers } from "./mechanistic.ts";
 import type { LifecyclePolicy, MechanisticCleanup, MechanisticJob, MechanisticProgress, MechanisticResult, MechanisticTerminal } from "./types.ts";
+import { truncateText } from "./util.ts";
 
 export function protocolObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object.");
@@ -76,14 +77,18 @@ export function parseJob(value: unknown): MechanisticJob {
   return job;
 }
 
-export function outcomeText(job: MechanisticJob): string {
+export function outcomeText(job: MechanisticJob, artifactLimit = MAX_ARTIFACTS, summaryLimit = SUMMARY_BYTES): string {
+  const artifacts = job.reported?.artifacts.slice(0, artifactLimit) ?? [];
+  const omitted = (job.reported?.artifacts.length ?? 0) - artifacts.length;
+  const shortened = (job.reported?.summary.length ?? 0) > summaryLimit;
   return [
     `Job ${job.id} · ${job.address}`,
     `Runtime: ${job.result}. Script report: ${job.reported?.status ?? "none"}.`,
-    job.reported?.summary,
+    job.reported && summaryLimit > 0 ? truncateText(job.reported.summary, summaryLimit) : undefined,
     `Direct-child cleanup: ${job.cleanup?.state}; child exited: ${job.cleanup?.childExited}; pipes closed: ${job.cleanup?.pipesClosed}.`,
     `Exit: ${job.exitCode ?? "unknown"}; signal: ${job.signal ?? "none"}.`,
     "This notification is not a reply. It creates no response obligation. Detached descendants and remote effects are not covered by cleanup proof.",
-    job.reported?.artifacts.length ? `Artifact references (not verified): ${JSON.stringify(job.reported.artifacts)}` : undefined,
+    artifacts.length ? `Artifact references (not verified): ${JSON.stringify(artifacts)}` : undefined,
+    omitted || shortened ? `Notification shortened: ${omitted} artifact references omitted${shortened ? "; summary shortened or omitted" : ""}. Full evidence remains in the job journal; inspect job ${job.id}.` : undefined,
   ].filter(Boolean).join("\n");
 }

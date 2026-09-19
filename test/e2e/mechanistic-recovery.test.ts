@@ -61,8 +61,12 @@ for (const boundary of ["accepted", "starting", "running", "effect", "terminal"]
       if (boundary === "accepted") {
         await eventually(async () => { const store = new MailStore(journal); await store.init(); return store.getJob(before.id)?.phase === "terminal" ? true : undefined; });
       }
-      await restored.prompt("/mechanistic-inspect"); await restored.waitForExit();
-      const result = JSON.parse(await readFile(proof, "utf8")) as { jobs: MechanisticJob[]; mail: { id: string; kind: string; inReplyTo?: string }[] };
+      await restored.prompt("/mechanistic-inspect");
+      const result = await eventually(async () => JSON.parse(await readFile(proof, "utf8"))) as { jobs: MechanisticJob[]; mail: { id: string; kind: string; inReplyTo?: string }[] };
+      // Pi 0.85.1 checks ctx.shutdown only at an RPC command boundary. The
+      // asynchronous inspection can finish after that check; once its proof is
+      // committed, stdin EOF is the real RPC shutdown boundary, not a timer.
+      await restored.close();
       assert.equal(result.jobs.length, 1); const after = result.jobs[0]!; assert.equal(after.id, before.id);
       assert.equal(after.phase, "terminal"); assert.ok(after.outcomeMailId);
       assert.equal(result.mail.filter((mail) => mail.id === after.outcomeMailId).length, 1);
