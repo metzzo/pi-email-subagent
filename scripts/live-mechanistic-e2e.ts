@@ -31,7 +31,6 @@ const code = await new Promise<number|null>(resolveCode => { const timer=setTime
 try { decoder.end(); } catch(error) { decoderError=error instanceof Error?error.message:"RPC decoder error"; }
 const settled=rpcState.settled; const sessionId=rpcState.sessionId; const agentDir=process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? tmpdir(), ".pi", "agent"); const exactJournal=sessionId?childJournalPath(agentDir,sessionId):undefined;
 const files: string[] = [];
-async function walk(d: string): Promise<void> { for (const e of await readdir(d, {withFileTypes:true})) { const p=join(d,e.name); if(e.isDirectory()) await walk(p); else if(e.name === "mail.jsonl") files.push(p); } }
 if(exactJournal) files.push(exactJournal);
 let records: any[]=[]; let parseError=""; for(const f of files) { try { records.push(...parseLfJournal(await readFile(f,"utf8"))); } catch(error) { parseError=error instanceof Error?error.message:"journal parse failed"; } }
 const mails = [...new Map(records.flatMap(x=>x.email ? [x.email] : []).map(x=>[x.id,x])).values()];
@@ -40,7 +39,7 @@ const trigger = mails.find(x=>x.to === worker);
 const invocation = mails.find(x=>x.to === "evidence.nonce@mechanistic.com");
 const evidence = mails.find(x=>x.subject === "MECHANISTIC_EVIDENCE");
 const final = mails.find(x=>x.from === worker && x.to === main);
-const diagnostics:string[]=[]; async function collectDiagnostics(d:string):Promise<void>{ for(const e of await readdir(d,{withFileTypes:true})){ const p=join(d,e.name); if(e.isDirectory()) await collectDiagnostics(p); else if(e.name==='registry.json'||e.name.endsWith('.jsonl')) diagnostics.push(p); } } await collectDiagnostics(root);
+const diagnostics:string[]=[];
 const envelopeSummary = mails.map(x=>({id:x.id,from:x.from,to:x.to,subject:x.subject,kind:x.kind,requiresResponse:x.requiresResponse,inReplyTo:x.inReplyTo,deliveryState:x.deliveryState,completion:Boolean(x.completion)}));
 const registryFiles=diagnostics.filter(f=>f.endsWith('registry.json')); const sessionFiles=diagnostics.filter(f=>f.endsWith('.jsonl')&&!f.endsWith('mail.jsonl')); const diagnosticSummary={registryFiles:registryFiles.map(f=>f.split('/').pop()),sessionFiles:sessionFiles.map(f=>f.split('/').pop()),runEndedAt:new Date().toISOString(),diagnosticFileCount:diagnostics.length};
 
