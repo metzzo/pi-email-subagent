@@ -129,6 +129,9 @@ async function main(): Promise<number> {
   let timedOut = false;
   let shutdown = "failure";
   let category: string | undefined;
+  let pollPromise: Promise<void> | undefined;
+  let pollController: AbortController | undefined;
+  let timeoutController: AbortController | undefined;
   try {
     await writeFixture(root, mainAddress, worker);
     client = PiRpcClient.launch({
@@ -148,10 +151,12 @@ async function main(): Promise<number> {
     const activeJournal = journal;
     const prompt = `You MUST make one send_email tool call before any final answer. Call ${mechanistic} exactly once as a notification with requires_response:false and JSON {"notify_to":"${worker}"}; do not merely describe or wait. The worker must send exact subject MECHANISTIC_CHAIN_COMPLETE to ${mainAddress} with exact structured nonce/job JSON.`;
     await client.prompt(prompt);
-    const pollController = new AbortController();
-    const timeoutController = new AbortController();
+    pollController = new AbortController();
+    timeoutController = new AbortController();
+    const activePollController = pollController;
+    const activeTimeoutController = timeoutController;
     const poll = async () => {
-      while (!pollController.signal.aborted) {
+      while (!activePollController.signal.aborted) {
         try {
           events = parseLfJournal(await readFile(activeJournal, "utf8"));
           if (
@@ -170,18 +175,19 @@ async function main(): Promise<number> {
             return;
           }
         }
-        await delay(250, undefined, { signal: pollController.signal }).catch(
-          () => undefined,
-        );
+        await delay(250, undefined, {
+          signal: activePollController.signal,
+        }).catch(() => undefined);
       }
     };
+    pollPromise = poll();
     const timer = delay(timeout, undefined, {
-      signal: timeoutController.signal,
+      signal: activeTimeoutController.signal,
     }).then(() => {
       timedOut = true;
       category = "timeout";
     });
-    await Promise.race([poll(), timer]);
+    await Promise.race([pollPromise, timer]);
     if (finalObserved) {
       timeoutController.abort();
       pollController.abort();
@@ -197,6 +203,9 @@ async function main(): Promise<number> {
     category = "lifecycle failure";
     if (client) await stopClient(client);
   } finally {
+    pollController?.abort();
+    timeoutController?.abort();
+    if (pollPromise) await pollPromise.catch(() => undefined);
     if (client) {
       await client.waitForExit().catch(() => null);
     }
