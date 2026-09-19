@@ -19,6 +19,7 @@ import {
   collectEnvelopes,
   hasDurableFinal,
   validateLiveGraph,
+  summarizeRpcQuiescence,
 } from "./live-mechanistic-e2e-support.ts";
 import type { MailEvent } from "../src/mail-store.ts";
 
@@ -249,14 +250,7 @@ async function main(): Promise<number> {
     childExitCode,
     timedOut,
     durableFinalObserved: finalObserved,
-    mainQuiescent: (() => {
-      const rpc = client?.events() ?? [];
-      return (
-        rpc.filter((e) => e.type === "agent_start").length ===
-          rpc.filter((e) => e.type === "agent_end").length &&
-        rpc.some((e) => e.type === "agent_settled")
-      );
-    })(),
+    mainQuiescent: summarizeRpcQuiescence(client?.events() ?? []).quiescent,
     pollError: category,
   });
   const runnerExitCode = validation.ok ? 0 : 1;
@@ -303,14 +297,7 @@ async function main(): Promise<number> {
         protocolStatus: protocolFailure ? "failure" : "ok",
         timedOut,
         shutdown,
-        mainQuiescent: (() => {
-          const rpc = client?.events() ?? [];
-          return (
-            rpc.filter((e) => e.type === "agent_start").length ===
-              rpc.filter((e) => e.type === "agent_end").length &&
-            rpc.some((e) => e.type === "agent_settled")
-          );
-        })(),
+        mainQuiescent: summarizeRpcQuiescence(client?.events() ?? []).quiescent,
         finalObserved,
         sessionId,
         rpcSummary: client ? summarizeRpc(client.events()) : undefined,

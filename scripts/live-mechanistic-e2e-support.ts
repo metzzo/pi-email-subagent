@@ -12,6 +12,43 @@ export interface LiveGraphInput {
   mainQuiescent?: boolean;
   pollError?: string;
 }
+export interface RpcQuiescence {
+  agentStarts: number;
+  agentEnds: number;
+  settled: number;
+  followOnEnds: number;
+  retryingEnd: boolean;
+  quiescent: boolean;
+}
+export function summarizeRpcQuiescence(
+  events: ReadonlyArray<{ type?: string; willRetry?: unknown }>,
+): RpcQuiescence {
+  const agentStarts = events.filter(
+    (event) => event.type === "agent_start",
+  ).length;
+  const agentEnds = events.filter((event) => event.type === "agent_end").length;
+  const settled = events.filter(
+    (event) => event.type === "agent_settled",
+  ).length;
+  const retryingEnd = events.some(
+    (event) => event.type === "agent_end" && event.willRetry === true,
+  );
+  const followOnEnds = Math.max(0, agentEnds - 1);
+  const quiescent =
+    agentStarts >= 2 &&
+    agentStarts === agentEnds &&
+    settled >= 1 &&
+    followOnEnds >= 1 &&
+    !retryingEnd;
+  return {
+    agentStarts,
+    agentEnds,
+    settled,
+    followOnEnds,
+    retryingEnd,
+    quiescent,
+  };
+}
 export interface LiveValidation {
   ok: boolean;
   reasons: string[];
