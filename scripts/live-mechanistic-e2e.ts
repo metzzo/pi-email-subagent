@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { mkdtemp, writeFile, readFile, readdir, rm, mkdir, copyFile, chmod, access } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, readdir, rm, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
@@ -12,14 +12,12 @@ const liveModel = model!;
 const root = await mkdtemp(join(tmpdir(), "pi-mechanistic-live-"));
 const logDir = resolve(process.env.LIVE_EVIDENCE_DIR ?? ".test-workspaces/mechanistic-subagents");
 await mkdir(logDir, { recursive: true });
-const sourceAgentDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? tmpdir(), ".pi", "agent");
 await mkdir(root, { recursive: true, mode: 0o700 });
-try { await access(join(sourceAgentDir, "auth.json")); await copyFile(join(sourceAgentDir, "auth.json"), join(root, "auth.json")); await chmod(join(root, "auth.json"), 0o600); } catch { /* provider may use another supported credential mechanism */ }
 const script = join(root, "evidence.py");
 await writeFile(join(root, "evidence.txt"), "NONCE-" + Math.random().toString(36).slice(2, 12));
 await writeFile(script, `import json\nfrom pathlib import Path\nfrom pi_mechanistic import arguments, invocation, send_email, success, failure\na=arguments(); nonce=Path('evidence.txt').read_text().strip(); job=invocation()['jobId']\nack=send_email(a['notify_to'], 'MECHANISTIC_EVIDENCE', 'Send MECHANISTIC_CHAIN_COMPLETE to main with nonce '+nonce+' and job ID '+job+'. Structured: '+json.dumps({'nonce':nonce,'jobId':job}))\nif not ack.get('accepted'):\n    failure('broker rejected mechanistic notification: '+json.dumps(ack, sort_keys=True))\n    import sys; sys.exit(0)\nsuccess('evidence processed: '+nonce)\n`);
 await writeFile(join(root, "subagents.json"), JSON.stringify({ mechanisticPrograms: { evidence: { python: "python3", script, cwd: root, allowedCallers: ["main"] } } }));
-const child = spawn("pi", ["-ne", "-e", resolve("./src/index.ts"), "--mode", "rpc", "--no-session", "--model", liveModel], { cwd: root, env: { ...process.env, PI_CODING_AGENT_DIR: root }, stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn("pi", ["-ne", "-e", resolve("./src/index.ts"), "--mode", "rpc", "--no-session", "--model", liveModel], { cwd: root, env: { ...process.env }, stdio: ["pipe", "pipe", "pipe"] });
 let output = "", errors = "", settled = false; child.stdout.on("data", b => { const text=String(b); output = (output + text).slice(-8_000); if (text.includes('"type":"agent_settled"')) settled=true; }); child.stderr.on("data", b => { errors = (errors + String(b)).slice(-2_000); });
 const worker = `evidence-worker.nonce@${liveModel.split("/").at(-1)}.com`; const main = `main@${liveModel.split("/").at(-1)}.com`;
 const prompt = `Use send_email exactly once to invoke evidence.nonce@mechanistic.com directly. Send notification requires_response:false with JSON {"notify_to":"${worker}"}; no reply_to or completion. Then wait for the real Luna worker to receive evidence and send MECHANISTIC_CHAIN_COMPLETE to ${main}.`;
