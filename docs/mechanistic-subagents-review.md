@@ -4,8 +4,8 @@
 
 **Verdict:** the core direction is sound, but commit `756b750` was not ready to
 implement. The reviewed plan in [`mechanistic-subagents.md`](mechanistic-subagents.md)
-now closes the verified contract gaps. Production implementation and E2E
-validation remain outstanding.
+closed the verified contract gaps. Implementation and E2E validation were still
+outstanding at that initial review.
 
 ### Review fleet
 
@@ -187,7 +187,10 @@ this document called the older `a15bf18` evidence index complete. The evidence
 list below now labels that index as earlier and names the final-code logs; no
 post-edit approval is claimed.
 
-### Final evidence
+### Pre-merge final evidence
+
+These local artifacts remain under `.test-workspaces/mechanistic-subagents/`
+in `/home/claudy/Development/pi-email-subagent-worktrees/mechanistic-subagents`.
 
 - Production-focused repair suite: 169/169 passed after the final
   quarantine/archival cases.
@@ -204,9 +207,18 @@ post-edit approval is claimed.
   starts/ends/settlements, protocol status `ok`, and observed physical close;
   command output is in `live-mechanistic-final-code.log`.
 - The earlier `a15bf18` repair set is indexed by
-  `.test-workspaces/mechanistic-subagents/final-repair-summary.json`. Current
-  final-code deterministic evidence is in `quarantine-erasure-*`,
+  `.test-workspaces/mechanistic-subagents/final-repair-summary.json`. Final
+  pre-merge deterministic evidence is in `quarantine-erasure-*`,
   `archive-stall-*`, and `final-current-e2e.log`.
+
+### Merge and global installation verification
+
+`main` was fast-forwarded to `db5d632` and installed globally from the main
+checkout. The old direct-file registration was removed; other settings stayed
+unchanged. Validation and both live workflows passed using global discovery:
+a local wrapper removed the runners' explicit extension flags before executing
+the real Pi CLI. See [current validation status](mechanistic-subagents.md#validation-status)
+for the new evidence; the earlier review verdicts remain unchanged.
 
 ### Remaining limits
 

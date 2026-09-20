@@ -49,9 +49,9 @@ Pi core remains the only automatic retry owner. Workers surface **Pi agent retry
 
 All limits, roles, address overrides, and the model-selection policy are configurable; see [configuration.md](configuration.md).
 
-## Reviewed designs
+## Implemented features
 
-- [Mechanistic-subagents](mechanistic-subagents.md): implemented Python-backed, send-only identities with durable jobs, bounded outcomes, recovery, reusable deterministic E2E, and an opt-in real-model proof. See the [usage guide](mechanistic-usage.md) and [two-round review record](mechanistic-subagents-review.md).
+- [Mechanistic-subagents](mechanistic-subagents.md): Python-backed, send-only identities merged into `main`, with global installation and live email/Python workflows verified. Includes durable jobs, bounded outcomes, recovery, and reusable deterministic and opt-in real-model tests. See the [usage guide](mechanistic-usage.md) and [review and installation record](mechanistic-subagents-review.md).
 
 ## Related surfaces
 

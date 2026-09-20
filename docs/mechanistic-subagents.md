@@ -1,7 +1,8 @@
 # Mechanistic-subagents
 
-Status: implemented and validated. The design below is also the production
-contract; current evidence and remaining limits are recorded at the end.
+Status: implemented, merged into `main`, and globally installed with live
+functionality verified. The design below is also the production contract;
+current evidence and remaining limits are recorded at the end.
 
 ## Goal
 
@@ -414,30 +415,30 @@ callback-settlement, release-truth, and live-proof gaps. Those findings were
 reproduced and repaired without adding another broker, scheduler, daemon, job
 store, or runtime-registration surface.
 
-Current deterministic evidence at commit `a9d1fdd`:
+Merged into `main` at `db5d632` and installed globally with
+`pi install /home/claudy/Development/pi-email-subagent`. The old direct-file
+registration was removed to avoid duplicate loading. Existing Pi sessions need
+a reload or restart. No push or npm publication was performed.
 
-- `npm run validate`: 591 tests in 38 suites; TypeScript and the four-package
-  production license policy passed; the unchanged per-source coverage ratchet
-  passed for all 33 source files.
-- `npm run test:e2e`: 73 tests in 5 suites passed, including real Pi RPC crash,
-  restoration, callback-stall, and direct-child cleanup paths.
-- Packed-artifact smoke in `archive-stall-validate.log`: 60 files on supported
-  Pi 0.85.1; the installed Python job
-  `mail_00mu8lfbo2_000_4f9a6aae0e` succeeded.
-- Focused final production repairs: 169 tests passed after the final quarantine
-  and archive-authority regressions. Complete logs are under
-  `.test-workspaces/mechanistic-subagents/final-repair-*`,
-  `quarantine-erasure-*`, and `archive-stall-*`; the earlier repair set is
-  indexed by `final-repair-summary.json`.
+Post-merge checks passed:
 
-The final-code opt-in Luna proof also exited zero for the shell, runner, and Pi
-child at `a9d1fdd`. Its bounded artifact is
-`.test-workspaces/mechanistic-subagents/live-mechanistic-1789849041732.json` and
-the command log is `live-mechanistic-final-code.log`. It proves four unique
-notification-only envelopes, exact invocation/job/outcome/nonce linkage,
-successful script report and runtime, confirmed direct-child cleanup, delivered
-outcome and worker-final mail, three balanced main starts/ends/settlements,
-protocol health, and physical Pi close with code zero.
+- `npm run validate`: 591 tests in 38 suites, TypeScript, production licenses,
+  and the unchanged coverage gates for all 33 source files.
+- Packed-artifact smoke: 60 files on Pi 0.85.1, including a successful Python job.
+- Live `openai-codex/gpt-5.6-luna` request/reply: one accepted request and completed
+  correlated reply, settled main, and child exit zero.
+- Live Luna → Python → Luna worker → main: four notifications with exact
+  job/outcome/nonce linkage, successful runtime and direct-child cleanup,
+  delivered outcome/final, 3/3/3 main starts/ends/settlements, healthy protocol,
+  and physical Pi close with code zero.
+
+Both live checks used global discovery, without explicit extension loading.
+Their validated namespaces were removed. Evidence in
+`.test-workspaces/global-install/`: `validate.log`, `live-mail-global.log`,
+`live-global.log`, and `live-mechanistic-1789891121998.json`.
+
+The review record retains the pre-merge 73-test E2E run, 169-test focused repair
+suite, and earlier live proof separately.
 
 The evidence does not claim sudden-power-loss/fsync durability, containment of
 detached descendants or remote effects, cross-parent workspace isolation,
