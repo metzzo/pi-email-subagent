@@ -354,7 +354,7 @@ async function main(): Promise<number> {
     if (!client || physicalCloseProven) {
       try {
         await rm(root, { recursive: true, force: true });
-        evidence = { ...evidence, temporaryRootRemoved: true };
+        evidence = { ...evidence, ...(client ? { physicalCloseProven } : {}), temporaryRootRemoved: true };
       } catch {
         result = 1;
         evidence = {
