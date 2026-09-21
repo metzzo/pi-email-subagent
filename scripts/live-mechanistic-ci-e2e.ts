@@ -12,7 +12,7 @@ async function main(): Promise<number> {
     return 2;
   }
   try {
-    await exec("gh", ["auth", "status"], { stdio: "ignore" });
+    await exec("gh", ["auth", "status"], { timeout: 20_000 });
   } catch {
     console.error("GitHub prerequisite unavailable: authenticated gh required");
     return 2;
