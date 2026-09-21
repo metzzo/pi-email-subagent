@@ -39,10 +39,13 @@ async function main(): Promise<number> {
     );
     return 2;
   }
+  let phase = "preflight";
+  let physicalCloseProven = false;
   const root = await mkdtemp(join(tmpdir(), "ci-gh-"));
   let client: PiRpcClient | undefined;
   let result = 1;
   try {
+    phase = "checkout";
     const checkout = join(root, "checkout");
     await exec("git", ["clone", "--no-hardlinks", process.cwd(), checkout], {
       timeout: 30_000,
@@ -73,6 +76,7 @@ async function main(): Promise<number> {
         },
       }),
     );
+    phase = "startup";
     client = PiRpcClient.launch({
       cwd: checkout,
       agentDir: agent,
@@ -99,6 +103,7 @@ async function main(): Promise<number> {
       ).some((m) => m.provider === "openai" && m.id === "gpt-4.1-nano")
     )
       throw new Error("model unavailable");
+    phase = "acceptance";
     const mark = client.mark();
     await client.prompt(`/agents run ci.main-status {}`);
     const acceptance = await client.waitFor(
@@ -132,10 +137,13 @@ async function main(): Promise<number> {
         )
     )
       throw new Error("agent lifecycle observed");
+    phase = "close";
     await client.close();
     const close = await client.waitForClose();
     if (close.code !== 0 || close.signal !== null)
       throw new Error("physical close failure");
+    physicalCloseProven = true;
+    phase = "journal";
     const journal = join(agent, "subagents", sessionId, "mail.jsonl");
     const store = new MailStore(journal);
     await store.init();
@@ -260,14 +268,16 @@ async function main(): Promise<number> {
         2,
       ),
     );
-  } catch (error) {
+  } catch {
     await writeFile(
       artifact,
       JSON.stringify({
         repository: repo,
         commit,
-        phase: "observation",
-        errorClass: error instanceof Error ? "assertion-failure" : "unknown",
+        phase,
+        errorClass: "assertion-failure",
+        harnessHead,
+        physicalCloseProven,
       }),
     );
   } finally {
