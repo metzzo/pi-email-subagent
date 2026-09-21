@@ -92,6 +92,19 @@ it(
         .details?.jobId;
       assert.ok(id);
       assert.equal(
+        (acceptance.message as { details?: { sessionId?: string } }).details
+          ?.sessionId,
+        sessionId,
+      );
+      assert.equal(
+        b
+          .events()
+          .some((event) =>
+            ["agent_start", "agent_end", "agent_settled"].includes(event.type),
+          ),
+        false,
+      );
+      assert.equal(
         (acceptance.message as { details?: { address?: string } }).details
           ?.address,
         "ci.restore@mechanistic.com",
@@ -110,6 +123,25 @@ it(
       assert.equal(bClose.code, 143);
       assert.equal(bClose.signal, null);
       assert.equal(await readFile(calls, "utf8"), "generation\n");
+      const journal = join(agent, "subagents", sessionId!, "mail.jsonl");
+      const storeBefore = new MailStore(journal);
+      await storeBefore.init();
+      const jobBefore = storeBefore.getJob(id!);
+      assert.ok(jobBefore);
+      assert.equal(jobBefore.phase, "terminal");
+      assert.equal(jobBefore.address, "ci.restore@mechanistic.com");
+      assert.equal(jobBefore.result, "forced_stop");
+      assert.equal(jobBefore.outcomeMailId !== undefined, true);
+      assert.equal(jobBefore.outcomeDeliveryState, "queued");
+      assert.equal(jobBefore.cleanup?.state, "confirmed");
+      assert.equal(jobBefore.cleanup?.childExited, true);
+      assert.equal(jobBefore.cleanup?.pipesClosed, true);
+      assert.equal(storeBefore.countPendingJobs(), 0);
+      assert.ok(jobBefore.pid);
+      assert.throws(
+        () => process.kill(jobBefore.pid!, 0),
+        (error) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      );
       c = PiRpcClient.launch({
         cwd: root,
         agentDir: agent,
@@ -120,7 +152,6 @@ it(
         session: sessionFile,
         approveProject: true,
       });
-      const journal = join(agent, "subagents", sessionId!, "mail.jsonl");
       const store = new MailStore(journal);
       await store.init();
       const job = store.getJob(id!);
@@ -128,6 +159,10 @@ it(
       assert.equal(job.result, "forced_stop");
       assert.equal(job.signal, "SIGTERM");
       assert.equal(job.triggerTurn, false);
+      assert.equal(job.outcomeDeliveryState, "delivered");
+      assert.equal(store.countPendingJobs(), 0);
+      assert.equal(job.cleanup?.childExited, true);
+      assert.equal(job.cleanup?.pipesClosed, true);
       assert.equal(job.cleanup?.state, "confirmed");
       assert.equal(await readFile(calls, "utf8"), "generation\n");
       assert.equal(
@@ -157,6 +192,8 @@ it(
       );
       assert.ok(restored);
       assert.equal(restored.details?.triggerTurn, false);
+      await pause(500);
+      await store.init();
       assert.equal((restored.details as { from?: string }).from, job.address);
       await c.close();
       assert.equal(await readFile(effects, "utf8"), id + "\n");
