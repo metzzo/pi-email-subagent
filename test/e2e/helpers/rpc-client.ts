@@ -250,6 +250,12 @@ export class PiRpcClient {
     );
   }
 
+  async getAvailableModels(): Promise<RpcLine> {
+    const mark = this.mark();
+    this.send({ type: "get_available_models" });
+    return this.waitFor((line) => line.type === "response" && line.command === "get_available_models", "get_available_models response", 30_000, mark);
+  }
+
   async switchSession(sessionPath: string): Promise<RpcLine> {
     const mark = this.mark();
     this.send({ type: "switch_session", sessionPath });
