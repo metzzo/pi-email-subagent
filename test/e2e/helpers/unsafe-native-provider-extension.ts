@@ -4,7 +4,7 @@ import {
   type ProviderStreams,
 } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { access } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 
 export const UNSAFE_NATIVE_PROVIDER_ID = "unsafe-native-fixture";
 export const UNSAFE_NATIVE_MODEL_ID = "unsafe-native-model";
@@ -37,6 +37,17 @@ const unreachableStreams = {
 } as unknown as ProviderStreams;
 
 export default function unsafeNativeProvider(pi: ExtensionAPI): void {
+  pi.on("session_start", async (_event, context) => {
+    await (
+      context as unknown as {
+        modelRegistry: { refresh: (options: unknown) => Promise<unknown> };
+      }
+    ).modelRegistry.refresh({
+      providers: [UNSAFE_NATIVE_PROVIDER_ID],
+      allowNetwork: true,
+      force: true,
+    });
+  });
   pi.registerProvider(
     createProvider({
       id: UNSAFE_NATIVE_PROVIDER_ID,
@@ -59,6 +70,11 @@ export default function unsafeNativeProvider(pi: ExtensionAPI): void {
             fetchModels: async (context: { signal: AbortSignal }) => {
               const gate = process.env.PI_NATIVE_FIXTURE_GATE;
               if (!gate) return [];
+              if (process.env.PI_NATIVE_FIXTURE_FETCH_STARTED)
+                await writeFile(
+                  process.env.PI_NATIVE_FIXTURE_FETCH_STARTED,
+                  "started",
+                );
               const deadline = Date.now() + 10_000;
               while (Date.now() < deadline) {
                 try {

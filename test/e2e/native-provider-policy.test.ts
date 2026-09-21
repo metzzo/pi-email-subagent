@@ -35,6 +35,7 @@ for (const modelHeaders of [false, true])
         join(tmpdir(), "pi-email-native-policy-e2e-"),
       );
       const gate = join(agentDir, "release-gate");
+      const started = join(agentDir, "fetch-started");
       const client = PiRpcClient.launch({
         cwd: process.cwd(),
         agentDir,
@@ -43,10 +44,27 @@ for (const modelHeaders of [false, true])
         env: {
           PI_EMAIL_NATIVE_MODEL_HEADERS: modelHeaders ? "1" : "0",
           PI_NATIVE_FIXTURE_GATE: gate,
+          PI_NATIVE_FIXTURE_FETCH_STARTED: started,
         },
       });
       try {
-        const state = await client.getState();
+        const statePromise = client.getState();
+        for (let i = 0; i < 400; i++) {
+          try {
+            await readFile(started);
+            break;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+        }
+        let resolved = false;
+        void statePromise.then(() => {
+          resolved = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        assert.equal(resolved, false);
+        await writeFile(gate, "release");
+        const state = await statePromise;
         assert.equal(state.success, true, client.stderr);
         const closed = await client.getAvailableModels();
         const closedModels =
@@ -55,15 +73,13 @@ for (const modelHeaders of [false, true])
               models?: Array<{ provider?: string; id?: string }>;
             }
           ).models ?? [];
-        assert.equal(
+        assert.ok(
           closedModels.some(
             (model) =>
               model.provider === "unsafe-native-fixture" &&
               model.id === "unsafe-native-model",
           ),
-          false,
         );
-        await writeFile(gate, "release");
         const models = await client.waitForAvailableModel(
           "unsafe-native-fixture",
           "unsafe-native-model",
