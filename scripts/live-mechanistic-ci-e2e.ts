@@ -1,88 +1,206 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
+import { MailStore, parseMailEvent } from "../src/mail-store.ts";
 const exec = promisify(execFile);
-const rootOut = ".test-workspaces/mechanistic-ux";
+const output = ".test-workspaces/mechanistic-ux";
+const repo = "metzzo/pi-email-subagent";
+const commit = "17febc848812eedf91b79ed550050c1b4aba0dea";
 async function main(): Promise<number> {
+  const artifact = join(output, "live-mechanistic-ci-latest.json");
+  await mkdir(output, { recursive: true });
   if (process.env.LIVE_GITHUB_CI !== "1") {
-    console.error("set LIVE_GITHUB_CI=1 to opt in");
+    await writeFile(
+      artifact,
+      JSON.stringify({ phase: "opt-in", errorClass: "not-enabled" }),
+    );
     return 2;
   }
   try {
-    await exec("gh", ["auth", "status"], { timeout: 20_000 });
+    await exec("gh", ["auth", "status", "--hostname", "github.com"], {
+      timeout: 20_000,
+    });
   } catch {
-    console.error("GitHub prerequisite unavailable: authenticated gh required");
+    await writeFile(
+      artifact,
+      JSON.stringify({
+        phase: "preflight",
+        errorClass: "github-auth-unavailable",
+      }),
+    );
     return 2;
   }
-  const root = await mkdtemp(join(tmpdir(), "ci-observe-"));
-  const agent = join(root, "agent");
-  await mkdir(agent, { recursive: true });
-  await writeFile(
-    join(agent, "subagents.json"),
-    JSON.stringify({
-      mechanisticPrograms: {
-        ci: {
-          python: "python3",
-          script: resolve("src/python/examples/github_ci.py"),
-          cwd: process.cwd(),
-          description: "Read-only GitHub Actions observation",
-          inputExamples: [
-            '{"repository":"metzzo/pi-email-subagent","commit":"17febc848812eedf91b79ed550050c1b4aba0dea"}',
-          ],
-        },
-      },
-    }),
-  );
-  const client = PiRpcClient.launch({
-    cwd: root,
-    agentDir: agent,
-    model: "openai/gpt-4.1-nano",
-    extensions: [
-      resolve("src/index.ts"),
-      resolve("test/e2e/helpers/provider-request-observer-extension.ts"),
-    ],
-    approveProject: true,
-    env: { OPENAI_API_KEY: "deterministic-unused", PI_OFFLINE: "1" },
-  });
-  let exit = 1;
+  const root = await mkdtemp(join(tmpdir(), "ci-gh-"));
+  let client: PiRpcClient | undefined;
+  let result = 1;
   try {
+    const checkout = join(root, "checkout");
+    await exec("git", ["clone", "--no-hardlinks", process.cwd(), checkout], {
+      timeout: 30_000,
+    });
+    await exec("git", ["-C", checkout, "checkout", "--detach", commit]);
+    await exec("git", [
+      "-C",
+      checkout,
+      "remote",
+      "set-url",
+      "origin",
+      `https://github.com/${repo}.git`,
+    ]);
+    const agent = join(root, "agent");
+    await mkdir(agent, { recursive: true });
+    await writeFile(
+      join(agent, "subagents.json"),
+      JSON.stringify({
+        lifecycle: { runTimeoutMs: 60_000 },
+        mechanisticPrograms: {
+          ci: {
+            python: "python3",
+            script: resolve("src/python/examples/github_ci.py"),
+            cwd: checkout,
+            description: "Read-only GitHub Actions observation",
+            inputExamples: ["{}"],
+          },
+        },
+      }),
+    );
+    client = PiRpcClient.launch({
+      cwd: checkout,
+      agentDir: agent,
+      model: "openai/gpt-4.1-nano",
+      extensions: [
+        resolve("src/index.ts"),
+        resolve("test/e2e/helpers/provider-request-observer-extension.ts"),
+      ],
+      approveProject: true,
+      env: {
+        OPENAI_API_KEY: "deterministic-unused",
+        PI_OFFLINE: "1",
+        TMPDIR: root,
+      },
+    });
+    const state = await client.getState();
+    const sessionId = (state.data as { sessionId?: string }).sessionId;
+    if (!sessionId) throw new Error("missing session");
     const models = await client.getAvailableModels();
-    const available =
-      (models.data as { models?: Array<{ provider?: string; id?: string }> })
-        .models ?? [];
     if (
-      !available.some((m) => m.provider === "openai" && m.id === "gpt-4.1-nano")
+      !(
+        (models.data as { models?: Array<{ provider?: string; id?: string }> })
+          .models ?? []
+      ).some((m) => m.provider === "openai" && m.id === "gpt-4.1-nano")
     )
       throw new Error("model unavailable");
-    await client.prompt(
-      '/agents run ci.main-status {"repository":"metzzo/pi-email-subagent","commit":"17febc848812eedf91b79ed550050c1b4aba0dea"}',
+    const mark = client.mark();
+    await client.prompt(`/agents run ci.main-status {}`);
+    const acceptance = await client.waitFor(
+      (l) =>
+        l.type === "message_end" &&
+        (l.message as { customType?: string }).customType ===
+          "pi-email-subagent.command",
+      "acceptance",
+      30_000,
+      mark,
+    );
+    const details = (
+      acceptance.message as { details?: { jobId?: string; address?: string } }
+    ).details;
+    if (!details?.jobId || details.address !== "ci.main-status@mechanistic.com")
+      throw new Error("invalid acceptance");
+    await client.waitFor(
+      (l) =>
+        l.type === "message_end" &&
+        (l.message as { customType?: string }).customType ===
+          "pi-email-subagent.email",
+      "outcome",
+      90_000,
+      mark,
     );
     await client.close();
-    const closed = await client.waitForClose();
-    exit = closed.code === 0 && closed.signal === null ? 0 : 1;
-  } catch {
-    await client.close().catch(() => undefined);
+    const close = await client.waitForClose();
+    if (close.code !== 0 || close.signal !== null)
+      throw new Error("physical close failure");
+    const journal = join(agent, "subagents", sessionId, "mail.jsonl");
+    const store = new MailStore(journal);
+    await store.init();
+    const events = (await readFile(journal, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => parseMailEvent(JSON.parse(line)));
+    const terminal = events.find((event) => event.type === "job.terminal");
+    if (!terminal || !("job" in terminal))
+      throw new Error("missing terminal job");
+    const job = store.getJob(terminal.job.id);
+    if (
+      !job ||
+      job.id !== details.jobId ||
+      job.result !== "success" ||
+      job.outcomeDeliveryState !== "delivered" ||
+      job.cleanup?.state !== "confirmed" ||
+      store.countPendingJobs() !== 0
+    )
+      throw new Error("job did not settle successfully");
+    const summary = job.reported?.summary ?? "";
+    if (
+      !summary.includes(repo) ||
+      !summary.includes(commit) ||
+      !summary.includes(
+        "Observation completed; this is not a claim that CI passed.",
+      )
+    )
+      throw new Error("report summary mismatch");
+    if (
+      !(job.reported?.artifacts ?? []).some((link) =>
+        /^https:\/\/github\.com\/metzzo\/pi-email-subagent\/(actions\/runs\/|commit\/|actions\/runs\/[^/]+\/checks)/.test(
+          link,
+        ),
+      )
+    )
+      throw new Error("missing bounded GitHub link");
+    if (
+      (await readFile(join(checkout, ".provider-requests")).catch(() => "")) !==
+      ""
+    )
+      throw new Error("provider request observed");
+    result = 0;
+    await writeFile(
+      artifact,
+      JSON.stringify(
+        {
+          repository: repo,
+          commit,
+          jobId: job.id,
+          outcomeId: job.outcomeMailId,
+          observation: "completed",
+          ciPassed: "not-asserted",
+          cleanup: job.cleanup,
+          physicalClose: close,
+          providerRequests: 0,
+          agentLifecycle: 0,
+        },
+        null,
+        2,
+      ),
+    );
+  } catch (error) {
+    await writeFile(
+      artifact,
+      JSON.stringify({
+        repository: repo,
+        commit,
+        phase: "observation",
+        errorClass: error instanceof Error ? "assertion-failure" : "unknown",
+      }),
+    );
   } finally {
+    if (client) await client.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
-  await mkdir(rootOut, { recursive: true });
-  await writeFile(
-    join(rootOut, `live-mechanistic-ci-${Date.now()}.json`),
-    JSON.stringify(
-      {
-        repository: "metzzo/pi-email-subagent",
-        commit: "17febc848812eedf91b79ed550050c1b4aba0dea",
-        observation: exit === 0 ? "completed" : "failed",
-        runnerExitCode: exit,
-      },
-      null,
-      2,
-    ),
-  );
-  return exit;
+  console.log(artifact);
+  return result;
 }
 main()
   .then((code) => {
