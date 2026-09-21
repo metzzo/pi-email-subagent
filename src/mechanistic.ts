@@ -16,8 +16,7 @@ export const MAX_ARTIFACTS = 32;
 export const MAX_COMMANDS = 16;
 export const PROGRESS_INTERVAL_MS = 250;
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
-// JSON formatting whitespace is allowed on input, then removed by serialization.
-const UNSAFE_EXAMPLE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]|\p{Bidi_Control}/u;
+const UNSAFE_EXAMPLE_TEXT = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]|\p{Bidi_Control}/u;
 
 export function assertUnreservedModel(modelId: string): void {
   if (modelId.trim().toLowerCase() === MECHANISTIC_MODEL_ID) {
@@ -113,11 +112,11 @@ export function mergeMechanisticPrograms(
       if (!Array.isArray(raw.inputExamples) || raw.inputExamples.length > MAX_PROGRAM_EXAMPLES) throw new Error(`At most ${MAX_PROGRAM_EXAMPLES} input examples are allowed.`);
       inputExamples = [];
       for (const example of raw.inputExamples) {
-        if (typeof example !== "string" || Buffer.byteLength(example) > MAX_PROGRAM_EXAMPLE_BYTES || UNSAFE_EXAMPLE_TEXT.test(example)) throw new Error(`Each input example must be a safe JSON object string of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
-        let canonical: string;
-        try { canonical = JSON.stringify(object(JSON.parse(example))); } catch { throw new Error("Each input example must encode a JSON object."); }
-        if (Buffer.byteLength(canonical) > MAX_PROGRAM_EXAMPLE_BYTES || UNSAFE_EXAMPLE_TEXT.test(canonical)) throw new Error(`Canonical input example must be safe single-line JSON of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
-        inputExamples.push(canonical);
+        if (typeof example !== "string" || Buffer.byteLength(example) > MAX_PROGRAM_EXAMPLE_BYTES || UNSAFE_EXAMPLE_TEXT.test(example)) throw new Error(`Each input example must be a safe single-line JSON object string of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
+        // Validate grammar/type only. Reserialization changes numbers and escapes;
+        // retaining the original text keeps raw and displayed byte bounds identical.
+        try { object(JSON.parse(example)); } catch { throw new Error("Each input example must encode a JSON object."); }
+        inputExamples.push(example);
       }
     }
     result[key] = { ...binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers), ...(description === undefined ? {} : { description }), ...(inputExamples === undefined ? {} : { inputExamples }) };

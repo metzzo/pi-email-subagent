@@ -60,8 +60,9 @@ for (const mode of ["print", "json", "print-large"] as const) it(`real Pi ${mode
 it("real RPC command discovery, invalid JSON and script failure need no agent_settled or model generation", { timeout: 30000 }, async (t) => {
   const f = await fixture();
   const configPath = join(f.agent, "subagents.json"); const config = JSON.parse(await readFile(configPath, "utf8"));
-  const copiedValue = "a  b\nline\tend"; const exampleInput = JSON.stringify({ note: copiedValue }, null, 2);
-  config.mechanisticPrograms.ci.inputExamples = [exampleInput]; await writeFile(configPath, JSON.stringify(config));
+  const copiedValue = "a  b\nline\tend"; const exampleInput = '  { "note" : "a  b\\nline\\tend" }  ';
+  const numericInput = '{"id":9007199254740993,"zero":-0,"large":1e309}';
+  config.mechanisticPrograms.ci.inputExamples = [exampleInput, numericInput]; await writeFile(configPath, JSON.stringify(config));
   const client = PiRpcClient.launch({ cwd: f.root, agentDir: f.agent, model: "ux-local/ux-local", extensions: [provider, extension], piBin: bin, env: f.env });
   const kill = () => { client.kill("SIGKILL"); }; t.signal.addEventListener("abort", kill, { once: true });
   try {
@@ -70,9 +71,9 @@ it("real RPC command discovery, invalid JSON and script failure need no agent_se
       const shown = await client.waitFor((line) => line.type === "message_end" && (expected as RegExp).test(JSON.stringify(line.message)), "direct command output", 10000, mark);
       if (command === "/agents program ci") {
         const text = (shown.message as { content: string }).content;
-        const example = /^Input example: (.*)$/m.exec(text)?.[1];
-        assert.equal(example, JSON.stringify({ note: copiedValue }), "pretty input displays as directly copyable canonical single-line JSON");
-        await client.prompt(`/agents run ci.copied ${example}`);
+        const examples = [...text.matchAll(/^Input example: (.*)$/gm)].map((match) => match[1]);
+        assert.deepEqual(examples, [exampleInput, numericInput], "program inspection displays the exact supplied JSON text");
+        await client.prompt(`/agents run ci.copied ${examples[0]}`);
       }
     }
     assert.equal(existsSync(f.env.UX_MODEL_CALLS), false); assert.equal(client.events().some((line) => line.type === "agent_start"), false);

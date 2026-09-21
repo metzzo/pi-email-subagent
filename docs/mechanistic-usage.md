@@ -73,9 +73,11 @@ Discover and invoke without an LLM dispatcher:
 ```
 
 Descriptions are optional safe single-line text, at most 256 UTF-8 bytes. Input
-examples are optional JSON-object **strings**, at most three of 1024 bytes each;
-inspection displays the JSON itself for copying. Discovery does not spawn work
-or change binding authority. Examples are not repeated in every model prompt.
+examples are optional safe, single-line JSON-object **strings**, at most three of
+1024 UTF-8 bytes each. Inspection displays the exact supplied text for copying:
+number spelling, escapes and spaces are preserved; multiline examples are rejected.
+Discovery does not spawn work or change binding authority. Examples are not repeated
+in every model prompt.
 
 The observer requires `git` and authenticated `gh` on the trusted PATH. `{}` uses
 the repository and current commit in the registered cwd, not the caller's cwd.

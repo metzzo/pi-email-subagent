@@ -24,7 +24,7 @@ async function fixture() {
   await writeFile(script, "from pi_mechanistic import *\nimport time\ndef main(args):\n progress('observing',10)\n with open('effects','a') as f: f.write(invocation()['jobId']+'\\n')\n if args.get('hold'): time.sleep(10)\n (failure if args.get('failure') else success)('observation complete', ['https://example.test/evidence'])\nrun(main)\n");
   const config = structuredClone(DEFAULT_CONFIG);
   config.lifecycle = { ...config.lifecycle, runTimeoutMs: 15000, abortTimeoutMs: 100, disposeTimeoutMs: 100 };
-  config.mechanisticPrograms = mergeMechanisticPrograms({}, { observe: { python: "python3", script, cwd: root, description: "Read-only observation", inputExamples: ['{\n}', '{ "failure": true }', '{"note":"a  b"}'] } }, root);
+  config.mechanisticPrograms = mergeMechanisticPrograms({}, { observe: { python: "python3", script, cwd: root, description: "Read-only observation", inputExamples: ['{"id":9007199254740993,"zero":-0,"large":1e309}', '{ "failure": true }', '  { "note" : "a  b\\nline\\tend" }  '] } }, root);
   let idle = true;
   const deliveries: MainDelivery[] = [];
   const alerts: Array<{ text: string; triggerTurn?: boolean }> = [];
@@ -166,11 +166,11 @@ it("discovery is bounded and read-only, receipts compact, and durable presentati
     const preview = await inspect.execute("inspect", { address: "observe.test@mechanistic.com" }, undefined, undefined, undefined as never);
     assert.match(JSON.stringify(preview.content), /Read-only observation.*Input example/);
     const examples = preview.content.flatMap((part) => part.type === "text" ? [...part.text.matchAll(/^Input example: (.*)$/gm)].map((match) => match[1]!) : []);
-    assert.deepEqual(examples, ['{}', '{"failure":true}', '{"note":"a  b"}']);
+    assert.deepEqual(examples, ['{"id":9007199254740993,"zero":-0,"large":1e309}', '{ "failure": true }', '  { "note" : "a  b\\nline\\tend" }  ']);
     for (const example of examples) assert.equal(typeof JSON.parse(example), "object");
     assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, 0);
     const prompt = mainCoordinatorPrompt(f.broker.mainAddress, "test", "off", [], 0, f.config);
-    assert.equal(prompt.includes('{"failure":true}'), false);
+    assert.ok(examples.every((example) => !prompt.includes(example)));
     const tools = createWorkerMailTools({ sendEmail: (input, signal) => f.broker.send(f.broker.mainAddress, input, signal), fetchEmails: () => ({ emails: [], total: 0 }) });
     const receipt = await tools[0].execute("send", { to: "observe.test@mechanistic.com", subject: "observation", message: "{}", priority: "low" }, undefined, undefined, undefined as never);
     const text = JSON.stringify(receipt.content);
@@ -181,7 +181,7 @@ it("discovery is bounded and read-only, receipts compact, and durable presentati
     try {
       dashboard.handleInput("\r");
       const rendered = stripVTControlCharacters(dashboard.render(180).join("\n"));
-      for (const example of examples) assert.ok(rendered.includes(`input: ${example}`), "dashboard preserves canonical JSON including spaces inside strings");
+      for (const example of examples) assert.ok(rendered.includes(`input: ${example}`), "dashboard preserves exact JSON text, including numeric spelling, escapes and spaces");
     } finally { dashboard.dispose(); }
     const direct = await send(f.broker, true, '{"hold":true}');
     await until(() => f.broker.mailStore.getJob(direct.envelope.id)?.phase === "running");

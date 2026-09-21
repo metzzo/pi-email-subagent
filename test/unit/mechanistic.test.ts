@@ -55,22 +55,37 @@ it("program descriptions and JSON examples are bounded trusted discovery, not bi
     const description = "é".repeat(128); const example = JSON.stringify({ x: "x".repeat(1016) });
     assert.equal(Buffer.byteLength(example), 1024);
     const valid = registration({ description, inputExamples: [example, "{}", '{"commit":"main"}'] });
-    assert.equal(valid.description, description); assert.equal(valid.inputExamples?.length, 3);
+    assert.equal(valid.description, description); assert.deepEqual(valid.inputExamples, [example, "{}", '{"commit":"main"}']);
+    const utf8Example = JSON.stringify({ x: "é".repeat(508) });
+    assert.equal(Buffer.byteLength(utf8Example), 1024);
+    assert.deepEqual(registration({ inputExamples: [utf8Example] }).inputExamples, [utf8Example]);
     assert.equal(Object.hasOwn(parseMechanisticBinding(valid), "description"), false);
     for (const value of [null, "", " ", 1, "é".repeat(129), "line\nbreak", "\u001b[0m", "bidi\u202e"]) assert.throws(() => registration({ description: value }), /description/);
-    for (const value of [null, {}, ["[]"], ["null"], ["bad"], [1], ["{}", "{}", "{}", "{}"], [JSON.stringify({ x: "x".repeat(1017) })]]) assert.throws(() => registration({ inputExamples: value }), /example/);
+    for (const value of [null, {}, [1], ["{}", "{}", "{}", "{}"], [JSON.stringify({ x: "x".repeat(1017) })], [JSON.stringify({ x: "é".repeat(509) })]]) assert.throws(() => registration({ inputExamples: value }), /example/);
+    for (const value of ["", " ", "[]", "null", '"text"', "1", "-0", "1e309", "true", "false", "bad", "{", '{"x":}', '{"x":1,}', '{"x":NaN}', '{"x":Infinity}']) assert.throws(() => registration({ inputExamples: [value] }), /encode a JSON object/);
     assert.deepEqual(registration({ inputExamples: [] }).inputExamples, []);
     const pretty = ' \n\t{\r\n "text" : "a  b", "escaped": "\\n\\t\\u0001"\r\n} ';
-    assert.deepEqual(registration({ inputExamples: [pretty] }).inputExamples, [JSON.stringify(JSON.parse(pretty))]);
-    for (const character of ["\u0000", "\u0001", "\u001b", "\u007f", "\u0085", "\u009b", "\u061c", "\u200e", "\u200f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069"]) {
+    for (const value of [pretty, '{\n}', '\t{}', '{}\r']) assert.throws(() => registration({ inputExamples: [value] }), /safe single-line/);
+    for (const character of [...Array.from({ length: 32 }, (_, i) => String.fromCharCode(i)), ...Array.from({ length: 33 }, (_, i) => String.fromCharCode(0x7f + i)), "\u061c", "\u200e", "\u200f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069"]) {
       assert.throws(() => registration({ inputExamples: [`{"text":"${character}"}`] }), /example/i);
       assert.throws(() => registration({ inputExamples: [`{"text":"${character}","text":"safe"}`] }), /example/i, "unsafe source text cannot disappear behind a duplicate key");
     }
-    for (const value of ['{"text":"\\u007f"}', '{"text":"\\u0085"}', '{"text":"\\u202e"}', '{"text":"\\u2066"}', '{"text":"\\u2028"}']) assert.throws(() => registration({ inputExamples: [value] }), /example/i, "canonical output must also be safe");
-    const expanded = '{"values":[' + Array(50).fill("1e20").join(",") + ']}';
-    assert.ok(Buffer.byteLength(expanded) < 1024); assert.ok(Buffer.byteLength(JSON.stringify(JSON.parse(expanded))) > 1024);
-    assert.throws(() => registration({ inputExamples: [expanded] }), /example/i);
+    for (const value of ['{"text":"\\u0001"}', '{"text":"\\u007f"}', '{"text":"\\u0085"}', '{"text":"\\u202e"}', '{"text":"\\u2066"}', '{"text":"\\u2028"}']) assert.deepEqual(registration({ inputExamples: [value] }).inputExamples, [value], "visible literal escapes must not be decoded for display");
+    const compactNumbers = '{"values":[' + Array(50).fill("1e20").join(",") + ']}';
+    assert.ok(Buffer.byteLength(compactNumbers) < 1024);
+    assert.deepEqual(registration({ inputExamples: [compactNumbers] }).inputExamples, [compactNumbers], "stored/displayed text has the same byte bound; numbers are not expanded");
     assert.throws(() => registration({ inputExamples: [" ".repeat(1023) + "{}"] }), /example/i, "raw input bound remains enforced");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("safe single-line JSON examples survive trusted config loading byte-for-byte", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mechanistic-exact-example-"));
+  try {
+    await writeFile(join(root, "job.py"), "raise RuntimeError('discovery must not execute')\n");
+    const examples = ['{"id":9007199254740993,"zero":-0,"large":1e309}', '  { "note" : "a  b\\nline\\tend", "escaped" : "\\u0061", "zero":-0.0e+00 }  ', '{"exponent":1E+003,"duplicate":1,"duplicate":2}'];
+    await writeFile(join(root, "subagents.json"), JSON.stringify({ mechanisticPrograms: { observer: { python: "python3", script: "job.py", inputExamples: examples } } }));
+    assert.deepEqual(loadConfig(root, root, false).config.mechanisticPrograms.observer!.inputExamples, examples);
+    assert.throws(() => mergeMechanisticPrograms({}, { observer: { python: "python3", script: "job.py", inputExamples: ['{"PRIVATE_EXAMPLE_TEXT":}'] } }, root), (error: unknown) => error instanceof Error && Buffer.byteLength(error.message) < 128 && !error.message.includes("PRIVATE_EXAMPLE_TEXT"));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
