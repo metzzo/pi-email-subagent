@@ -54,6 +54,26 @@ jobs:
           }
           NODE
       - run: npm run validate
+      - name: Surface the redirected test report on failure
+        if: failure()
+        run: |
+          if [ -f .test-workspaces/coverage-tests.log ]; then
+            cat .test-workspaces/coverage-tests.log
+          else
+            echo "No coverage test report was produced; validation failed before the test reporter opened."
+          fi
+      - name: Retain deterministic test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: validation-${{ matrix.os }}-pi-${{ matrix.pi }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            .test-workspaces/coverage-tests.log
+            .test-workspaces/coverage-raw.lcov
+            .test-workspaces/coverage.lcov
       # Pi core packages are host-provided peers; audit only dependencies this package installs.
       - run: npm audit --omit=dev --omit=peer
       - run: git diff --check
