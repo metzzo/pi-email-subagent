@@ -152,18 +152,7 @@ it(
         session: sessionFile,
         approveProject: true,
       });
-      const store = new MailStore(journal);
-      await store.init();
-      const job = store.getJob(id!);
-      assert.ok(job);
-      assert.equal(job.result, "forced_stop");
-      assert.equal(job.signal, "SIGTERM");
-      assert.equal(job.triggerTurn, false);
-      assert.equal(job.outcomeDeliveryState, "delivered");
-      assert.equal(store.countPendingJobs(), 0);
-      assert.equal(job.cleanup?.childExited, true);
-      assert.equal(job.cleanup?.pipesClosed, true);
-      assert.equal(job.cleanup?.state, "confirmed");
+
       assert.equal(await readFile(calls, "utf8"), "generation\n");
       assert.equal(
         c
@@ -188,14 +177,37 @@ it(
         (message) =>
           message.role === "custom" &&
           message.customType === "pi-email-subagent.email" &&
-          message.details?.id === job.outcomeMailId,
+          message.details?.id === jobBefore.outcomeMailId,
       );
       assert.ok(restored);
       assert.equal(restored.details?.triggerTurn, false);
-      await pause(500);
-      await store.init();
-      assert.equal((restored.details as { from?: string }).from, job.address);
+      assert.equal(
+        (restored.details as { from?: string }).from,
+        jobBefore.address,
+      );
+      assert.equal(
+        c
+          .events()
+          .some((event) =>
+            ["agent_start", "agent_end", "agent_settled"].includes(event.type),
+          ),
+        false,
+      );
       await c.close();
+      const store = new MailStore(journal);
+      await store.init();
+      const job = store.getJob(id!);
+      assert.ok(job);
+      assert.equal(job.id, jobBefore.id);
+      assert.equal(job.outcomeMailId, jobBefore.outcomeMailId);
+      assert.equal(job.result, "forced_stop");
+      assert.equal(job.signal, "SIGTERM");
+      assert.equal(job.triggerTurn, false);
+      assert.equal(job.outcomeDeliveryState, "delivered");
+      assert.equal(store.countPendingJobs(), 0);
+      assert.equal(job.cleanup?.childExited, true);
+      assert.equal(job.cleanup?.pipesClosed, true);
+      assert.equal(job.cleanup?.state, "confirmed");
       assert.equal(await readFile(effects, "utf8"), id + "\n");
       assert.equal(await readFile(calls, "utf8"), "generation\n");
     } finally {
