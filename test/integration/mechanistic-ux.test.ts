@@ -3,6 +3,9 @@ import { appendFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
+import { stripVTControlCharacters } from "node:util";
+import { getThemeByName } from "../../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
+import { DashboardComponent } from "../../src/ui.ts";
 import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
 import { parseMailEvent } from "../../src/mail-store.ts";
@@ -21,7 +24,7 @@ async function fixture() {
   await writeFile(script, "from pi_mechanistic import *\nimport time\ndef main(args):\n progress('observing',10)\n with open('effects','a') as f: f.write(invocation()['jobId']+'\\n')\n if args.get('hold'): time.sleep(10)\n (failure if args.get('failure') else success)('observation complete', ['https://example.test/evidence'])\nrun(main)\n");
   const config = structuredClone(DEFAULT_CONFIG);
   config.lifecycle = { ...config.lifecycle, runTimeoutMs: 15000, abortTimeoutMs: 100, disposeTimeoutMs: 100 };
-  config.mechanisticPrograms = mergeMechanisticPrograms({}, { observe: { python: "python3", script, cwd: root, description: "Read-only observation", inputExamples: ['{}', '{"failure":true}'] } }, root);
+  config.mechanisticPrograms = mergeMechanisticPrograms({}, { observe: { python: "python3", script, cwd: root, description: "Read-only observation", inputExamples: ['{\n}', '{ "failure": true }', '{"note":"a  b"}'] } }, root);
   let idle = true;
   const deliveries: MainDelivery[] = [];
   const alerts: Array<{ text: string; triggerTurn?: boolean }> = [];
@@ -163,7 +166,7 @@ it("discovery is bounded and read-only, receipts compact, and durable presentati
     const preview = await inspect.execute("inspect", { address: "observe.test@mechanistic.com" }, undefined, undefined, undefined as never);
     assert.match(JSON.stringify(preview.content), /Read-only observation.*Input example/);
     const examples = preview.content.flatMap((part) => part.type === "text" ? [...part.text.matchAll(/^Input example: (.*)$/gm)].map((match) => match[1]!) : []);
-    assert.deepEqual(examples, ['{}', '{"failure":true}']);
+    assert.deepEqual(examples, ['{}', '{"failure":true}', '{"note":"a  b"}']);
     for (const example of examples) assert.equal(typeof JSON.parse(example), "object");
     assert.equal(f.broker.getSnapshot().capacity.identitiesUsed, 0);
     const prompt = mainCoordinatorPrompt(f.broker.mainAddress, "test", "off", [], 0, f.config);
@@ -174,6 +177,12 @@ it("discovery is bounded and read-only, receipts compact, and durable presentati
     assert.match(text, /Python job accepted.*Acceptance is not completion.*never resend/);
     assert.doesNotMatch(text, /Correlation ID|Reply with|lifecycle|\/observe.py/);
     const ordinary = (receipt.details as SendToolDetails).result!; await settled(f.broker, ordinary.envelope.id);
+    const dashboard = new DashboardComponent(() => f.broker.getSnapshot(), () => [], () => {}, () => {}, getThemeByName("dark")!, ordinary.envelope.to, undefined, 80, (address) => f.broker.inspectAgent(address));
+    try {
+      dashboard.handleInput("\r");
+      const rendered = stripVTControlCharacters(dashboard.render(180).join("\n"));
+      for (const example of examples) assert.ok(rendered.includes(`input: ${example}`), "dashboard preserves canonical JSON including spaces inside strings");
+    } finally { dashboard.dispose(); }
     const direct = await send(f.broker, true, '{"hold":true}');
     await until(() => f.broker.mailStore.getJob(direct.envelope.id)?.phase === "running");
     const job = f.broker.mailStore.getJob(direct.envelope.id)!;

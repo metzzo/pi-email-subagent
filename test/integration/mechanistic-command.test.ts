@@ -13,7 +13,7 @@ const bin = resolve("node_modules/.bin/pi");
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "python-command-")); const agent = join(root, "agent"); await mkdir(agent);
   const script = join(root, "status.py");
-  await writeFile(script, "from pi_mechanistic import *\nimport time\ndef main(args):\n progress('observing actual file',20)\n time.sleep(args.get('delay', .15))\n if args.get('large'): success('OBSERVATION_FINISHED '+'é'*2000, ['é'*1024]*29)\n else: (failure if args.get('fail') else success)('OBSERVATION_FINISHED', ['https://example.test/ci'])\nrun(main)\n");
+  await writeFile(script, "from pi_mechanistic import *\nimport time\ndef main(args):\n progress('observing actual file',20)\n time.sleep(args.get('delay', .15))\n if 'note' in args: success('COPY_VALUE:'+args['note'])\n elif args.get('large'): success('OBSERVATION_FINISHED '+'é'*2000, ['é'*1024]*29)\n else: (failure if args.get('fail') else success)('OBSERVATION_FINISHED', ['https://example.test/ci'])\nrun(main)\n");
   await writeFile(join(agent, "subagents.json"), JSON.stringify({ lifecycle: { runTimeoutMs: 3000, abortTimeoutMs: 100, disposeTimeoutMs: 100 }, mechanisticPrograms: { ci: { python: "python3", script, cwd: root, description: "Observe CI without dispatch", inputExamples: ['{}'] } } }));
   return { root, agent, env: { PI_OFFLINE: "1", PI_CODING_AGENT_DIR: agent, UX_MODEL_CALLS: join(root, "model-calls"), TMPDIR: root } };
 }
@@ -59,6 +59,9 @@ for (const mode of ["print", "json", "print-large"] as const) it(`real Pi ${mode
 
 it("real RPC command discovery, invalid JSON and script failure need no agent_settled or model generation", { timeout: 30000 }, async (t) => {
   const f = await fixture();
+  const configPath = join(f.agent, "subagents.json"); const config = JSON.parse(await readFile(configPath, "utf8"));
+  const copiedValue = "a  b\nline\tend"; const exampleInput = JSON.stringify({ note: copiedValue }, null, 2);
+  config.mechanisticPrograms.ci.inputExamples = [exampleInput]; await writeFile(configPath, JSON.stringify(config));
   const client = PiRpcClient.launch({ cwd: f.root, agentDir: f.agent, model: "ux-local/ux-local", extensions: [provider, extension], piBin: bin, env: f.env });
   const kill = () => { client.kill("SIGKILL"); }; t.signal.addEventListener("abort", kill, { once: true });
   try {
@@ -68,16 +71,45 @@ it("real RPC command discovery, invalid JSON and script failure need no agent_se
       if (command === "/agents program ci") {
         const text = (shown.message as { content: string }).content;
         const example = /^Input example: (.*)$/m.exec(text)?.[1];
-        assert.equal(example, "{}", "displayed JSON is directly copyable, not a quoted JSON string");
+        assert.equal(example, JSON.stringify({ note: copiedValue }), "pretty input displays as directly copyable canonical single-line JSON");
         await client.prompt(`/agents run ci.copied ${example}`);
       }
     }
     assert.equal(existsSync(f.env.UX_MODEL_CALLS), false); assert.equal(client.events().some((line) => line.type === "agent_start"), false);
     const store = await journal(f.agent); assert.equal(store.listJobs().length, 3);
-    assert.equal(store.listJobs().find((job) => job.address === "ci.copied@mechanistic.com")?.result, "success");
+    const copied = store.listJobs().find((job) => job.address === "ci.copied@mechanistic.com")!;
+    assert.equal(copied.result, "success"); assert.equal(copied.reported?.summary, "COPY_VALUE:" + copiedValue);
     assert.ok(store.listJobs().every((job) => job.phase === "terminal" && job.outcomeDeliveryState === "delivered" && job.triggerTurn === false));
   } finally {
     const deadline = setTimeout(kill, 5000); try { assert.equal(await client.close(), 0); } finally { clearTimeout(deadline); t.signal.removeEventListener("abort", kill); kill(); await rm(f.root, { recursive: true, force: true }); }
+  }
+});
+
+for (const boundary of ["accepted", "outcome"] as const) it(`real journal maintenance failure after ${boundary} stays visible without starting a model or harming jobs`, { timeout: 20000 }, async (t) => {
+  const f = await fixture(); const proof = join(f.root, "maintenance-proof.json");
+  const client = PiRpcClient.launch({ cwd: f.root, agentDir: f.agent, model: "ux-local/ux-local", extensions: [provider, resolve("test/helpers/mechanistic-ux-stall-extension.ts")], piBin: bin, env: { ...f.env, UX_MAINTENANCE_FAILURE: boundary, UX_MAINTENANCE_PROOF: proof } });
+  const kill = () => { client.kill("SIGKILL"); }; t.signal.addEventListener("abort", kill, { once: true });
+  try {
+    await client.prompt('/agents run ci.maintenance {"delay":0.3}');
+    await client.waitFor((line) => line.type === "message_end" && JSON.stringify(line.message).includes("Mail journal maintenance failed"), "visible maintenance diagnostic", 10000);
+    const failed = JSON.parse(await readFile(proof, "utf8"));
+    assert.equal(failed.phase === "terminal", boundary === "outcome");
+    await client.prompt("/agents run ci.unrelated {}");
+    const store = await journal(f.agent); const jobs = store.listJobs();
+    assert.equal(jobs.length, 2); assert.ok(jobs.some((job) => job.id === failed.id));
+    assert.ok(jobs.every((job) => job.result === "success" && job.cleanup?.state === "confirmed" && job.outcomeDeliveryState === "delivered"));
+    assert.equal(store.list().length, 4, "the alert does not create or replay job mail");
+    const namespace = (await readdir(join(f.agent, "subagents"))).find((name) => !name.includes("."))!;
+    const registry = JSON.parse(await readFile(join(f.agent, "subagents", namespace, "registry.json"), "utf8"));
+    assert.equal(registry.agents.length, 2);
+    assert.ok(registry.agents.every((record: { state: string; cleanupUnknown?: boolean }) => record.state === "idle" && !record.cleanupUnknown));
+    assert.equal(existsSync(f.env.UX_MODEL_CALLS), false, "maintenance diagnostics must not request a model");
+    assert.equal(client.events().some((event) => event.type === "agent_start"), false);
+    await client.prompt("An explicit user turn still works"); await client.waitForSettlement(0, 5000);
+    assert.equal(await readFile(f.env.UX_MODEL_CALLS, "utf8"), "generation\n");
+  } finally {
+    const deadline = setTimeout(kill, 5000);
+    try { assert.equal(await client.close(), 0); } finally { clearTimeout(deadline); t.signal.removeEventListener("abort", kill); kill(); await rm(f.root, { recursive: true, force: true }); }
   }
 });
 

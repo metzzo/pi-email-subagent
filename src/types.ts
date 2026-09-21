@@ -529,7 +529,6 @@ export interface WorkerStartConfig {
   sessionDir: string;
   projectTrusted: boolean;
   systemPrompt: string;
-  mechanisticPrompt?: string;
   /** Synchronous admission guard before each assistant provider request, including Pi retries. */
   beforeModelTurn?: () => void;
   sendEmail: (input: SendEmailInput, signal?: AbortSignal) => Promise<SendEmailResult>;

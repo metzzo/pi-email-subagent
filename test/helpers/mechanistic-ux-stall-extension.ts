@@ -1,11 +1,31 @@
 import { existsSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AgentBroker } from "../../src/broker.ts";
+import { MailStore } from "../../src/mail-store.ts";
 import extension from "../../src/index.ts";
 
 /** Share the real extension's loader graph; inject faults, not durable effects. */
 export default function (pi: ExtensionAPI): void {
   extension(pi);
+  const maintenanceBoundary = process.env.UX_MAINTENANCE_FAILURE;
+  if (maintenanceBoundary) {
+    let injected = false;
+    const maintain = MailStore.prototype.maintainIfNeeded;
+    MailStore.prototype.maintainIfNeeded = function (threshold, maximum) {
+      return maintain.call(this, injected ? threshold : -1, maximum);
+    };
+    const replace = Reflect.get(MailStore.prototype, "beforeJournalReplace") as () => Promise<void>;
+    Reflect.set(MailStore.prototype, "beforeJournalReplace", async function (this: MailStore) {
+      const job = this.listJobs().find((job) => job.address === "ci.maintenance@mechanistic.com"
+        && (maintenanceBoundary === "accepted" ? job.phase !== "terminal" : job.phase === "terminal"));
+      if (!injected && job) {
+        injected = true;
+        writeFileSync(process.env.UX_MAINTENANCE_PROOF!, JSON.stringify({ id: job.id, phase: job.phase, outcome: job.outcomeMailId }));
+        throw new Error("Injected journal replacement failure");
+      }
+      await replace.call(this);
+    });
+  }
   const observationFailure = process.env.UX_OBSERVATION_FAILURE;
   if (observationFailure) {
     const inspect = AgentBroker.prototype.inspectMechanisticJob;

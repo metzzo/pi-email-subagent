@@ -60,6 +60,17 @@ it("program descriptions and JSON examples are bounded trusted discovery, not bi
     for (const value of [null, "", " ", 1, "é".repeat(129), "line\nbreak", "\u001b[0m", "bidi\u202e"]) assert.throws(() => registration({ description: value }), /description/);
     for (const value of [null, {}, ["[]"], ["null"], ["bad"], [1], ["{}", "{}", "{}", "{}"], [JSON.stringify({ x: "x".repeat(1017) })]]) assert.throws(() => registration({ inputExamples: value }), /example/);
     assert.deepEqual(registration({ inputExamples: [] }).inputExamples, []);
+    const pretty = ' \n\t{\r\n "text" : "a  b", "escaped": "\\n\\t\\u0001"\r\n} ';
+    assert.deepEqual(registration({ inputExamples: [pretty] }).inputExamples, [JSON.stringify(JSON.parse(pretty))]);
+    for (const character of ["\u0000", "\u0001", "\u001b", "\u007f", "\u0085", "\u009b", "\u061c", "\u200e", "\u200f", "\u2028", "\u2029", "\u202a", "\u202e", "\u2066", "\u2069"]) {
+      assert.throws(() => registration({ inputExamples: [`{"text":"${character}"}`] }), /example/i);
+      assert.throws(() => registration({ inputExamples: [`{"text":"${character}","text":"safe"}`] }), /example/i, "unsafe source text cannot disappear behind a duplicate key");
+    }
+    for (const value of ['{"text":"\\u007f"}', '{"text":"\\u0085"}', '{"text":"\\u202e"}', '{"text":"\\u2066"}', '{"text":"\\u2028"}']) assert.throws(() => registration({ inputExamples: [value] }), /example/i, "canonical output must also be safe");
+    const expanded = '{"values":[' + Array(50).fill("1e20").join(",") + ']}';
+    assert.ok(Buffer.byteLength(expanded) < 1024); assert.ok(Buffer.byteLength(JSON.stringify(JSON.parse(expanded))) > 1024);
+    assert.throws(() => registration({ inputExamples: [expanded] }), /example/i);
+    assert.throws(() => registration({ inputExamples: [" ".repeat(1023) + "{}"] }), /example/i, "raw input bound remains enforced");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

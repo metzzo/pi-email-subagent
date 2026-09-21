@@ -612,7 +612,7 @@ export class DashboardComponent {
         try { program = this.getInspection?.(agent.address); } catch { /* binding may have been removed */ }
         if (program?.kind === "mechanistic") {
           if (program.description) lines.push(this.theme.fg("text", sanitizeConversationLabel(program.description)));
-          for (const example of program.inputExamples ?? []) lines.push(this.theme.fg("dim", `input: ${sanitizeConversationLabel(example)}`));
+          for (const example of program.inputExamples ?? []) lines.push(this.theme.fg("dim", `input: ${sanitizeConversationBody(example)}`));
         }
         lines.push(this.theme.fg("dim", `script: ${sanitizeConversationLabel(agent.binding.script)} · cwd: ${sanitizeConversationLabel(agent.binding.cwd)}`));
         lines.push(this.theme.fg("dim", `callers: ${agent.allowedCallers.join(", ")} · run ${agent.lifecycle.runTimeoutMs}ms · abort ${agent.lifecycle.abortTimeoutMs}ms · dispose ${agent.lifecycle.disposeTimeoutMs}ms`));

@@ -16,6 +16,8 @@ export const MAX_ARTIFACTS = 32;
 export const MAX_COMMANDS = 16;
 export const PROGRESS_INTERVAL_MS = 250;
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
+// JSON formatting whitespace is allowed on input, then removed by serialization.
+const UNSAFE_EXAMPLE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029]|\p{Bidi_Control}/u;
 
 export function assertUnreservedModel(modelId: string): void {
   if (modelId.trim().toLowerCase() === MECHANISTIC_MODEL_ID) {
@@ -106,15 +108,19 @@ export function mergeMechanisticPrograms(
     if (description !== undefined && (typeof description !== "string" || !description.trim() || Buffer.byteLength(description) > MAX_PROGRAM_DESCRIPTION_BYTES || /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(description))) {
       throw new Error(`Program description must be safe single-line text of at most ${MAX_PROGRAM_DESCRIPTION_BYTES} UTF-8 bytes.`);
     }
-    const inputExamples = raw.inputExamples;
-    if (inputExamples !== undefined) {
-      if (!Array.isArray(inputExamples) || inputExamples.length > MAX_PROGRAM_EXAMPLES) throw new Error(`At most ${MAX_PROGRAM_EXAMPLES} input examples are allowed.`);
-      for (const example of inputExamples) {
-        if (typeof example !== "string" || Buffer.byteLength(example) > MAX_PROGRAM_EXAMPLE_BYTES) throw new Error(`Each input example must be a JSON object string of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
-        try { object(JSON.parse(example)); } catch { throw new Error("Each input example must encode a JSON object."); }
+    let inputExamples: string[] | undefined;
+    if (raw.inputExamples !== undefined) {
+      if (!Array.isArray(raw.inputExamples) || raw.inputExamples.length > MAX_PROGRAM_EXAMPLES) throw new Error(`At most ${MAX_PROGRAM_EXAMPLES} input examples are allowed.`);
+      inputExamples = [];
+      for (const example of raw.inputExamples) {
+        if (typeof example !== "string" || Buffer.byteLength(example) > MAX_PROGRAM_EXAMPLE_BYTES || UNSAFE_EXAMPLE_TEXT.test(example)) throw new Error(`Each input example must be a safe JSON object string of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
+        let canonical: string;
+        try { canonical = JSON.stringify(object(JSON.parse(example))); } catch { throw new Error("Each input example must encode a JSON object."); }
+        if (Buffer.byteLength(canonical) > MAX_PROGRAM_EXAMPLE_BYTES || UNSAFE_EXAMPLE_TEXT.test(canonical)) throw new Error(`Canonical input example must be safe single-line JSON of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
+        inputExamples.push(canonical);
       }
     }
-    result[key] = { ...binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers), ...(description === undefined ? {} : { description }), ...(inputExamples === undefined ? {} : { inputExamples: [...inputExamples] as string[] }) };
+    result[key] = { ...binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers), ...(description === undefined ? {} : { description }), ...(inputExamples === undefined ? {} : { inputExamples }) };
   }
   return result;
 }

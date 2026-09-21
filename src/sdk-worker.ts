@@ -38,7 +38,7 @@ export interface FetchToolDetails {
   total: number;
 }
 
-export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail" | "fetchEmails" | "mechanisticPrompt">) {
+export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail" | "fetchEmails">) {
   const send = PiCodingAgent.defineTool({
     name: "send_email",
     label: "Send email",

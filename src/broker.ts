@@ -3701,7 +3701,7 @@ export class AgentBroker {
   private scheduleMailMaintenance(): void {
     if (this.disposed) return;
     const operation = this.mailStore.maintainIfNeeded(undefined, this.options.config.maxRetainedEmails).catch((error) => {
-      this.options.mainAdapter.notifyFailure(`Mail journal maintenance failed: ${errorMessage(error)}`);
+      this.options.mainAdapter.notifyFailure(`Mail journal maintenance failed: ${errorMessage(error)}`, { triggerTurn: false });
     });
     // Track the mutation itself, not its bookkeeping continuation.
     this.trackInFlight(operation, "mail-maintenance");
