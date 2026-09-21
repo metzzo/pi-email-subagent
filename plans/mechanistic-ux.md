@@ -102,7 +102,7 @@ are dispatcher measurements, not the total cost of the surrounding conversation.
   and other links. Completion means the observation succeeded, not that CI passed.
   Final evidence uses one immutable per-run artifact plus an atomic latest pointer,
   written only after bounded cleanup reaches its final state.
-- Deterministic final gates cover 611 tests in 38 suites, including 75 real-Pi E2E
+- Deterministic final gates cover 613 tests in 38 suites, including 75 real-Pi E2E
   tests in 5 suites, all 33 source coverage thresholds, type checking, the
   four-package production-license policy, exact package policy, and packed install
   smoke. Retained logs live under `.test-workspaces/mechanistic-ux/`.
