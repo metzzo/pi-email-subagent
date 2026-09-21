@@ -16,18 +16,16 @@ export interface PackResult {
   files: PackedFile[];
 }
 
-// Reviewed baseline: local 219906 compressed / 807752 unpacked bytes;
-// retained CI measured 220060 compressed. Round budgets provide real headroom,
-// while the exact inventory below prevents unrelated files silently shipping.
-// UX adds exactly one reviewed read-only GitHub observer; byte budgets unchanged.
-export const PACKAGE_MAX_ENTRIES = 61;
-export const PACKAGE_MAX_SIZE_BYTES = 240_000;
+// Preserve the original entry/compressed ceilings. Historical design/review
+// records stay in Git, not npm; the exact inventory is now 59 files.
+export const PACKAGE_MAX_ENTRIES = 60;
+export const PACKAGE_MAX_SIZE_BYTES = 220_000;
 export const PACKAGE_MAX_UNPACKED_BYTES = 850_000;
 export const PACKAGE_PATHS = [
   "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE", "README.md", "SECURITY.md", "package.json",
   "docs/README.md", "docs/agents-dashboard.md", "docs/cancel-request.md", "docs/configuration.md",
   "docs/fetch-emails.md", "docs/inspect-agent.md", "docs/lifecycle.md", "docs/manage-agent.md",
-  "docs/mechanistic-subagents-review.md", "docs/mechanistic-subagents.md", "docs/mechanistic-usage.md",
+  "docs/mechanistic-usage.md",
   "docs/provider-aware-model-routing.md", "docs/provider-retry-recovery.md", "docs/release-security-checks.md",
   "docs/send-email.md", "docs/wait-for-replies.md",
   "src/abandoned-owner-recovery.ts", "src/address.ts", "src/broker.ts", "src/capability.ts", "src/config.ts",

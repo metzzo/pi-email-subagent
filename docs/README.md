@@ -51,7 +51,7 @@ All limits, roles, address overrides, and the model-selection policy are configu
 
 ## Implemented features
 
-- [Mechanistic-subagents](mechanistic-subagents.md): Python-backed, send-only identities merged into `main`, with global installation and live email/Python workflows verified. Includes durable jobs, bounded outcomes, recovery, and reusable deterministic and opt-in real-model tests. See the [usage guide](mechanistic-usage.md) and [review and installation record](mechanistic-subagents-review.md).
+- [Mechanistic-subagents](https://github.com/metzzo/pi-email-subagent/blob/main/docs/mechanistic-subagents.md): Python-backed, send-only identities merged into `main`, with global installation and live email/Python workflows verified. Includes durable jobs, bounded outcomes, recovery, and reusable deterministic and opt-in real-model tests. See the [usage guide](mechanistic-usage.md) and [review and installation record](https://github.com/metzzo/pi-email-subagent/blob/main/docs/mechanistic-subagents-review.md).
 
 ## Related surfaces
 

@@ -30,6 +30,8 @@
   "files": [
     "src",
     "docs",
+    "!docs/mechanistic-subagents.md",
+    "!docs/mechanistic-subagents-review.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
