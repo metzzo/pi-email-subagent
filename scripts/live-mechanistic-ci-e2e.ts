@@ -230,6 +230,7 @@ async function main(): Promise<number> {
       (categorySum === 0 && !line.includes("no runs found"))
     )
       throw new Error("invalid category counts");
+    phase = "links";
     if (
       links.length === 0 ||
       links.length > 8 ||
@@ -299,6 +300,7 @@ async function main(): Promise<number> {
           .catch(() => false),
         delay(5000).then(() => false),
       ]);
+      physicalCloseProven = observed;
       if (!observed) {
         client.kill("SIGKILL");
         physicalCloseProven = await Promise.race([
