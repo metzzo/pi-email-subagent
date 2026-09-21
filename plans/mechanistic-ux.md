@@ -91,9 +91,10 @@ are dispatcher measurements, not the total cost of the surrounding conversation.
   responses and 12,369 model-reported tokens (4,718 uncached input, 7,296 cached
   input, 355 output); no savings percentage is inferred.
 - The reviewed npm artifact contains exactly 59 files and measures 215,140 bytes
-  compressed / 796,507 unpacked. The original limits remain 60 entries, 220,000
-  compressed bytes, and 850,000 unpacked bytes. The two historical mechanistic
-  design/review records remain in Git but are excluded from npm and linked to
+  compressed / 796,507 unpacked. The original 60-entry and 220,000-byte compressed
+  limits are preserved alongside the new 850,000-byte unpacked guard. The two
+  historical mechanistic design/review records remain in Git but are excluded
+  from npm and linked to
   their repository source; the earlier 240,000-byte rebaseline was reverted as
   unauthorized.
 - Read-only authenticated GitHub evidence for `metzzo/pi-email-subagent` commit
@@ -102,7 +103,7 @@ are dispatcher measurements, not the total cost of the surrounding conversation.
   and other links. Completion means the observation succeeded, not that CI passed.
   Final evidence uses one immutable per-run artifact plus an atomic latest pointer,
   written only after bounded cleanup reaches its final state.
-- Deterministic final gates cover 613 tests in 38 suites, including 75 real-Pi E2E
+- Deterministic final gates cover 614 tests in 38 suites, including 75 real-Pi E2E
   tests in 5 suites, all 33 source coverage thresholds, type checking, the
   four-package production-license policy, exact package policy, and packed install
   smoke. Retained logs live under `.test-workspaces/mechanistic-ux/`.
