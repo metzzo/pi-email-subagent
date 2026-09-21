@@ -12,11 +12,32 @@ export interface PackResult {
   filename: string;
   entryCount: number;
   size: number;
+  unpackedSize: number;
   files: PackedFile[];
 }
 
+// Reviewed baseline: local 219906 compressed / 807752 unpacked bytes;
+// retained CI measured 220060 compressed. Round budgets provide real headroom,
+// while the exact inventory below prevents unrelated files silently shipping.
 export const PACKAGE_MAX_ENTRIES = 60;
-export const PACKAGE_MAX_SIZE_BYTES = 220_000;
+export const PACKAGE_MAX_SIZE_BYTES = 240_000;
+export const PACKAGE_MAX_UNPACKED_BYTES = 850_000;
+export const PACKAGE_PATHS = [
+  "CHANGELOG.md", "CONTRIBUTING.md", "LICENSE", "README.md", "SECURITY.md", "package.json",
+  "docs/README.md", "docs/agents-dashboard.md", "docs/cancel-request.md", "docs/configuration.md",
+  "docs/fetch-emails.md", "docs/inspect-agent.md", "docs/lifecycle.md", "docs/manage-agent.md",
+  "docs/mechanistic-subagents-review.md", "docs/mechanistic-subagents.md", "docs/mechanistic-usage.md",
+  "docs/provider-aware-model-routing.md", "docs/provider-retry-recovery.md", "docs/release-security-checks.md",
+  "docs/send-email.md", "docs/wait-for-replies.md",
+  "src/abandoned-owner-recovery.ts", "src/address.ts", "src/broker.ts", "src/capability.ts", "src/config.ts",
+  "src/email-error.ts", "src/id.ts", "src/index.ts", "src/mail-store.ts", "src/main-mail-routing.ts",
+  "src/main-tools.ts", "src/mechanistic-job.ts", "src/mechanistic.ts", "src/model-runtime.ts", "src/namespace-lock.ts",
+  "src/pi-compat.ts", "src/prompts.ts", "src/python-process.ts", "src/python/examples/command.py",
+  "src/python/examples/status_file.py", "src/python/pi_mechanistic.py", "src/rate-limit.ts", "src/registry-store.ts",
+  "src/reply.ts", "src/runtime-timers.ts", "src/safe-summary.ts", "src/scheduler.ts", "src/sdk-worker.ts",
+  "src/settings-snapshot.ts", "src/testing.ts", "src/tool-result.ts", "src/tool-schemas.ts", "src/types.ts",
+  "src/ui.ts", "src/util.ts", "src/work-ledger.ts", "src/worker-extensions.ts", "src/worker-lifecycle.ts",
+] as const;
 
 const REQUIRED_PATHS = [
   "package.json",
@@ -41,6 +62,9 @@ export function assertPackageSurface(pack: PackResult): void {
   if (!Number.isInteger(pack.size) || pack.size < 1 || pack.size > PACKAGE_MAX_SIZE_BYTES) {
     throw new Error(`Unexpected package tarball size ${pack.size}; maximum is ${PACKAGE_MAX_SIZE_BYTES} bytes.`);
   }
+  if (!Number.isInteger(pack.unpackedSize) || pack.unpackedSize < 1 || pack.unpackedSize > PACKAGE_MAX_UNPACKED_BYTES) {
+    throw new Error(`Unexpected package unpacked size ${pack.unpackedSize}; maximum is ${PACKAGE_MAX_UNPACKED_BYTES} bytes.`);
+  }
   if (pack.entryCount !== pack.files.length) {
     throw new Error(`Package entry count ${pack.entryCount} does not match the ${pack.files.length} listed files.`);
   }
@@ -53,6 +77,12 @@ export function assertPackageSurface(pack: PackResult): void {
   const unexpected = pack.files.map((file) => file.path).filter((path) =>
     !ALLOWED_ROOT_PATHS.has(path) && !path.startsWith("src/") && !path.startsWith("docs/"));
   if (unexpected.length > 0) throw new Error(`Unexpected packed file(s): ${unexpected.join(", ")}.`);
+  const inventory = new Set<string>(PACKAGE_PATHS);
+  const added = [...paths].filter((path) => !inventory.has(path));
+  const missing = [...inventory].filter((path) => !paths.has(path));
+  if (paths.size !== pack.files.length || added.length || missing.length) {
+    throw new Error(`Package inventory differs from review: added [${added.join(", ")}], missing [${missing.join(", ")}], duplicate entries ${pack.files.length - paths.size}.`);
+  }
 }
 
 function localMarkdownTargets(markdown: string): string[] {
@@ -109,5 +139,5 @@ export async function checkCurrentPackage(root = resolve(import.meta.dirname, ".
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const pack = await checkCurrentPackage();
-  console.log(`package policy passed: ${pack.entryCount} files, ${pack.size} bytes`);
+  console.log(`package policy passed: ${pack.entryCount} files, ${pack.size} compressed / ${pack.unpackedSize} unpacked bytes`);
 }
