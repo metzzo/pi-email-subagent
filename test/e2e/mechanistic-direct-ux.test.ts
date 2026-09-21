@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { it } from "node:test";
 import { PiRpcClient } from "./helpers/rpc-client.ts";
+import { MailStore, parseMailEvent } from "../../src/mail-store.ts";
 
 const observer = join(
   process.cwd(),
@@ -72,27 +73,28 @@ it(
       assert.equal(close.code, 0);
       assert.equal(close.signal, null);
       const journalPath = join(agentDir, "subagents", sessionId, "mail.jsonl");
-      const journal = (await readFile(journalPath, "utf8"))
+      const store = new MailStore(journalPath);
+      await store.init();
+      const events = (await readFile(journalPath, "utf8"))
         .trim()
         .split("\n")
         .filter(Boolean)
-        .map(
-          (line) =>
-            JSON.parse(line) as {
-              type?: string;
-              job?: {
-                address?: string;
-                result?: string;
-                cleanup?: { state?: string };
-                outcomeMailId?: string;
-              };
-            },
-        );
-      const terminal = journal.find((event) => event.type === "job.terminal");
-      assert.equal(terminal?.job?.address, "ci.main-status@mechanistic.com");
-      assert.equal(terminal?.job?.result, "success");
-      assert.equal(terminal?.job?.cleanup?.state, "confirmed");
-      assert.ok(terminal?.job?.outcomeMailId);
+        .map((line) => parseMailEvent(JSON.parse(line)));
+      const terminal = events.find((event) => event.type === "job.terminal");
+      assert.ok(terminal && "job" in terminal);
+      const job = store.getJob(terminal.job.id);
+      assert.ok(job);
+      assert.equal(job.address, "ci.main-status@mechanistic.com");
+      assert.equal(job.phase, "terminal");
+      assert.equal(job.result, "success");
+      assert.equal(job.outcomeDeliveryState, "delivered");
+      assert.equal(job.triggerTurn, false);
+      assert.equal(job.cleanup?.state, "confirmed");
+      assert.equal(job.cleanup?.childExited, true);
+      assert.equal(job.cleanup?.pipesClosed, true);
+      assert.equal(store.countPendingJobs(), 0);
+      assert.ok(job.outcomeMailId);
+      assert.equal(store.get(job.outcomeMailId)?.triggerTurn, false);
     } finally {
       await client.close().catch(() => undefined);
       await rm(root, { recursive: true, force: true });
