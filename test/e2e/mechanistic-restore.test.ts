@@ -6,6 +6,16 @@ import { it } from "node:test";
 import { PiRpcClient } from "./helpers/rpc-client.ts";
 import { MailStore } from "../../src/mail-store.ts";
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const closeWithin = async (client: PiRpcClient, ms: number) =>
+  new Promise<Awaited<ReturnType<PiRpcClient["waitForClose"]>> | undefined>(
+    (resolve) => {
+      const timer = setTimeout(() => resolve(undefined), ms);
+      client.waitForClose().then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+    },
+  );
 it(
   "restores one genuine persisted Pi session without replaying direct work",
   { timeout: 180000 },
@@ -81,6 +91,11 @@ it(
       const id = (acceptance.message as { details?: { jobId?: string } })
         .details?.jobId;
       assert.ok(id);
+      assert.equal(
+        (acceptance.message as { details?: { address?: string } }).details
+          ?.address,
+        "ci.restore@mechanistic.com",
+      );
       for (
         let i = 0;
         i < 300 &&
@@ -88,8 +103,12 @@ it(
         i++
       )
         await pause(100);
+      assert.equal(await readFile(effects, "utf8"), id + "\n");
       b.kill("SIGTERM");
-      await Promise.race([b.waitForClose(), pause(10000)]);
+      const bClose = await closeWithin(b, 10000);
+      assert.ok(bClose);
+      assert.equal(bClose.code, 143);
+      assert.equal(bClose.signal, null);
       assert.equal(await readFile(calls, "utf8"), "generation\n");
       c = PiRpcClient.launch({
         cwd: root,
@@ -110,6 +129,15 @@ it(
       assert.equal(job.signal, "SIGTERM");
       assert.equal(job.triggerTurn, false);
       assert.equal(job.cleanup?.state, "confirmed");
+      assert.equal(await readFile(calls, "utf8"), "generation\n");
+      assert.equal(
+        c
+          .events()
+          .some((event) =>
+            ["agent_start", "agent_end", "agent_settled"].includes(event.type),
+          ),
+        false,
+      );
       const messages = await c.getMessages();
       const restored = (
         (
