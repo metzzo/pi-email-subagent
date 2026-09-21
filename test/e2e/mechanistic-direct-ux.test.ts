@@ -56,10 +56,80 @@ it(
           (model) => model.provider === "openai" && model.id === "gpt-4.1-nano",
         ),
       );
+      const programsMark = client.mark();
       await client.prompt("/agents programs");
-
+      const programs = await client.waitFor(
+        (line) =>
+          line.type === "message_end" &&
+          (line.message as { customType?: string }).customType ===
+            "pi-email-subagent.command",
+        "programs",
+        30_000,
+        programsMark,
+      );
+      assert.match(
+        String((programs.message as { content?: string }).content),
+        /Observe local status/,
+      );
+      const detailMark = client.mark();
       await client.prompt("/agents program ci");
+      const detail = await client.waitFor(
+        (line) =>
+          line.type === "message_end" &&
+          (line.message as { customType?: string }).customType ===
+            "pi-email-subagent.command",
+        "program detail",
+        30_000,
+        detailMark,
+      );
+      assert.deepEqual(
+        (detail.message as { details?: { inputExamples?: string[] } }).details
+          ?.inputExamples,
+        ["{}"],
+      );
+      const runMark = client.mark();
       await client.prompt("/agents run ci.main-status {}");
+      const acceptance = await client.waitFor(
+        (line) =>
+          line.type === "message_end" &&
+          (line.message as { customType?: string }).customType ===
+            "pi-email-subagent.command",
+        "run acceptance",
+        30_000,
+        runMark,
+      );
+      const details = (
+        acceptance.message as {
+          details?: {
+            jobId?: string;
+            address?: string;
+            phase?: string;
+            recipientState?: string;
+          };
+        }
+      ).details;
+      assert.equal(details?.address, "ci.main-status@mechanistic.com");
+      assert.equal(details?.phase, "queued");
+      assert.equal(details?.recipientState, "accepted");
+      const acceptedJobId = details?.jobId;
+      assert.ok(acceptedJobId);
+      const outcome = await client.waitFor(
+        (line) =>
+          line.type === "message_end" &&
+          (line.message as { customType?: string }).customType ===
+            "pi-email-subagent.email",
+        "automatic outcome",
+        60_000,
+        runMark,
+      );
+      assert.equal(
+        (
+          outcome.message as {
+            details?: { id?: string; triggerTurn?: boolean };
+          }
+        ).details?.triggerTurn,
+        false,
+      );
       const rpcText = JSON.stringify(client.events());
       assert.match(rpcText, /pi-email-subagent/);
       assert.match(rpcText, /\{\}/);
@@ -84,14 +154,30 @@ it(
       assert.ok(terminal && "job" in terminal);
       const job = store.getJob(terminal.job.id);
       assert.ok(job);
+      assert.equal(job.id, acceptedJobId);
       assert.equal(job.address, "ci.main-status@mechanistic.com");
       assert.equal(job.phase, "terminal");
       assert.equal(job.result, "success");
+      assert.equal(job.reported?.status, "success");
+      assert.match(
+        job.reported?.summary ?? "",
+        /status\.txt matched expected value/,
+      );
+      assert.ok(
+        job.reported?.artifacts?.some((artifact) =>
+          artifact.includes("status.txt"),
+        ),
+      );
       assert.equal(job.outcomeDeliveryState, "delivered");
       assert.equal(job.triggerTurn, false);
       assert.equal(job.cleanup?.state, "confirmed");
       assert.equal(job.cleanup?.childExited, true);
       assert.equal(job.cleanup?.pipesClosed, true);
+      assert.ok(job.pid);
+      assert.throws(
+        () => process.kill(job.pid!, 0),
+        (error) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      );
       assert.equal(store.countPendingJobs(), 0);
       assert.ok(job.outcomeMailId);
       assert.equal(store.get(job.outcomeMailId)?.triggerTurn, false);
