@@ -225,11 +225,7 @@ it(
       const unresolved: string[] = [];
       for (const [index, client] of clients.entries()) {
         let closed = false;
-        try {
-          await client.close();
-        } catch {
-          /* bounded fallback below */
-        }
+        void client.close().catch(() => undefined);
         closed = Boolean(await closeWithin(client, 3000));
         if (!closed) {
           client.kill("SIGTERM");
