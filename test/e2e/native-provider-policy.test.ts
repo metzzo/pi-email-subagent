@@ -57,6 +57,7 @@ for (const modelHeaders of [false, true])
             await new Promise((resolve) => setTimeout(resolve, 25));
           }
         }
+        await readFile(started);
         let resolved = false;
         void statePromise.then(() => {
           resolved = true;
@@ -101,9 +102,10 @@ for (const modelHeaders of [false, true])
         assert.match(
           toolText(send),
           modelHeaders
-            ? /(?:Model unsafe-native-fixture\/unsafe-native-model.*headers.*cannot be proven|Model ID "unsafe-native-model" is not routable).*no email was accepted/i
-            : /(?:native provider unsafe-native-fixture.*cannot be proven|Model ID "unsafe-native-model" is not routable).*no email was accepted/i,
+            ? /Model unsafe-native-fixture\/unsafe-native-model.*headers.*cannot be proven.*no email was accepted/i
+            : /native provider unsafe-native-fixture.*cannot be proven.*no email was accepted/i,
         );
+        assert.doesNotMatch(toolText(send), /not routable/i);
         assert.doesNotMatch(
           `${toolText(send)}\n${client.stderr}`,
           new RegExp(UNSAFE_NATIVE_HEADER_SENTINEL, "i"),
