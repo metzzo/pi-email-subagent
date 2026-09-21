@@ -81,7 +81,9 @@ The observer requires `git` and authenticated `gh` on the trusted PATH. `{}` use
 the repository and current commit in the registered cwd, not the caller's cwd.
 Optional `repository` is `owner/repo`; optional `commit` is a commit ID or ref
 resolved through GitHub. Every observation names the exact checked commit and
-provides links. It reads at most 100 GitHub Actions runs, flags partial results,
+provides at most eight run links: failed first, then pending, passed and other,
+preserving GitHub's order within each category. It reads at most 100 GitHub Actions
+runs, flags partial results,
 and distinguishes failed, pending, passed, other, and absent runs. **A successful
 observation does not mean CI passed.** Other CI providers are not observed.
 The program never reruns, dispatches, cancels or changes GitHub work, and sends
@@ -282,7 +284,7 @@ script-effect, and terminal/outcome commit boundaries. The package smoke execute
 the installed helper and example through a fresh Pi process. LLM routing/result
 loop tests use a local deterministic provider: they prove routing, not live-model
 behavior. CI observer fixture tests substitute only GitHub responses behind a
-local HTTPS/proxy endpoint while using real git, gh, Python and broker behavior;
+local HTTP Unix socket while using real git, gh, Python and broker behavior;
 these are not evidence of an actual GitHub observation. Live GitHub verification
 is separately opt-in and read-only.
 

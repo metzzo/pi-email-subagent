@@ -85,16 +85,17 @@ def main(args):
         total = data["total_count"]
         if not isinstance(runs, list) or len(runs) > 100 or type(total) is not int or total < len(runs):
             raise ObservationError("GitHub returned an invalid run list")
-        counts = {"passed": 0, "failed": 0, "pending": 0, "other": 0}
-        links = []
+        counts = {"failed": 0, "pending": 0, "passed": 0, "other": 0}
+        links_by_category = {category: [] for category in counts}
         for item in runs:
             if item.get("head_sha", "").lower() != commit or type(item.get("id")) is not int or item["id"] < 1:
                 raise ObservationError("GitHub run does not match the exact checked commit")
             status, conclusion = item.get("status"), item.get("conclusion")
             category = "pending" if status in ("queued", "in_progress", "waiting", "requested", "pending") else "passed" if status == "completed" and conclusion == "success" else "failed" if status == "completed" and conclusion in ("failure", "timed_out", "action_required", "startup_failure") else "other"
             counts[category] += 1
-            if len(links) < 8:
-                links.append("https://github.com/" + repository + "/actions/runs/" + str(item["id"]))
+            if len(links_by_category[category]) < 8:
+                links_by_category[category].append("https://github.com/" + repository + "/actions/runs/" + str(item["id"]))
+        links = [link for category in counts for link in links_by_category[category]][:8]
         summary = "GitHub Actions observed: " + (", ".join(str(counts[key]) + " " + key for key in ("failed", "pending", "passed", "other") if counts[key]) or "no runs found")
         summary += "\n" + repository + " at " + commit
         summary += "\n" + (links[0] if links else "https://github.com/" + repository + "/commit/" + commit + "/checks")
