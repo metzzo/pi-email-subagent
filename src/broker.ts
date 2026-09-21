@@ -674,7 +674,7 @@ export class AgentBroker {
     }
   }
 
-  private async sendMechanistic(sender: string, input: SendEmailInput, signal?: AbortSignal, authority?: WorkerMailboxAuthority | MechanisticAuthority): Promise<SendEmailResult> {
+  private async sendMechanistic(sender: string, input: SendEmailInput, signal?: AbortSignal, authority?: WorkerMailboxAuthority | MechanisticAuthority, triggerTurn?: false): Promise<SendEmailResult> {
     const shape = parseSubagentAddressShape(input.to);
     if (this.sameIdentity(sender, shape.address)) throw new Error("Sending email to yourself is not supported.");
     let envelope!: EmailEnvelope; let spawned = false; let acquired = false;
@@ -694,7 +694,7 @@ export class AgentBroker {
         envelope = { id: createMailId(), from: sender, to: shape.address, subject: input.subject!.trim(), message: input.message, priority: input.priority, kind: "notification", requiresResponse: false, createdAt: nowIso(), deliveryState: "queued", mechanisticBindingIntent: binding, lifecycleIntent: clone(lifecycle) };
         this.validateDeliverySize(envelope);
         if (byteLength(`${JSON.stringify({ v: 1, type: "invoke", jobId: envelope.id, mainAddress: this.mainAddress, envelope })}\n`) > PROTOCOL_BYTES) throw new Error("Mechanistic invocation exceeds the 64 KiB protocol line bound.");
-        const job: MechanisticJob = { id: envelope.id, address: shape.address, binding, allowedCallers: [...program.allowedCallers], lifecycle: clone(lifecycle), phase: "queued", createdAt: envelope.createdAt, updatedAt: envelope.createdAt, stderr: "" };
+        const job: MechanisticJob = { id: envelope.id, address: shape.address, binding, allowedCallers: [...program.allowedCallers], lifecycle: clone(lifecycle), phase: "queued", ...(triggerTurn === false ? { triggerTurn } : {}), createdAt: envelope.createdAt, updatedAt: envelope.createdAt, stderr: "" };
         this.validateMechanisticOutcomeSize(this.mechanisticOutcomeEnvelope(job));
         await this.withMailAdmission(async () => {
           this.validateQueueCapacity(shape.address, input);
@@ -773,7 +773,7 @@ export class AgentBroker {
         record.failure = `Python finalization failed: ${errorMessage(error)}`;
         await this.persistRegistry(true);
         safeRelease = true;
-        this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}; never replay ${job.id}.`);
+        this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}; never replay ${job.id}.`, { triggerTurn: job.triggerTurn });
       }).finally(() => {
         this.pythonProcesses.delete(address); this.pythonRuns.delete(address);
         if (safeRelease) this.active.delete(address);
@@ -790,7 +790,7 @@ export class AgentBroker {
       if (claimed) record.cleanupUnknown = true;
       await this.persistRegistry(true);
       schedulingSettled = true;
-      this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`);
+      this.options.mainAdapter.notifyFailure(`${address}: ${record.failure}`, { triggerTurn: this.mailStore.getJob(trigger.id)?.triggerTurn });
     } finally {
       this.scheduling.delete(address);
       if (!this.pythonProcesses.has(address) && (!claimed || schedulingSettled)) this.active.delete(address);
@@ -811,6 +811,7 @@ export class AgentBroker {
       subject: `Job ${job.id}: ${job.result ?? "invalid_arguments"}`.slice(0, this.options.config.maxSubjectBytes),
       message: `Job ${job.id}; outcome details omitted. Inspect this job in the durable journal.`,
       kind: "notification", requiresResponse: false, priority: "low", deliveryState: "queued", createdAt: job.updatedAt,
+      ...(job.triggerTurn === false ? { triggerTurn: false } : {}),
     };
   }
 
@@ -871,6 +872,17 @@ export class AgentBroker {
     }
   }
 
+  /** Exact job evidence for the operator command; no wait, replay or scheduling API. */
+  inspectMechanisticJob(id: string): { job: MechanisticJob; settled: boolean } {
+    const job = this.mailStore.getJob(id);
+    if (!job) throw new Error(`Unknown Python job ${id}.`);
+    // Priority can start newer accepted mail first. Run generation, not
+    // acceptance order, identifies the latest exact claim on this identity.
+    const latestClaim = this.mailStore.listJobs(job.address).sort((a, b) => (b.generation ?? 0) - (a.generation ?? 0))[0];
+    const authority = this.active.has(job.address) || this.scheduling.has(job.address) || this.pythonProcesses.has(job.address) || this.pythonRuns.has(job.address);
+    return { job, settled: job.phase === "terminal" && !(authority && latestClaim?.id === id) };
+  }
+
   private inspectMechanistic(address: string): MechanisticAgentInspection {
     const record = this.mechanisticRecords.get(address);
     let program: MechanisticProgram | undefined;
@@ -878,7 +890,8 @@ export class AgentBroker {
     const archiveBlockers = this.classifyArchiveBlockers(address, record);
     const holdsActivationLease = this.activationLeases.has(address);
     return { kind: "mechanistic", address, exists: Boolean(record), wouldSpawn: !record,
-      binding: clone(record?.binding ?? program!), allowedCallers: [...(program?.allowedCallers ?? record!.allowedCallers)], bindingReady: program ? "available" : "unavailable",
+      binding: clone(record?.binding ?? { key: program!.key, python: program!.python, script: program!.script, cwd: program!.cwd }), allowedCallers: [...(program?.allowedCallers ?? record!.allowedCallers)], bindingReady: program ? "available" : "unavailable",
+      ...(program?.description ? { description: program.description } : {}), ...(program?.inputExamples ? { inputExamples: [...program.inputExamples] } : {}),
       capacityAvailable: Boolean(program) && !record?.cleanupUnknown && (holdsActivationLease || this.activeIdentityCount() < this.options.config.maxAgents),
       capacity: this.capacitySnapshot(), holdsActivationLease, state: record?.state ?? "new", currentActivity: record?.currentActivity,
       queued: this.mailStore.queued(address).length, archiveEligible: this.archiveEligible(record, archiveBlockers), archiveBlockers,
@@ -1311,7 +1324,7 @@ export class AgentBroker {
       collectionClaim = interruptsMain ? undefined : this.claimCollection(current);
       if (!collectionClaim && !interruptsMain && !this.options.mainAdapter.isIdle()) return;
       if (!collectionClaim) {
-        await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: true });
+        await this.options.mainAdapter.deliver({ envelope: current, formatted: formatEmail(current), triggerTurn: current.triggerTurn !== false });
         ordinaryPresentationAccepted = true;
       }
       await this.mailStore.markDelivered([current.id]);
@@ -1367,6 +1380,7 @@ export class AgentBroker {
         const state = this.mailStore.get(snapshot.id)?.deliveryState ?? "missing";
         this.options.mainAdapter.notifyFailure(
           `Queued email ${snapshot.id} main route failed with canonical state ${state}: ${errorMessage(error)}`,
+          { triggerTurn: snapshot.triggerTurn },
         );
       }
     }
@@ -1726,8 +1740,9 @@ export class AgentBroker {
     input: SendEmailInput,
     signal?: AbortSignal,
     authority?: WorkerMailboxAuthority | MechanisticAuthority,
+    presentation?: { triggerTurn: false },
   ): Promise<SendEmailResult> {
-    const operation = this.sendInternal(senderInput, input, signal, authority);
+    const operation = this.sendInternal(senderInput, input, signal, authority, presentation?.triggerTurn);
     const tracked = operation.then(
       (result) => {
         this.inFlightOperations.delete(tracked);
@@ -1748,6 +1763,7 @@ export class AgentBroker {
     input: SendEmailInput,
     signal?: AbortSignal,
     authority?: WorkerMailboxAuthority | MechanisticAuthority,
+    triggerTurn?: false,
   ): Promise<SendEmailResult> {
     this.assertActive();
     if (authority) this.assertMailAuthority(authority);
@@ -1763,6 +1779,7 @@ export class AgentBroker {
     }
     const sender = this.validateSender(senderInput);
     const requestedTo = input.to.trim().toLowerCase();
+    if (triggerTurn !== undefined && (triggerTurn !== false || !this.isMainIdentity(sender) || !isMechanisticAddress(requestedTo))) throw new Error("Direct presentation is restricted to main invoking a registered Python program.");
     const mechanisticSender = this.mechanisticRecords.has(sender);
     if (mechanisticSender || isMechanisticAddress(requestedTo)) {
       if (input.requires_response === true || input.reply_to !== undefined || input.completion !== undefined || legacyReply || (input.subject && looksLikeReply(input.subject))) throw new Error("Mechanistic mail is send-only: no response requirement, explicit/legacy reply, or completion metadata.");
@@ -1770,7 +1787,7 @@ export class AgentBroker {
       if (mechanisticSender && authority?.kind !== "mechanistic") throw new Error("Mechanistic sender requires its exact live process authority.");
       if (mechanisticSender && input.lifecycle !== undefined) throw new Error("Mechanistic senders cannot change lifecycle policy.");
     }
-    if (isMechanisticAddress(requestedTo)) return this.sendMechanistic(sender, input, signal, authority);
+    if (isMechanisticAddress(requestedTo)) return this.sendMechanistic(sender, input, signal, authority, triggerTurn);
     if (this.sameIdentity(sender, requestedTo)) throw new Error("Sending email to yourself is not supported.");
 
     const toMain = this.isMainIdentity(requestedTo);
@@ -2294,7 +2311,6 @@ export class AgentBroker {
         sessionDir: join(this.options.namespaceDir, "sessions"),
         projectTrusted: this.options.projectTrusted,
         systemPrompt: subagentPrompt(record, this.mainAddress, this.modelIds, additions.modelPolicy, this.options.config.budgets, mechanisticPrompt(this.options.config, "llm")),
-        mechanisticPrompt: mechanisticPrompt(this.options.config, "llm"),
         beforeModelTurn: () => {
           this.assertWorkerMailboxAuthority(authority);
           const violation = this.modelBudgetViolation(record.address, worker, true);

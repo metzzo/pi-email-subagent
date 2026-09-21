@@ -32,7 +32,9 @@ it("trusted config resolves global/project path bases, defaults to main-only and
     assert.equal(trusted.mechanisticPrograms.monitor!.cwd, project);
     assert.equal(trusted.mechanisticPrograms.monitor!.script, join(project, "project.py"));
     assert.match(mechanisticPrompt(trusted, "llm"), /monitor\.<task-slug>@mechanistic\.com/);
-    assert.doesNotMatch(mechanisticPrompt(trusted, "llm"), /command\.<task-slug>/);
+    assert.doesNotMatch(mechanisticPrompt(trusted, "llm"), /command\.<task-slug>|inspect_agent shows/);
+    assert.match(mechanisticPrompt(trusted, "llm"), /ask main for input examples/);
+    assert.match(mechanisticPrompt(trusted, "main"), /inspect_agent shows examples/);
     await writeFile(join(project, ".pi", "subagents.json"), JSON.stringify({ mechanisticPrograms: { COMMAND: { python: "python3", script: "project.py" } } }));
     assert.throws(() => loadConfig(agent, project, true), /Duplicate/);
     assert.throws(() => mergeMechanisticPrograms({}, Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`program-${i}`, {}])), root), /at most 32/);
@@ -41,6 +43,23 @@ it("trusted config resolves global/project path bases, defaults to main-only and
     assert.throws(() => mergeMechanisticPrograms({}, { command: { python: "python3", script: "global.py", shell: true } }, agent), /Unknown/);
     for (const value of [null, [], ["main", "main"], ["spoof"], ["main", "llm", "mechanistic", "main"]]) assert.throws(() => parseMechanisticCallers(value));
     assert.throws(() => parseMechanisticBinding({ key: "command", python: "relative", script: "/a", cwd: "/" }), /absolute/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+it("program descriptions and JSON examples are bounded trusted discovery, not binding authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "mechanistic-description-"));
+  try {
+    await writeFile(join(root, "job.py"), "raise RuntimeError('must not run during discovery')\n");
+    const binding = { python: "python3", script: "job.py", cwd: root };
+    const registration = (extra: Record<string, unknown>) => mergeMechanisticPrograms({}, { observer: { ...binding, ...extra } }, root).observer!;
+    const description = "é".repeat(128); const example = JSON.stringify({ x: "x".repeat(1016) });
+    assert.equal(Buffer.byteLength(example), 1024);
+    const valid = registration({ description, inputExamples: [example, "{}", '{"commit":"main"}'] });
+    assert.equal(valid.description, description); assert.equal(valid.inputExamples?.length, 3);
+    assert.equal(Object.hasOwn(parseMechanisticBinding(valid), "description"), false);
+    for (const value of [null, "", " ", 1, "é".repeat(129), "line\nbreak", "\u001b[0m", "bidi\u202e"]) assert.throws(() => registration({ description: value }), /description/);
+    for (const value of [null, {}, ["[]"], ["null"], ["bad"], [1], ["{}", "{}", "{}", "{}"], [JSON.stringify({ x: "x".repeat(1017) })]]) assert.throws(() => registration({ inputExamples: value }), /example/);
+    assert.deepEqual(registration({ inputExamples: [] }).inputExamples, []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

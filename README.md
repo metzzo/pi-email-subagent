@@ -74,7 +74,9 @@ The default policy is catalog-neutral:
 
 ## UI
 
-- `/agents` or `Ctrl+Shift+A`: open the live dashboard.
+- `/agents` or `Ctrl+Shift+A`: open the live dashboard (TUI).
+- `/agents programs` and `/agents program <name>`: discover registered Python programs.
+- `/agents run <program>.<task-slug> <JSON>`: run registered Python directly, including headless modes.
 - `/agents stop <address>`
 - `/agents restart <address>`
 - `/agents archive <address>`
@@ -170,5 +172,10 @@ Trusted global/trusted-project registrations can run Python jobs at
 `<program>.<task-slug>@mechanistic.com`. Each accepted notification is one job;
 Python identities have no inbox, reply obligations, model or effort. See the
 [registration, helper, examples and recovery guide](docs/mechanistic-usage.md).
+Register the shipped read-only GitHub observer once, then use
+`/agents run ci.main-status {}` or `pi -p '/agents run ci.main-status {}'` without
+an LLM dispatcher. Direct automatic outcomes do not start a model turn;
+agent-initiated mail keeps ordinary notification behavior. See the guide for
+exact-commit inputs, headless output and the fresh native-session limitation.
 Trusted Python is not sandboxed; cleanup covers the direct child, not all
 descendant or external effects.

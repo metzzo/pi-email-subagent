@@ -19,7 +19,8 @@ export interface PackResult {
 // Reviewed baseline: local 219906 compressed / 807752 unpacked bytes;
 // retained CI measured 220060 compressed. Round budgets provide real headroom,
 // while the exact inventory below prevents unrelated files silently shipping.
-export const PACKAGE_MAX_ENTRIES = 60;
+// UX adds exactly one reviewed read-only GitHub observer; byte budgets unchanged.
+export const PACKAGE_MAX_ENTRIES = 61;
 export const PACKAGE_MAX_SIZE_BYTES = 240_000;
 export const PACKAGE_MAX_UNPACKED_BYTES = 850_000;
 export const PACKAGE_PATHS = [
@@ -33,7 +34,7 @@ export const PACKAGE_PATHS = [
   "src/email-error.ts", "src/id.ts", "src/index.ts", "src/mail-store.ts", "src/main-mail-routing.ts",
   "src/main-tools.ts", "src/mechanistic-job.ts", "src/mechanistic.ts", "src/model-runtime.ts", "src/namespace-lock.ts",
   "src/pi-compat.ts", "src/prompts.ts", "src/python-process.ts", "src/python/examples/command.py",
-  "src/python/examples/status_file.py", "src/python/pi_mechanistic.py", "src/rate-limit.ts", "src/registry-store.ts",
+  "src/python/examples/status_file.py", "src/python/examples/github_ci.py", "src/python/pi_mechanistic.py", "src/rate-limit.ts", "src/registry-store.ts",
   "src/reply.ts", "src/runtime-timers.ts", "src/safe-summary.ts", "src/scheduler.ts", "src/sdk-worker.ts",
   "src/settings-snapshot.ts", "src/testing.ts", "src/tool-result.ts", "src/tool-schemas.ts", "src/types.ts",
   "src/ui.ts", "src/util.ts", "src/work-ledger.ts", "src/worker-extensions.ts", "src/worker-lifecycle.ts",
@@ -50,6 +51,7 @@ const REQUIRED_PATHS = [
   "src/python/pi_mechanistic.py",
   "src/python/examples/command.py",
   "src/python/examples/status_file.py",
+  "src/python/examples/github_ci.py",
   "docs/mechanistic-usage.md",
 ] as const;
 const FORBIDDEN_PATH = /^(?:test|scripts|\.github|plans)(?:\/|$)|(?:^|\/)__pycache__(?:\/|$)|\.py[co]$/;

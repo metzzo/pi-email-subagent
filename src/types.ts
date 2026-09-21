@@ -52,6 +52,8 @@ export interface EmailEnvelope {
   modelBindingIntent?: ModelBinding;
   /** Exact trusted script binding; accepted body remains opaque task input. */
   mechanisticBindingIntent?: MechanisticBinding;
+  /** Direct-command outcome presentation; absent preserves ordinary mail behavior. */
+  triggerTurn?: false;
 }
 
 export interface ParsedAddress {
@@ -250,7 +252,7 @@ export interface LlmAgentRecord {
 
 export type MechanisticCaller = "main" | "llm" | "mechanistic";
 export interface MechanisticBinding { key: string; python: string; script: string; cwd: string }
-export interface MechanisticProgram extends MechanisticBinding { allowedCallers: MechanisticCaller[] }
+export interface MechanisticProgram extends MechanisticBinding { allowedCallers: MechanisticCaller[]; description?: string; inputExamples?: string[] }
 export interface MechanisticAddress { kind: "mechanistic"; address: string; name: string; taskSlug: string; binding: MechanisticBinding }
 export type AgentAddress = ParsedAddress | MechanisticAddress;
 export type MechanisticResult = "success" | "task_failure" | "invalid_arguments" | "spawn_failure" | "crash" | "timeout" | "forced_stop" | "protocol_failure" | "missing_terminal" | "interrupted" | "abandoned";
@@ -270,6 +272,8 @@ export interface MechanisticJob {
   allowedCallers: MechanisticCaller[];
   lifecycle: LifecyclePolicy;
   phase: "queued" | "starting" | "running" | "stopping" | "terminal";
+  /** Accepted operator command: automatic outcome must never start a model turn. */
+  triggerTurn?: false;
   createdAt: string;
   updatedAt: string;
   generation?: number;
@@ -435,6 +439,8 @@ export interface MechanisticAgentInspection {
   binding: MechanisticBinding;
   allowedCallers: MechanisticCaller[];
   bindingReady: "available" | "unavailable";
+  description?: string;
+  inputExamples?: string[];
   state: AgentStatus | "new";
   currentActivity?: string;
   queued: number;
@@ -555,7 +561,7 @@ export interface MainAdapter {
   getAliases(): ReadonlySet<string>;
   isIdle(): boolean;
   deliver(delivery: MainDelivery): Promise<void>;
-  notifyFailure(message: string): void;
+  notifyFailure(message: string, options?: { triggerTurn?: boolean }): void;
   updateState(snapshot: BrokerSnapshot): void;
 }
 

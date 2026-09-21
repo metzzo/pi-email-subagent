@@ -186,7 +186,7 @@ export function effectiveRoleToolSummary(config: SubagentConfig): string {
 export function mechanisticPrompt(config: SubagentConfig, caller: "main" | "llm"): string {
   const programs = Object.values(config.mechanisticPrograms).filter((program) => program.allowedCallers.includes(caller));
   if (!programs.length) return "";
-  return `\nConfigured send-only Python programs (trusted code, not sandboxed):\n${programs.map((program) => `- ${program.key}.<task-slug>@mechanistic.com`).join("\n")}\nUse send_email with a program's documented JSON input as a new notification (requires_response omitted or false). No reply_to, legacy reply, completion, effort, inbox, or script follow-up exists. One accepted ID is one job; high changes queue order only. Outcomes are non-correlated notifications to main, never response obligations. LLM-to-LLM nested delegation remains unsupported.\n`;
+  return `\nSend-only Python (trusted, not sandboxed): ${programs.map((program) => `${program.key}.<task-slug>@mechanistic.com`).join(", ")}.\nUse send_email with JSON input; ${caller === "main" ? "inspect_agent shows examples" : "ask main for input examples"}. No response/reply/completion/effort/inbox. One accepted ID is one job; never resend/replay possibly started work. High only orders the queue. Outcomes notify main, not wait_for_replies. LLM-to-LLM nesting remains unsupported.\n`;
 }
 
 export function mainCoordinatorPrompt(

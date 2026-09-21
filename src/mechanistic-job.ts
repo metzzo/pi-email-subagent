@@ -45,6 +45,10 @@ export function parseJob(value: unknown): MechanisticJob {
     lifecycle[key] = value as number;
   }
   const job: MechanisticJob = { id: text("id"), address, binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers), lifecycle, phase, createdAt: text("createdAt"), updatedAt: text("updatedAt"), stderr: typeof raw.stderr === "string" && Buffer.byteLength(raw.stderr) <= PROTOCOL_BYTES ? raw.stderr : "" };
+  if (raw.triggerTurn !== undefined) {
+    if (raw.triggerTurn !== false) throw new Error("Invalid direct-command presentation choice.");
+    job.triggerTurn = false;
+  }
   if (typeof raw.stderr !== "string" || Buffer.byteLength(raw.stderr) > PROTOCOL_BYTES) throw new Error("Invalid stderr tail.");
   if (![job.createdAt, job.updatedAt].every((at) => Number.isFinite(Date.parse(at)))) throw new Error("Invalid job timestamp.");
   for (const key of ["generation", "pid"] as const) {
@@ -95,14 +99,15 @@ export function outcomeText(job: MechanisticJob, artifactLimit = MAX_ARTIFACTS, 
   const omitted = (job.reported?.artifacts.length ?? 0) - artifacts.length;
   const shortened = (job.reported?.summary.length ?? 0) > summaryLimit;
   return [
-    `Job ${job.id} · ${job.address}`,
-    `Runtime: ${job.result}. Script report: ${job.reported?.status ?? "none"}.`,
     job.reported && summaryLimit > 0 ? truncateText(job.reported.summary, summaryLimit) : undefined,
-    job.abandoned ? `Abandoned before start by ${job.abandoned.by}; audit reason remains in the job journal.` : undefined,
-    `Direct-child cleanup: ${job.cleanup?.state}; child exited: ${job.cleanup?.childExited}; pipes closed: ${job.cleanup?.pipesClosed}.`,
-    `Exit: ${job.exitCode ?? "unknown"}; signal: ${job.signal ?? "none"}.`,
-    "This notification is not a reply. It creates no response obligation. Detached descendants and remote effects are not covered by cleanup proof.",
     artifacts.length ? `Artifact references (not verified): ${JSON.stringify(artifacts)}` : undefined,
+    `Job ${job.id}. Runtime: ${job.result}. Script report: ${job.reported?.status ?? "none"}.`,
+    job.abandoned ? `Abandoned before start by ${job.abandoned.by}; audit reason remains in the job journal.` : undefined,
+    job.cleanup?.state === "confirmed"
+      ? "Direct-child cleanup: confirmed; child exited and pipes closed."
+      : `Direct-child cleanup: ${job.cleanup?.state}; child exited: ${job.cleanup?.childExited}; pipes closed: ${job.cleanup?.pipesClosed}. Never replay; inspect evidence before explicit clear_failure.`,
+    job.result !== "success" || job.signal ? `Exit: ${job.exitCode ?? "unknown"}; signal: ${job.signal ?? "none"}.` : undefined,
+    "Notification only; no reply obligation. Detached/remote effects are not covered. Full evidence: inspect this job.",
     omitted || shortened ? `Notification shortened: ${omitted} artifact references omitted${shortened ? "; summary shortened or omitted" : ""}. Full evidence remains in the job journal; inspect job ${job.id}.` : undefined,
   ].filter(Boolean).join("\n");
 }

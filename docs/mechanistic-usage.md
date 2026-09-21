@@ -45,7 +45,79 @@ than shadowing another program. `mechanistic.com` is reserved, including main
 and legacy/persisted model collisions. Existing identities keep their exact
 bindings: restore the original configuration rather than silently rebinding.
 
-## Invoke
+## Direct commands and CI status
+
+Register the shipped observer once using your actual package and checkout paths:
+
+```json
+{
+  "mechanisticPrograms": {
+    "ci": {
+      "python": "python3",
+      "script": "/opt/pi-email-subagent/src/python/examples/github_ci.py",
+      "cwd": "/absolute/path/to/repository",
+      "description": "Observe GitHub Actions for an exact commit; never change CI",
+      "inputExamples": ["{}", "{\"commit\":\"main\"}"]
+    }
+  }
+}
+```
+
+Discover and invoke without an LLM dispatcher:
+
+```text
+/agents programs
+/agents program ci
+/agents run ci.main-status {}
+/agents run ci.release-check {"commit":"main"}
+```
+
+Descriptions are optional safe single-line text, at most 256 UTF-8 bytes. Input
+examples are optional JSON-object **strings**, at most three of 1024 bytes each;
+inspection displays the JSON itself for copying. Discovery does not spawn work
+or change binding authority. Examples are not repeated in every model prompt.
+
+The observer requires `git` and authenticated `gh` on the trusted PATH. `{}` uses
+the repository and current commit in the registered cwd, not the caller's cwd.
+Optional `repository` is `owner/repo`; optional `commit` is a commit ID or ref
+resolved through GitHub. Every observation names the exact checked commit and
+provides links. It reads at most 100 GitHub Actions runs, flags partial results,
+and distinguishes failed, pending, passed, other, and absent runs. **A successful
+observation does not mean CI passed.** Other CI providers are not observed.
+The program never reruns, dispatches, cancels or changes GitHub work, and sends
+no explicit email. Each child command has a 20-second deadline and 1 MiB captured
+output limit; the registered job lifecycle still applies.
+
+Direct commands use the existing durable mail/job path. Acceptance shows one
+job ID and actual state, not completion. The TUI returns after acceptance and
+uses the existing progress/dashboard and outcome views. Headless commands wait
+for that exact job's terminal record, outcome delivery and finalization authority
+to settle. The finite command deadline is 60 seconds plus the job's spawn, run,
+abort and dispose deadlines. A timeout or observation/delivery error retains the
+accepted ID and no-resend guidance; it does not authorize replay.
+
+```sh
+pi -p '/agents run ci.main-status {}'
+pi --mode json '/agents run ci.main-status {}'
+```
+
+Print mode writes command receipts and direct results to stdout. JSON and RPC
+expose displayed custom messages with structured details; in RPC send the command
+as a `prompt`. Do not wait for `agent_settled`: these commands and their automatic
+outcomes do not start a model turn. This presentation choice is journaled and
+survives busy-main delivery, stop and restoration. Agent-initiated `send_email`
+keeps ordinary completion-notification behavior. A trusted program's explicit
+mail to an LLM is still ordinary authorized mail; the CI observer never sends it.
+
+Pi 0.85.1 does not persist a fresh native session file until an assistant message
+exists. A zero-model direct command still journals its job under
+`<agent-dir>/subagents/<session-id>/mail.jsonl`, but that alone does not create a
+resumable native Pi session. Structured acceptance includes the session ID/path
+and whether that file currently exists. Use an already-persisted Pi session when
+ordinary session resume is needed; this extension does not synthesize assistant
+messages or write native session files to work around the host limitation.
+
+## Agent-initiated invocation
 
 ```json
 {
@@ -104,7 +176,9 @@ combined in one report.
 ## Outcome size and main queue capacity
 
 Automatic outcomes use the same subject/body and escaped, formatted byte/line
-limits as ordinary main notifications. Small outcomes are unchanged. If needed,
+limits as ordinary main notifications. Outcomes lead with the script's observation
+and artifact references, then runtime/report and direct-child cleanup evidence.
+If needed,
 the broker omits artifact references, then shortens the summary, with an omitted
 count and job ID; very small limits receive a job-journal pointer instead. This
 changes only the derived notification. The complete script report and artifacts
@@ -207,7 +281,10 @@ stop/shutdown races, and fresh Pi owner loss at acceptance, start, running,
 script-effect, and terminal/outcome commit boundaries. The package smoke executes
 the installed helper and example through a fresh Pi process. LLM routing/result
 loop tests use a local deterministic provider: they prove routing, not live-model
-behavior.
+behavior. CI observer fixture tests substitute only GitHub responses behind a
+local HTTPS/proxy endpoint while using real git, gh, Python and broker behavior;
+these are not evidence of an actual GitHub observation. Live GitHub verification
+is separately opt-in and read-only.
 
 These tests do not simulate power loss, interrupt an individual kernel write or
 fsync, or prove detached/remote effects have settled. A stable journaled outcome

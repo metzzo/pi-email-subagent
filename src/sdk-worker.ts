@@ -43,7 +43,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     name: "send_email",
     label: "Send email",
     description:
-      "Send virtual email to another Pi agent. Sender identity is automatic. Use reply_to plus structured completion to answer. Worker-to-main new mail defaults to a notification; set requires_response only for a real request. Unknown valid recipients spawn; optional effort applies only to that initial creation." + (config.mechanisticPrompt ?? ""),
+      "Send virtual email to another Pi agent. Sender identity is automatic. Use reply_to plus structured completion to answer. Worker-to-main new mail defaults to a notification; set requires_response only for a real request. Unknown valid recipients spawn; optional effort applies only to that initial creation.",
     promptSnippet: "Send internal mail to persistent subagents; unknown valid addresses spawn.",
     promptGuidelines: [
       "Use low-priority email by default; high is only for blockers that should change ongoing work.",
@@ -56,6 +56,12 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
       try {
         if (signal?.aborted) throw new EmailProtocolError("EMAIL_NOT_ACCEPTED", "Email send aborted before acceptance.");
         const result = await config.sendEmail(params as SendEmailInput, signal);
+        if (result.recipientKind === "mechanistic") return textResult([
+          `Python job accepted: ${result.envelope.id} · ${result.envelope.to} · ${result.recipientState ?? result.envelope.deliveryState}.`,
+          result.deliveryUncertain ? `Delivery uncertain (${result.deliveryUncertain.code}): ${result.deliveryUncertain.detail}` : undefined,
+          "Acceptance is not completion. Inspect this ID; never resend/replay possibly started work.",
+          ["failed", "stopped"].includes(result.recipientState ?? "") ? "Recipient is inactive; review job/cleanup evidence before explicit recovery." : undefined,
+        ].filter(Boolean).join("\n"), { result } satisfies SendToolDetails);
         const lines = [
           "Email accepted.",
           `ID: ${result.envelope.id}`,
@@ -75,10 +81,7 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
           if (result.envelope.completion.warning) lines.push(`Completion warning: ${result.envelope.completion.warning}`);
         }
         if (result.deliveryUncertain) lines.push(`Delivery recovery: ${result.deliveryUncertain.detail}`);
-        if (result.recipientKind === "mechanistic") {
-          lines.push(`Send-only Python job: ${result.envelope.id}; binding ${JSON.stringify(result.recipientBinding)}. Acceptance is not completion. High queues only; inspect job evidence and never replay possibly started work.`);
-        }
-        if (result.recipientDisposition === "failed" && result.recipientKind !== "mechanistic") {
+        if (result.recipientDisposition === "failed") {
           lines.push(result.recipientCleanup
             ? "Recipient recovery: mail is accepted and queued, but Pi session/tool cleanup settlement is unknown. Restart/archive are blocked only for this exact address until the live cleanup settles. Do not resend or redelegate the original scope."
             : "Recipient recovery: mail is accepted and queued; the recipient remains failed and no worker was spawned. Review Work and Conversation, then use explicit manage_agent restart for the same identity and provider binding only after effect review. Do not redelegate the same scope while the original obligation remains open.");

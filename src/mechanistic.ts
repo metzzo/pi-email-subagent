@@ -6,6 +6,9 @@ export const MECHANISTIC_MODEL_ID = "mechanistic";
 export const MECHANISTIC_DOMAIN = "mechanistic.com";
 export const MAX_MECHANISTIC_PROGRAMS = 32;
 export const MAX_MECHANISTIC_PATH_BYTES = 4096;
+export const MAX_PROGRAM_DESCRIPTION_BYTES = 256;
+export const MAX_PROGRAM_EXAMPLES = 3;
+export const MAX_PROGRAM_EXAMPLE_BYTES = 1024;
 export const PROTOCOL_BYTES = 64 * 1024;
 export const SUMMARY_BYTES = 4 * 1024;
 export const ARTIFACT_BYTES = 2 * 1024;
@@ -82,7 +85,7 @@ export function mergeMechanisticPrograms(
     if (!NAME.test(key)) throw new Error("Invalid mechanistic program name.");
     if (Object.hasOwn(result, key)) throw new Error(`Duplicate canonical mechanistic program ${key}.`);
     const raw = object(value);
-    if (Object.keys(raw).some((field) => !["python", "script", "cwd", "allowedCallers"].includes(field))) {
+    if (Object.keys(raw).some((field) => !["python", "script", "cwd", "allowedCallers", "description", "inputExamples"].includes(field))) {
       throw new Error(`Unknown registration field for mechanistic program ${key}.`);
     }
     const executable = pathText(raw.python);
@@ -99,7 +102,19 @@ export function mergeMechanisticPrograms(
     // interpreter symlink changes sys.prefix and its import environment.
     const binding = parseMechanisticBinding({ key, python, script: resolve(baseDir, pathText(raw.script)), cwd: resolve(baseDir, pathText(raw.cwd ?? ".")) });
     preflightMechanisticBinding(binding);
-    result[key] = { ...binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers) };
+    const description = raw.description;
+    if (description !== undefined && (typeof description !== "string" || !description.trim() || Buffer.byteLength(description) > MAX_PROGRAM_DESCRIPTION_BYTES || /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(description))) {
+      throw new Error(`Program description must be safe single-line text of at most ${MAX_PROGRAM_DESCRIPTION_BYTES} UTF-8 bytes.`);
+    }
+    const inputExamples = raw.inputExamples;
+    if (inputExamples !== undefined) {
+      if (!Array.isArray(inputExamples) || inputExamples.length > MAX_PROGRAM_EXAMPLES) throw new Error(`At most ${MAX_PROGRAM_EXAMPLES} input examples are allowed.`);
+      for (const example of inputExamples) {
+        if (typeof example !== "string" || Buffer.byteLength(example) > MAX_PROGRAM_EXAMPLE_BYTES) throw new Error(`Each input example must be a JSON object string of at most ${MAX_PROGRAM_EXAMPLE_BYTES} UTF-8 bytes.`);
+        try { object(JSON.parse(example)); } catch { throw new Error("Each input example must encode a JSON object."); }
+      }
+    }
+    result[key] = { ...binding, allowedCallers: parseMechanisticCallers(raw.allowedCallers), ...(description === undefined ? {} : { description }), ...(inputExamples === undefined ? {} : { inputExamples: [...inputExamples] as string[] }) };
   }
   return result;
 }

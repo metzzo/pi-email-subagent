@@ -104,6 +104,8 @@ export function createMainCoordinationTools(
           return textResult([
             `Send-only Python agent: ${inspection.address} · ${inspection.state}`,
             `Allowed callers: ${inspection.allowedCallers.join(", ")}`,
+            inspection.description ? `Program: ${inspection.description}` : undefined,
+            ...(inspection.inputExamples ?? []).map((example) => `Input example: ${example}`),
             `Identity capacity: ${inspection.capacity.identitiesUsed}/${inspection.capacity.identitiesLimit}; run slots: ${inspection.capacity.runSlotsUsed}/${inspection.capacity.runSlotsLimit}`,
             `Queued jobs: ${inspection.queued}; cleanup unknown: ${inspection.cleanupUnknown}; archive eligible: ${inspection.archiveEligible}`,
             `Lifecycle: ${JSON.stringify(inspection.lifecycle)}`,
@@ -119,7 +121,7 @@ export function createMainCoordinationTools(
             ...recent.filter((job) => job.stderr).slice(0, 3).map((job) =>
               `stderr tail ${job.id} (${byteLength(job.stderr)} retained bytes): ${JSON.stringify(job.stderr.slice(-512))}`),
             `Binding (${inspection.bindingReady}): ${JSON.stringify(inspection.binding)}`,
-          ].join("\n"), { inspection } satisfies InspectAgentToolDetails);
+          ].filter((line) => line !== undefined).join("\n"), { inspection } satisfies InspectAgentToolDetails);
         }
         const lines = [
           `${inspection.exists ? "Existing" : "Prospective"} agent: ${inspection.address}`,

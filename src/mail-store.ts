@@ -130,6 +130,10 @@ function parseEmail(value: unknown): EmailEnvelope {
     const parsed = optionalString(raw[key], label);
     if (parsed !== undefined) (email as unknown as Record<string, unknown>)[key] = parsed;
   }
+  if (raw.triggerTurn !== undefined) {
+    if (raw.triggerTurn !== false || !isMechanisticAddress(email.from) || !email.to.startsWith("main@") || email.kind !== "notification") throw new Error("Invalid direct-command outcome presentation.");
+    email.triggerTurn = false;
+  }
   if (raw.mechanisticBindingIntent !== undefined) {
     const binding = parseMechanisticBinding(raw.mechanisticBindingIntent);
     if (!isMechanisticAddress(email.to) || parseSubagentAddressShape(email.to).name !== binding.key) throw new Error("Mechanistic binding does not match recipient.");
@@ -224,6 +228,7 @@ function sameCreatedEmail(left: EmailEnvelope, right: EmailEnvelope): boolean {
     && left.inReplyTo === right.inReplyTo
     && JSON.stringify(left.completion) === JSON.stringify(right.completion)
     && left.requiresResponse === right.requiresResponse
+    && left.triggerTurn === right.triggerTurn
     && left.createdAt === right.createdAt
     && JSON.stringify(left.lifecycleIntent) === JSON.stringify(right.lifecycleIntent)
     && left.effortIntent === right.effortIntent
@@ -325,7 +330,8 @@ export class MailStore {
       const trigger = this.emails.get(job.id);
       if (!trigger || trigger.to !== job.address || !trigger.mechanisticBindingIntent) throw new Error("Job trigger/binding missing from journal.");
       if (event.type === "job.queued" && (job.phase !== "queued" || event.email?.id !== job.id || this.jobs.has(job.id))) throw new Error("Invalid queued job event.");
-      if (event.type === "job.terminal" && (job.phase !== "terminal" || !event.email || event.email.id !== job.outcomeMailId || event.email.kind !== "notification" || event.email.inReplyTo || event.email.requiresResponse)) throw new Error("Invalid job outcome notification.");
+      if (event.type === "job.terminal" && (job.phase !== "terminal" || !event.email || event.email.id !== job.outcomeMailId || event.email.kind !== "notification" || event.email.inReplyTo || event.email.requiresResponse || event.email.triggerTurn !== job.triggerTurn)) throw new Error("Invalid job outcome notification.");
+      if (job.phase === "terminal" && this.emails.get(job.outcomeMailId!)?.triggerTurn !== job.triggerTurn) throw new Error("Job/outcome presentation mismatch.");
       if (event.type === "job.updated" || event.type === "job.terminal") this.assertJobTransition(job);
       if (job.result === "abandoned") {
         trigger.deliveryState = "cancelled"; trigger.cancelledAt = job.updatedAt;
@@ -521,7 +527,7 @@ export class MailStore {
   private assertJobTransition(job: MechanisticJob): void {
     const prior = this.jobs.get(job.id);
     if (!prior || prior.phase === "terminal" || job.phase === "queued"
-      || prior.address !== job.address || JSON.stringify(prior.binding) !== JSON.stringify(job.binding)
+      || prior.address !== job.address || JSON.stringify(prior.binding) !== JSON.stringify(job.binding) || prior.triggerTurn !== job.triggerTurn
       || (prior.phase === "queued" && job.phase !== "starting" && job.result !== "abandoned")
       || (job.result === "abandoned" && (prior.phase !== "queued" || prior.generation !== undefined || this.emails.get(job.id)?.deliveryState !== "queued"))
       || (prior.phase !== "queued" && prior.generation !== job.generation)
@@ -547,7 +553,7 @@ export class MailStore {
         return [];
       }
       this.assertJobTransition(parsed);
-      if (parsed.phase !== "terminal" || parsed.outcomeMailId !== email.id || email.kind !== "notification" || email.requiresResponse || email.inReplyTo) throw new Error("Invalid outcome.");
+      if (parsed.phase !== "terminal" || parsed.outcomeMailId !== email.id || email.kind !== "notification" || email.requiresResponse || email.inReplyTo || email.triggerTurn !== parsed.triggerTurn) throw new Error("Invalid outcome.");
       return [{ type: "job.terminal", job: parsed, email }];
     });
   }

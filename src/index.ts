@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { existsSync, writeFileSync } from "node:fs";
 import type { Model } from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -9,7 +10,9 @@ import { DEFAULT_MODEL_POLICY, isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
 import { assertExtensionApiFeatures, assertSupportedPiRuntime } from "./pi-compat.ts";
-import { budgetPromptAdditions, formatAlert, mainCoordinatorPrompt, mechanisticPrompt } from "./prompts.ts";
+import { budgetPromptAdditions, formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
+import { isMechanisticAddress } from "./mechanistic.ts";
+import { deadlineSignal, lifecycleDuration } from "./runtime-timers.ts";
 import { createWorkerMailTools, type FetchToolDetails, type SendToolDetails, SdkWorker } from "./sdk-worker.ts";
 import { safeErrorSummary } from "./safe-summary.ts";
 import { WorkerSettingsSnapshot } from "./settings-snapshot.ts";
@@ -30,6 +33,7 @@ const { getAgentDir } = PiCodingAgent;
 const { Box, Key, Text } = PiTui;
 const MESSAGE_TYPE = "pi-email-subagent.email";
 const ALERT_TYPE = "pi-email-subagent.alert";
+const COMMAND_TYPE = "pi-email-subagent.command";
 
 function availableModels(ctx: ExtensionContext): Model<any>[] {
   const models = [...ctx.modelRegistry.getAvailable()];
@@ -59,6 +63,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   let generation = 0;
   let mainFlushTimer: ReturnType<typeof setTimeout> | undefined;
   const conversationSources = new Map<string, ConversationSource>();
+  const commandChecks = new Set<() => void>();
 
   const cancelMainFlush = (): void => {
     if (mainFlushTimer) clearTimeout(mainFlushTimer);
@@ -225,14 +230,76 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     return box;
   });
 
+  pi.registerMessageRenderer(COMMAND_TYPE, (message, _options, theme) =>
+    new Text(theme.fg("toolOutput", sanitizeConversationBody(String(message.content))), 0, 0));
+
+  function commandOutput(ctx: ExtensionContext, content: string, details?: unknown): void {
+    const text = sanitizeConversationBody(content);
+    pi.sendMessage({ customType: COMMAND_TYPE, content: text, display: true, details }, { triggerTurn: false });
+    // Pi 0.85.1 prints only assistant text and redirects process.stdout.write
+    // to stderr. Write bounded command text to fd 1 only in print mode.
+    if (ctx.mode === "print") writeFileSync(1, `${text}\n`);
+  }
+
+  // A command-local observation, not a mailbox wait API. Synchronous checks
+  // never acquire broker locks or await the callback that is publishing them.
+  async function finishDirectCommand(active: AgentBroker, id: string, timeoutMs: number): Promise<void> {
+    const deadline = deadlineSignal(timeoutMs);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const finish = (error?: Error): void => { commandChecks.delete(check); error ? reject(error) : resolve(); };
+        const check = (): void => {
+          try {
+            if (broker !== active) return finish(new Error(`Job ${id} was accepted; session replaced. Inspect this exact ID; do not resend or replay.`));
+            const { job, settled } = active.inspectMechanisticJob(id);
+            if (settled && job.outcomeDeliveryState === "delivered") return finish();
+            if (settled && job.outcomeDeliveryState === "failed") return finish(new Error(`Job ${id}: ${job.result}; outcome delivery failed. Inspect this ID; do not resend or replay.`));
+            const inspection = active.inspectAgent(job.address);
+            if (job.phase === "queued" && ["stopped", "failed", "paused"].includes(inspection.state)) return finish(new Error(`Job ${id} remains queued; recipient ${inspection.state}. Inspect this ID and cleanup evidence before explicit recovery; do not resend.`));
+          } catch {
+            // Observation must never throw back into broker publication,
+            // retention or lifecycle callbacks, including another job's run.
+            finish(new Error(`Job ${id} was accepted; command observation failed. Inspect this exact ID; do not resend or replay.`));
+          }
+        };
+        commandChecks.add(check);
+        void deadline.promise.then(() => finish(new Error(`Job ${id} was accepted; command deadline expired before terminal/delivery/cleanup settlement. Inspect this exact ID; do not resend or replay.`)));
+        check();
+      });
+    } finally { deadline.cancel(); }
+  }
+
   async function showAgents(args: string, ctx: ExtensionContext): Promise<void> {
-    if (ctx.mode !== "tui") {
-      throw new Error("/agents is available only in TUI mode. Use inspect_agent and manage_agent in RPC or print mode.");
-    }
     const parts = args.trim().split(/\s+/).filter(Boolean);
     const action = parts[0];
+    if (ctx.mode !== "tui" && !["run", "program", "programs"].includes(action ?? "")) {
+      throw new Error("/agents is available only in TUI mode for dashboard/control. Use inspect_agent and manage_agent, or /agents run, /agents programs and /agents program for direct headless Python work.");
+    }
     try {
       const active = await ensureBroker(ctx);
+      if (action === "run") {
+        currentContext = ctx;
+        const match = /^run\s+(\S+)\s+([\s\S]+)$/.exec(args.trim());
+        if (!match) throw new Error("Usage: /agents run <program>.<task-slug> <JSON input>");
+        const address = match[1]!.includes("@") ? match[1]! : `${match[1]}@mechanistic.com`;
+        if (!isMechanisticAddress(address)) throw new Error("/agents run accepts registered Python programs only; use send_email for LLM agents.");
+        // Keep the body opaque: Python validates JSON only after durable acceptance.
+        const sent = await active.send(active.mainAddress, { to: address, subject: `Run ${match[1]}`, message: match[2]!, priority: "low" }, undefined, undefined, { triggerTurn: false });
+        const { job } = active.inspectMechanisticJob(sent.envelope.id);
+        commandOutput(ctx, `Python job accepted: ${job.id} · ${job.address} · ${job.phase} (recipient ${sent.recipientState}). Acceptance is not completion; do not resend/replay.`, { jobId: job.id, address: job.address, phase: job.phase, recipientState: sent.recipientState, sessionId: ctx.sessionManager.getSessionId(), sessionFile: ctx.sessionManager.getSessionFile(), sessionFilePersisted: Boolean(ctx.sessionManager.getSessionFile() && existsSync(ctx.sessionManager.getSessionFile()!)) });
+        if (ctx.mode !== "tui") await finishDirectCommand(active, job.id, lifecycleDuration(60_000, job.lifecycle.spawnTimeoutMs, job.lifecycle.runTimeoutMs, job.lifecycle.abortTimeoutMs, job.lifecycle.disposeTimeoutMs));
+        return;
+      }
+      if (action === "programs" || action === "program") {
+        const programs = Object.values(effectiveConfig?.mechanisticPrograms ?? {}).filter((program) => program.allowedCallers.includes("main"));
+        if (action === "programs") commandOutput(ctx, programs.map((program) => `${program.key}: ${program.description ?? "registered Python program"}`).join("\n") || "No Python programs registered for main.");
+        else {
+          const program = programs.find((program) => program.key === parts[1]);
+          if (!program) throw new Error("Usage: /agents program <registered name>; discover names with /agents programs.");
+          commandOutput(ctx, [`${program.key}: ${program.description ?? "registered Python program"}`, `Binding: ${JSON.stringify({ python: program.python, script: program.script, cwd: program.cwd })}`, ...(program.inputExamples ?? []).map((example) => `Input example: ${example}`), `Run: /agents run ${program.key}.<task-slug> <JSON input>`].join("\n"), { program });
+        }
+        return;
+      }
       if (action === "stop" && parts[1]) {
         await active.stop(parts[1]);
         ctx.ui.notify(`Stopped ${parts[1]}.`, "info");
@@ -257,12 +324,13 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
         await ui.showDashboard(ctx, active, action);
       }
     } catch (error) {
-      ctx.ui.notify(errorMessage(error), "error");
+      if (["run", "program", "programs"].includes(action ?? "") || ctx.mode !== "tui") commandOutput(ctx, `Command failed: ${errorMessage(error)}`, { error: true });
+      else ctx.ui.notify(errorMessage(error), "error");
     }
   }
 
   pi.registerCommand("agents", {
-    description: "Inspect/control subagents: /agents [address|stop|restart|archive|cancel|clear-failure|effort]",
+    description: "Python: /agents run <program>.<task-slug> <JSON> | programs | program <name>; TUI: inspect/control agents",
     handler: showAgents,
   });
 
@@ -308,7 +376,6 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     }
     const configResult = loadConfig(agentDir, ctx.cwd, projectTrusted);
     effectiveConfig = configResult.config;
-    registerSend(sendTool.description + mechanisticPrompt(effectiveConfig, "main"));
     for (const warning of configResult.warnings) ctx.ui.notify(warning, "warning");
     budgetPromptAdditions(effectiveConfig.modelPolicy, undefined, ctx.model);
     mainAddress = makeMainAddress(ctx.model.id);
@@ -331,21 +398,24 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
             ? { triggerTurn: true, deliverAs: envelope.priority === "high" ? "steer" : "followUp" }
             : { triggerTurn: false },
         );
+        if (!triggerTurn && ctx.mode === "print") writeFileSync(1, `${sanitizeConversationBody(envelope.message)}\n`);
       },
-      notifyFailure(message) {
+      notifyFailure(message, { triggerTurn = true } = {}) {
         if (generation !== myGeneration) return;
         try {
           currentContext?.ui.notify(message, "error");
           pi.sendMessage(
             { customType: ALERT_TYPE, content: formatAlert(message), display: true, details: { message } },
-            { triggerTurn: true, deliverAs: "steer" },
+            triggerTurn ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: false },
           );
+          if (!triggerTurn && ctx.mode === "print") writeFileSync(1, `${sanitizeConversationBody(message)}\n`);
         } catch { /* stale runtime */ }
       },
       updateState(snapshot: BrokerSnapshot) {
         if (generation !== myGeneration) return;
         latestBrokerSnapshot = snapshot;
         ui.update(snapshot);
+        for (const check of commandChecks) check();
         refreshConversationSources(snapshot, myGeneration).catch(() => undefined);
       },
     };
@@ -485,6 +555,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     unsettledBroker = undefined;
     brokerStartup = undefined;
     currentContext = undefined;
+    for (const check of commandChecks) check();
     effectiveConfig = undefined;
     latestBrokerSnapshot = undefined;
     conversationSources.clear();
