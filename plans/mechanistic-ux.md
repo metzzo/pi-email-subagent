@@ -1,6 +1,6 @@
 # Mechanistic subagent UX — approved plan
 
-Status: approved for implementation; not implemented by this document.
+Status: implemented and verified on `feat/mechanistic-ux`; no merge, push, publish, or CI mutation was performed.
 Base: main `17febc8`. Worktree branch: `feat/mechanistic-ux`.
 
 ## Goal and observed baseline
@@ -68,6 +68,47 @@ are dispatcher measurements, not the total cost of the surrounding conversation.
   interactive/headless semantics rather than substituting final prose markers.
 - Real GitHub inspection is read-only and opt-in for live verification. No reruns,
   dispatches, deployments, workflow cancellations, or remote state changes.
+
+## Implemented and verified result
+
+- The package ships `github_ci.py`, bounded program discovery, and
+  `/agents run <program>.<task> <JSON>` over the existing broker/mail/job
+  authorities. Print, JSON, RPC, and TUI paths use no dispatcher turn. Acceptance,
+  progress, terminal outcome, delivery, cleanup, and exact IDs remain durable.
+- Fresh real-Pi tests count `before_provider_request` and lifecycle events. Direct
+  runs observed zero provider requests and zero agent lifecycle events. Packed
+  installation discovery runs the installed extension and installed Python script,
+  with terminal job/outcome, confirmed child/pipes cleanup, no pending job, and a
+  gone child PID.
+- A genuine persisted Pi session uses one explicit bootstrap provider request,
+  then accepts a long-running direct job, stops during execution, and restores the
+  same session. The canonical job is `forced_stop` with confirmed SIGTERM cleanup;
+  its exact outcome is delivered with `triggerTurn:false`, the effect occurs once,
+  and the measured stop/restore window adds zero provider requests.
+- Identical projection fixtures measure UTF-8 bytes, not tokens: prompt 4,027;
+  `send_email` description 306; acceptance receipt 172; outcome 473; formatted
+  outcome 676. The separate historical dispatcher session used three assistant
+  responses and 12,369 model-reported tokens (4,718 uncached input, 7,296 cached
+  input, 355 output); no savings percentage is inferred.
+- The reviewed npm artifact contains exactly 59 files and measures 215,134 bytes
+  compressed / 796,613 unpacked. The original limits remain 60 entries, 220,000
+  compressed bytes, and 850,000 unpacked bytes. The two historical mechanistic
+  design/review records remain in Git but are excluded from npm and linked to
+  their repository source; the earlier 240,000-byte rebaseline was reverted as
+  unauthorized.
+- Read-only authenticated GitHub evidence for `metzzo/pi-email-subagent` commit
+  `17febc848812eedf91b79ed550050c1b4aba0dea` observed 1 failed, 0 pending,
+  6 passed, and 0 other runs. Failed links are selected before pending, passed,
+  and other links. Completion means the observation succeeded, not that CI passed.
+  Final evidence uses one immutable per-run artifact plus an atomic latest pointer,
+  written only after bounded cleanup reaches its final state.
+- Deterministic final gates cover 611 tests in 38 suites, including 75 real-Pi E2E
+  tests in 5 suites, all 33 source coverage thresholds, type checking, the
+  four-package production-license policy, exact package policy, and packed install
+  smoke. Retained logs live under `.test-workspaces/mechanistic-ux/`.
+- The historical macOS job stopped during coverage testing without an uploaded
+  failure artifact. Its cause remains unverified; Linux or local success is not
+  presented as macOS evidence.
 
 ## CI baseline evidence (separate from UX)
 

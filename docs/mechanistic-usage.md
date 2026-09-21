@@ -275,6 +275,23 @@ physical Pi close. A failed run retains only bounded structural diagnostics and
 its isolated paths—never credentials, provider stderr, full messages, session
 transcripts, or hidden reasoning. No external or destructive action is performed.
 
+The read-only GitHub observer has a separate opt-in check:
+
+```sh
+LIVE_GITHUB_CI=1 npm run test:live:mechanistic-ci
+```
+
+It uses authenticated real `gh`, real `git`, the packaged observer, and GitHub's
+network against the fixed evidence commit named by the harness. It never reruns,
+dispatches, cancels, or changes CI. Each invocation writes one immutable bounded
+artifact under `.test-workspaces/mechanistic-ux/` only after bounded cleanup is
+final, then atomically updates `live-mechanistic-ci-latest.json` as a pointer to
+that artifact. A completed observation is still not a claim that CI passed.
+Read-only evidence for `metzzo/pi-email-subagent` commit
+`17febc848812eedf91b79ed550050c1b4aba0dea` observed 1 failed, 0 pending,
+6 passed, and 0 other runs. The retained historical macOS job log did not expose
+its test failure, so that cause remains unverified.
+
 ## Validation limits
 
 Automated tests use real Python processes and disposable files. They cover

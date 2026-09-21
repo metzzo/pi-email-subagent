@@ -10,6 +10,7 @@ Initial `0.1.0` release candidate (unpublished).
 
 - Add trusted Python-backed `mechanistic.com` identities with fixed global or trusted-project registration, durable send-only jobs, bounded JSONL progress/mail/outcome protocol, direct-child lifecycle evidence, inspection/UI support, packaged helper and safe examples, and no model/effort/inbox/reply surface.
 - Add exact queued-job abandonment through the existing audited `cancel_request` surface, busy-main outcome reservations and bounded projections, no-replay crash restoration, virtualenv-preserving interpreter selection, reusable real-Pi deterministic E2E, and an opt-in real Luna evidence chain.
+- Add bounded `/agents` program discovery and zero-model direct execution, including the packaged read-only GitHub Actions observer, finite headless completion, concise durable acceptance/outcome views, and failure-first bounded CI links.
 
 ### Fixed
 
