@@ -55,7 +55,7 @@ it(
       const mark = client.mark();
       await client.prompt("/agents programs");
       await client.waitFor(
-        (line) => line.type === "agent_settled",
+        (line) => line.type === "response" && line.command === "prompt",
         "programs",
         30_000,
         mark,
@@ -63,7 +63,7 @@ it(
       const runMark = client.mark();
       await client.prompt("/agents run ci.main-status {}");
       await client.waitFor(
-        (line) => line.type === "agent_settled",
+        (line) => line.type === "response" && line.command === "prompt",
         "direct run",
         60_000,
         runMark,
