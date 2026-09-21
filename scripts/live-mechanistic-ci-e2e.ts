@@ -28,13 +28,22 @@ async function main(): Promise<number> {
       flag: "wx",
       mode: 0o600,
     });
-    const pointer = `${latest}.${process.pid}.tmp`;
-    await writeFile(
-      pointer,
-      JSON.stringify({ artifact: basename(runArtifact), harnessHead }, null, 2),
-      { flag: "wx", mode: 0o600 },
-    );
-    await rename(pointer, latest);
+    const pointer = `${latest}.${basename(runArtifact)}.tmp`;
+    try {
+      await writeFile(
+        pointer,
+        JSON.stringify(
+          { artifact: basename(runArtifact), harnessHead },
+          null,
+          2,
+        ),
+        { flag: "wx", mode: 0o600 },
+      );
+      await rename(pointer, latest);
+    } catch (error) {
+      await rm(pointer, { force: true }).catch(() => undefined);
+      throw error;
+    }
     console.log(runArtifact);
   };
   const { stdout: headOut } = await exec("git", ["rev-parse", "HEAD"], {
@@ -331,24 +340,36 @@ async function main(): Promise<number> {
       }
       if (!physicalCloseProven) {
         result = 1;
-        await writeFile(
-          runArtifact,
-          JSON.stringify({
-            repository: repo,
-            commit,
-            harnessHead,
-            phase: "cleanup-unproven",
-            errorClass: "physical-close-unproven",
-            priorPhase: phase,
-            isolatedRoot: root,
-          }),
-        );
-        return result;
+        evidence = {
+          repository: repo,
+          commit,
+          harnessHead,
+          phase: "cleanup-unproven",
+          errorClass: "physical-close-unproven",
+          priorPhase: phase,
+          isolatedRoot: root,
+        };
       }
     }
-    await rm(root, { recursive: true, force: true });
+    if (!client || physicalCloseProven) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        evidence = { ...evidence, temporaryRootRemoved: true };
+      } catch {
+        result = 1;
+        evidence = {
+          repository: repo,
+          commit,
+          harnessHead,
+          phase: "cleanup-remove-failed",
+          errorClass: "temporary-root-remove-failed",
+          priorPhase: phase,
+          isolatedRoot: root,
+        };
+      }
+    }
   }
-  console.log(runArtifact);
+  await publish(evidence);
   return result;
 }
 main()
