@@ -90,8 +90,8 @@ are dispatcher measurements, not the total cost of the surrounding conversation.
   outcome 676. The separate historical dispatcher session used three assistant
   responses and 12,369 model-reported tokens (4,718 uncached input, 7,296 cached
   input, 355 output); no savings percentage is inferred.
-- The reviewed npm artifact contains exactly 59 files and measures 215,134 bytes
-  compressed / 796,613 unpacked. The original limits remain 60 entries, 220,000
+- The reviewed npm artifact contains exactly 59 files and measures 215,140 bytes
+  compressed / 796,507 unpacked. The original limits remain 60 entries, 220,000
   compressed bytes, and 850,000 unpacked bytes. The two historical mechanistic
   design/review records remain in Git but are excluded from npm and linked to
   their repository source; the earlier 240,000-byte rebaseline was reverted as
