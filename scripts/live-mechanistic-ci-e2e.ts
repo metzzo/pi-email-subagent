@@ -11,6 +11,12 @@ const repo = "metzzo/pi-email-subagent";
 const commit = "17febc848812eedf91b79ed550050c1b4aba0dea";
 async function main(): Promise<number> {
   const artifact = join(output, "live-mechanistic-ci-latest.json");
+  const { stdout: headOut } = await exec("git", ["rev-parse", "HEAD"], {
+    timeout: 10_000,
+  });
+  const harnessHead = headOut.trim();
+  if (!/^[0-9a-f]{40}$/.test(harnessHead))
+    throw new Error("invalid harness HEAD");
   await mkdir(output, { recursive: true });
   if (process.env.LIVE_GITHUB_CI !== "1") {
     await writeFile(
@@ -154,6 +160,32 @@ async function main(): Promise<number> {
       store.countPendingJobs() !== 0
     )
       throw new Error("job did not settle successfully");
+    const outcomeEvent = events.find(
+      (event) =>
+        event.type === "email.created" &&
+        "email" in event &&
+        event.email.id === job.outcomeMailId,
+    );
+    if (
+      !outcomeEvent ||
+      !("email" in outcomeEvent) ||
+      !outcomeEvent.email ||
+      outcomeEvent.email.from !== job.address ||
+      outcomeEvent.email.triggerTurn !== false
+    )
+      throw new Error("outcome event mismatch");
+    if (
+      !job.pid ||
+      (() => {
+        try {
+          process.kill(job.pid!, 0);
+          return true;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code !== "ESRCH";
+        }
+      })()
+    )
+      throw new Error("child PID still exists");
     const summary = job.reported?.summary ?? "";
     if (
       !summary.includes(repo) ||
@@ -164,6 +196,21 @@ async function main(): Promise<number> {
     )
       throw new Error("report summary mismatch");
     const links = (job.reported?.artifacts ?? []).map((link) => new URL(link));
+    const line = summary.split("\n")[0] ?? "";
+    const categories = Object.fromEntries(
+      ["failed", "pending", "passed", "other"].map((name) => [
+        name,
+        Number(line.match(new RegExp(`([0-9]+) ${name}`))?.[1] ?? 0),
+      ]),
+    );
+    if (
+      !Object.values(categories).every(
+        (value) => Number.isInteger(value) && value >= 0,
+      ) ||
+      (!summary.includes("Partial observation") &&
+        Object.values(categories).reduce((a, b) => a + b, 0) !== links.length)
+    )
+      throw new Error("invalid category counts");
     if (
       links.length === 0 ||
       links.length > 8 ||
@@ -189,6 +236,9 @@ async function main(): Promise<number> {
         {
           repository: repo,
           commit,
+          harnessHead,
+          categories,
+          childPidGone: true,
           jobId: job.id,
           outcomeId: job.outcomeMailId,
           observation: "completed",
