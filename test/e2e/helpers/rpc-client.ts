@@ -256,6 +256,18 @@ export class PiRpcClient {
     return this.waitFor((line) => line.type === "response" && line.command === "get_available_models", "get_available_models response", 30_000, mark);
   }
 
+  async waitForAvailableModel(provider: string, modelId: string, timeoutMs = 30_000): Promise<RpcLine> {
+    const deadline = Date.now() + timeoutMs;
+    let latest = await this.getAvailableModels();
+    while (Date.now() < deadline) {
+      const models = (latest.data as { models?: Array<{ provider?: string; id?: string }> }).models ?? [];
+      if (models.some((model) => model.provider === provider && model.id === modelId)) return latest;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      latest = await this.getAvailableModels();
+    }
+    throw new Error(`model ${provider}/${modelId} did not become available`);
+  }
+
   async switchSession(sessionPath: string): Promise<RpcLine> {
     const mark = this.mark();
     this.send({ type: "switch_session", sessionPath });

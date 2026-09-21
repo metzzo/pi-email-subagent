@@ -31,10 +31,8 @@ for (const modelHeaders of [false, true]) it(`real Pi rejects unsafe native ${mo
   try {
     const state = await client.getState();
     assert.equal(state.success, true, client.stderr);
-    const models = await client.getAvailableModels();
+    const models = await client.waitForAvailableModel("unsafe-native-fixture", "unsafe-native-model");
     assert.equal(models.success, true, client.stderr);
-    const available = (models.data as { models?: Array<{ provider?: string; id?: string }> }).models ?? [];
-    assert.ok(available.some((model) => model.provider === "unsafe-native-fixture" && model.id === "unsafe-native-model"));
     const sessionId = (state.data as { sessionId?: string } | undefined)?.sessionId;
     assert.ok(sessionId);
 
