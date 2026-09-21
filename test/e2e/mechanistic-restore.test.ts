@@ -99,20 +99,25 @@ it(
         session: sessionFile,
         approveProject: true,
       });
-      const outcome = await c.waitFor(
-        (l) =>
-          l.type === "message_end" &&
-          (l.message as { customType?: string }).customType ===
-            "pi-email-subagent.email",
-        "recovered outcome",
-        60000,
-        0,
+      const messages = await c.getMessages();
+      const restored = (
+        (
+          messages.data as {
+            messages?: Array<{
+              role?: string;
+              customType?: string;
+              details?: { id?: string; triggerTurn?: boolean };
+            }>;
+          }
+        ).messages ?? []
+      ).find(
+        (message) =>
+          message.role === "custom" &&
+          message.customType === "pi-email-subagent.email" &&
+          message.details?.id === id,
       );
-      assert.equal(
-        (outcome.message as { details?: { triggerTurn?: boolean } }).details
-          ?.triggerTurn,
-        false,
-      );
+      assert.ok(restored);
+      assert.equal(restored.details?.triggerTurn, false);
       await c.close();
       assert.equal(await readFile(effects, "utf8"), id + "\n");
       assert.equal(await readFile(calls, "utf8"), "generation\n");

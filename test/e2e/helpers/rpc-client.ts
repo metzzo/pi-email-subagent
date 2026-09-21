@@ -240,6 +240,17 @@ export class PiRpcClient {
     );
   }
 
+  async getMessages(): Promise<RpcLine> {
+    const mark = this.mark();
+    this.send({ type: "get_messages" });
+    return this.waitFor(
+      (line) => line.type === "response" && line.command === "get_messages",
+      "get_messages response",
+      30_000,
+      mark,
+    );
+  }
+
   async getState(): Promise<RpcLine> {
     const mark = this.mark();
     this.send({ type: "get_state" });
@@ -254,15 +265,32 @@ export class PiRpcClient {
   async getAvailableModels(): Promise<RpcLine> {
     const mark = this.mark();
     this.send({ type: "get_available_models" });
-    return this.waitFor((line) => line.type === "response" && line.command === "get_available_models", "get_available_models response", 30_000, mark);
+    return this.waitFor(
+      (line) =>
+        line.type === "response" && line.command === "get_available_models",
+      "get_available_models response",
+      30_000,
+      mark,
+    );
   }
 
-  async waitForAvailableModel(provider: string, modelId: string, timeoutMs = 30_000): Promise<RpcLine> {
+  async waitForAvailableModel(
+    provider: string,
+    modelId: string,
+    timeoutMs = 30_000,
+  ): Promise<RpcLine> {
     const deadline = Date.now() + timeoutMs;
     let latest = await this.getAvailableModels();
     while (Date.now() < deadline) {
-      const models = (latest.data as { models?: Array<{ provider?: string; id?: string }> }).models ?? [];
-      if (models.some((model) => model.provider === provider && model.id === modelId)) return latest;
+      const models =
+        (latest.data as { models?: Array<{ provider?: string; id?: string }> })
+          .models ?? [];
+      if (
+        models.some(
+          (model) => model.provider === provider && model.id === modelId,
+        )
+      )
+        return latest;
       await new Promise((resolve) => setTimeout(resolve, 100));
       latest = await this.getAvailableModels();
     }
