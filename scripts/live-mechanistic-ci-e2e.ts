@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm, readFile, rename } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  rm,
+  readFile,
+  rename,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,10 +18,25 @@ const output = ".test-workspaces/mechanistic-ux";
 const repo = "metzzo/pi-email-subagent";
 const commit = "17febc848812eedf91b79ed550050c1b4aba0dea";
 async function main(): Promise<number> {
-  const runArtifact = join(output, `live-mechanistic-ci-${Date.now()}-${process.pid}.json`);
+  const runArtifact = join(
+    output,
+    `live-mechanistic-ci-${Date.now()}-${process.pid}.json`,
+  );
   const latest = join(output, "live-mechanistic-ci-latest.json");
-  const artifact = runArtifact;
-  const publish = async (value: Record<string, unknown>) => { await writeFile(runArtifact, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 }); const pointer = `${latest}.${process.pid}.tmp`; await writeFile(pointer, JSON.stringify({ artifact: basename(runArtifact), harnessHead }, null, 2), { flag: "wx", mode: 0o600 }); await rename(pointer, latest); console.log(runArtifact); };
+  const publish = async (value: Record<string, unknown>) => {
+    await writeFile(runArtifact, JSON.stringify(value, null, 2), {
+      flag: "wx",
+      mode: 0o600,
+    });
+    const pointer = `${latest}.${process.pid}.tmp`;
+    await writeFile(
+      pointer,
+      JSON.stringify({ artifact: basename(runArtifact), harnessHead }, null, 2),
+      { flag: "wx", mode: 0o600 },
+    );
+    await rename(pointer, latest);
+    console.log(runArtifact);
+  };
   const { stdout: headOut } = await exec("git", ["rev-parse", "HEAD"], {
     timeout: 10_000,
   });
@@ -31,7 +53,11 @@ async function main(): Promise<number> {
       timeout: 20_000,
     });
   } catch {
-    await publish({ phase: "preflight", errorClass: "github-auth-unavailable", harnessHead });
+    await publish({
+      phase: "preflight",
+      errorClass: "github-auth-unavailable",
+      harnessHead,
+    });
     return 2;
   }
   let phase = "preflight";
@@ -39,6 +65,14 @@ async function main(): Promise<number> {
   const root = await mkdtemp(join(tmpdir(), "ci-gh-"));
   let client: PiRpcClient | undefined;
   let result = 1;
+  let evidence: Record<string, unknown> = {
+    repository: repo,
+    commit,
+    phase,
+    errorClass: "assertion-failure",
+    harnessHead,
+    physicalCloseProven,
+  };
   try {
     phase = "checkout";
     const checkout = join(root, "checkout");
@@ -246,44 +280,34 @@ async function main(): Promise<number> {
       throw new Error("provider request observed");
     phase = "evidence";
     result = 0;
-    await writeFile(
-      artifact,
-      JSON.stringify(
-        {
-          repository: repo,
-          commit,
-          harnessHead,
-          categories,
-          childPidGone: true,
-          jobId: job.id,
-          outcomeId: job.outcomeMailId,
-          observation: "completed",
-          ciPassed: "not-asserted",
-          cleanup: job.cleanup,
-          physicalClose: close,
-          providerRequests: 0,
-          agentLifecycle: 0,
-          pendingJobs: store.countPendingJobs(),
-          triggerTurn: false,
-          links: links.map((link) => link.pathname),
-          partial: summary.includes("Partial observation"),
-        },
-        null,
-        2,
-      ),
-    );
+    evidence = {
+      repository: repo,
+      commit,
+      harnessHead,
+      categories,
+      childPidGone: true,
+      jobId: job.id,
+      outcomeId: job.outcomeMailId,
+      observation: "completed",
+      ciPassed: "not-asserted",
+      cleanup: job.cleanup,
+      physicalClose: close,
+      providerRequests: 0,
+      agentLifecycle: 0,
+      pendingJobs: store.countPendingJobs(),
+      triggerTurn: false,
+      links: links.map((link) => link.pathname),
+      partial: summary.includes("Partial observation"),
+    };
   } catch {
-    await writeFile(
-      artifact,
-      JSON.stringify({
-        repository: repo,
-        commit,
-        phase,
-        errorClass: "assertion-failure",
-        harnessHead,
-        physicalCloseProven,
-      }),
-    );
+    evidence = {
+      repository: repo,
+      commit,
+      phase,
+      errorClass: "assertion-failure",
+      harnessHead,
+      physicalCloseProven,
+    };
   } finally {
     if (client && !physicalCloseProven) {
       await Promise.race([client.close().catch(() => undefined), delay(5000)]);
@@ -308,7 +332,7 @@ async function main(): Promise<number> {
       if (!physicalCloseProven) {
         result = 1;
         await writeFile(
-          artifact,
+          runArtifact,
           JSON.stringify({
             repository: repo,
             commit,
@@ -324,7 +348,7 @@ async function main(): Promise<number> {
     }
     await rm(root, { recursive: true, force: true });
   }
-  console.log(artifact);
+  console.log(runArtifact);
   return result;
 }
 main()
