@@ -1,5 +1,6 @@
 import { createProvider, type Model, type ProviderStreams } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { access } from "node:fs/promises";
 
 export const UNSAFE_NATIVE_PROVIDER_ID = "unsafe-native-fixture";
 export const UNSAFE_NATIVE_MODEL_ID = "unsafe-native-model";
@@ -33,7 +34,11 @@ export default function unsafeNativeProvider(pi: ExtensionAPI): void {
     auth: {
       apiKey: {
         name: "Unsafe native fixture",
-        check: async () => ({ type: "api_key", source: "fixture" }),
+        check: async () => {
+        const gate = process.env.PI_NATIVE_FIXTURE_GATE;
+        if (gate) { const deadline = Date.now() + 10_000; while (Date.now() < deadline) { try { await access(gate); break; } catch { await new Promise((resolve) => setTimeout(resolve, 25)); } } }
+        return { type: "api_key", source: "fixture" };
+      },
         resolve: async () => ({ auth: { apiKey: "fixture" }, source: "fixture" }),
       },
     },

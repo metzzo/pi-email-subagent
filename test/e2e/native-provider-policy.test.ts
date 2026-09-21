@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { writeFile } from "node:fs/promises";
 import { it } from "node:test";
 import { PiRpcClient, type RpcLine } from "./helpers/rpc-client.ts";
 import { UNSAFE_NATIVE_HEADER_SENTINEL } from "./helpers/unsafe-native-provider-extension.ts";
@@ -21,16 +22,21 @@ function toolText(line: RpcLine): string {
 
 for (const modelHeaders of [false, true]) it(`real Pi rejects unsafe native ${modelHeaders ? "model headers" : "public provider"} before email acceptance`, { timeout: 180_000 }, async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-native-policy-e2e-"));
+  const gate = join(agentDir, "release-gate");
   const client = PiRpcClient.launch({
     cwd: process.cwd(),
     agentDir,
     model: "mock-e2e/mock-e2e",
     extensions: [MOCK_EXTENSION, UNSAFE_NATIVE_EXTENSION, EXTENSION],
-    env: { PI_EMAIL_NATIVE_MODEL_HEADERS: modelHeaders ? "1" : "0" },
+    env: { PI_EMAIL_NATIVE_MODEL_HEADERS: modelHeaders ? "1" : "0", PI_NATIVE_FIXTURE_GATE: gate },
   });
   try {
     const state = await client.getState();
     assert.equal(state.success, true, client.stderr);
+    const closed = await client.getAvailableModels();
+    const closedModels = (closed.data as { models?: Array<{ provider?: string; id?: string }> }).models ?? [];
+    assert.equal(closedModels.some((model) => model.provider === "unsafe-native-fixture" && model.id === "unsafe-native-model"), false);
+    await writeFile(gate, "release");
     const models = await client.waitForAvailableModel("unsafe-native-fixture", "unsafe-native-model");
     assert.equal(models.success, true, client.stderr);
     const sessionId = (state.data as { sessionId?: string } | undefined)?.sessionId;
@@ -55,6 +61,7 @@ for (const modelHeaders of [false, true]) it(`real Pi rejects unsafe native ${mo
     });
     assert.equal(journal.trim(), "", "native provider preflight rejection journals no email event");
   } finally {
+    await writeFile(gate, "release").catch(() => undefined);
     await client.close().catch(() => undefined);
     await rm(agentDir, { recursive: true, force: true });
   }
