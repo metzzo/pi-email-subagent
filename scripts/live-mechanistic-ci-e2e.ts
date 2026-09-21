@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { mkdtemp, mkdir, writeFile, rm, readFile, rename } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
@@ -11,7 +11,10 @@ const output = ".test-workspaces/mechanistic-ux";
 const repo = "metzzo/pi-email-subagent";
 const commit = "17febc848812eedf91b79ed550050c1b4aba0dea";
 async function main(): Promise<number> {
-  const artifact = join(output, "live-mechanistic-ci-latest.json");
+  const runArtifact = join(output, `live-mechanistic-ci-${Date.now()}-${process.pid}.json`);
+  const latest = join(output, "live-mechanistic-ci-latest.json");
+  const artifact = runArtifact;
+  const publish = async (value: Record<string, unknown>) => { await writeFile(runArtifact, JSON.stringify(value, null, 2), { flag: "wx", mode: 0o600 }); const pointer = `${latest}.${process.pid}.tmp`; await writeFile(pointer, JSON.stringify({ artifact: basename(runArtifact), harnessHead }, null, 2), { flag: "wx", mode: 0o600 }); await rename(pointer, latest); console.log(runArtifact); };
   const { stdout: headOut } = await exec("git", ["rev-parse", "HEAD"], {
     timeout: 10_000,
   });
@@ -20,10 +23,7 @@ async function main(): Promise<number> {
     throw new Error("invalid harness HEAD");
   await mkdir(output, { recursive: true });
   if (process.env.LIVE_GITHUB_CI !== "1") {
-    await writeFile(
-      artifact,
-      JSON.stringify({ phase: "opt-in", errorClass: "not-enabled" }),
-    );
+    await publish({ phase: "opt-in", errorClass: "not-enabled", harnessHead });
     return 2;
   }
   try {
@@ -31,13 +31,7 @@ async function main(): Promise<number> {
       timeout: 20_000,
     });
   } catch {
-    await writeFile(
-      artifact,
-      JSON.stringify({
-        phase: "preflight",
-        errorClass: "github-auth-unavailable",
-      }),
-    );
+    await publish({ phase: "preflight", errorClass: "github-auth-unavailable", harnessHead });
     return 2;
   }
   let phase = "preflight";
