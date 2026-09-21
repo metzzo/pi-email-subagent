@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
 import { MailStore, parseMailEvent } from "../src/mail-store.ts";
 const exec = promisify(execFile);
@@ -145,6 +146,7 @@ async function main(): Promise<number> {
     physicalCloseProven = true;
     phase = "journal";
     const journal = join(agent, "subagents", sessionId, "mail.jsonl");
+    phase = "job";
     const store = new MailStore(journal);
     await store.init();
     const events = (await readFile(journal, "utf8"))
@@ -168,6 +170,7 @@ async function main(): Promise<number> {
       store.countPendingJobs() !== 0
     )
       throw new Error("job did not settle successfully");
+    phase = "outcome-tie";
     const outcomeDetails = (
       outcomeRpc.message as {
         details?: { id?: string; from?: string; triggerTurn?: boolean };
@@ -180,6 +183,7 @@ async function main(): Promise<number> {
       outcomeDetails.triggerTurn !== false
     )
       throw new Error("outcome event mismatch");
+    phase = "pid";
     if (
       !job.pid ||
       (() => {
@@ -192,6 +196,7 @@ async function main(): Promise<number> {
       })()
     )
       throw new Error("child PID still exists");
+    phase = "report";
     const summary = job.reported?.summary ?? "";
     if (
       !summary.includes(repo) ||
@@ -201,7 +206,9 @@ async function main(): Promise<number> {
       )
     )
       throw new Error("report summary mismatch");
+    phase = "links";
     const links = (job.reported?.artifacts ?? []).map((link) => new URL(link));
+    phase = "categories";
     const line = summary.split("\n")[0] ?? "";
     const categories = Object.fromEntries(
       ["failed", "pending", "passed", "other"].map((name) => [
@@ -236,11 +243,13 @@ async function main(): Promise<number> {
       )
     )
       throw new Error("invalid bounded GitHub link");
+    phase = "zero-provider";
     if (
       (await readFile(join(checkout, ".provider-requests")).catch(() => "")) !==
       ""
     )
       throw new Error("provider request observed");
+    phase = "evidence";
     result = 0;
     await writeFile(
       artifact,
@@ -281,7 +290,42 @@ async function main(): Promise<number> {
       }),
     );
   } finally {
-    if (client) await client.close().catch(() => undefined);
+    if (client && !physicalCloseProven) {
+      await Promise.race([client.close().catch(() => undefined), delay(5000)]);
+      const observed = await Promise.race([
+        client
+          .waitForClose()
+          .then(() => true)
+          .catch(() => false),
+        delay(5000).then(() => false),
+      ]);
+      if (!observed) {
+        client.kill("SIGKILL");
+        physicalCloseProven = await Promise.race([
+          client
+            .waitForClose()
+            .then(() => true)
+            .catch(() => false),
+          delay(5000).then(() => false),
+        ]);
+      }
+      if (!physicalCloseProven) {
+        result = 1;
+        await writeFile(
+          artifact,
+          JSON.stringify({
+            repository: repo,
+            commit,
+            harnessHead,
+            phase: "cleanup-unproven",
+            errorClass: "physical-close-unproven",
+            priorPhase: phase,
+            isolatedRoot: root,
+          }),
+        );
+        return result;
+      }
+    }
     await rm(root, { recursive: true, force: true });
   }
   console.log(artifact);
