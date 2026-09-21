@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { it } from "node:test";
@@ -18,6 +18,7 @@ it(
   async () => {
     const root = await mkdtemp(join(tmpdir(), "mechanistic-direct-"));
     const agentDir = join(root, ".pi");
+    await mkdir(agentDir, { recursive: true });
     await writeFile(join(root, "status.txt"), "ready\n");
     await writeFile(
       join(agentDir, "subagents.json"),
