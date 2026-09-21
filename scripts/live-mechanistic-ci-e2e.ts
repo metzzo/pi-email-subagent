@@ -118,6 +118,14 @@ async function main(): Promise<number> {
       90_000,
       mark,
     );
+    if (
+      client
+        .events()
+        .some((event) =>
+          ["agent_start", "agent_end", "agent_settled"].includes(event.type),
+        )
+    )
+      throw new Error("agent lifecycle observed");
     await client.close();
     const close = await client.waitForClose();
     if (close.code !== 0 || close.signal !== null)
@@ -138,8 +146,11 @@ async function main(): Promise<number> {
       !job ||
       job.id !== details.jobId ||
       job.result !== "success" ||
+      job.triggerTurn !== false ||
       job.outcomeDeliveryState !== "delivered" ||
       job.cleanup?.state !== "confirmed" ||
+      job.cleanup.childExited !== true ||
+      job.cleanup.pipesClosed !== true ||
       store.countPendingJobs() !== 0
     )
       throw new Error("job did not settle successfully");
@@ -152,14 +163,20 @@ async function main(): Promise<number> {
       )
     )
       throw new Error("report summary mismatch");
+    const links = (job.reported?.artifacts ?? []).map((link) => new URL(link));
     if (
-      !(job.reported?.artifacts ?? []).some((link) =>
-        /^https:\/\/github\.com\/metzzo\/pi-email-subagent\/(actions\/runs\/|commit\/|actions\/runs\/[^/]+\/checks)/.test(
-          link,
-        ),
+      links.length === 0 ||
+      links.length > 8 ||
+      links.some(
+        (link) =>
+          link.protocol !== "https:" ||
+          link.hostname !== "github.com" ||
+          !/^\/metzzo\/pi-email-subagent\/(actions\/runs\/[1-9][0-9]*|commit\/[0-9a-f]+\/checks)$/.test(
+            link.pathname,
+          ),
       )
     )
-      throw new Error("missing bounded GitHub link");
+      throw new Error("invalid bounded GitHub link");
     if (
       (await readFile(join(checkout, ".provider-requests")).catch(() => "")) !==
       ""
@@ -180,6 +197,10 @@ async function main(): Promise<number> {
           physicalClose: close,
           providerRequests: 0,
           agentLifecycle: 0,
+          pendingJobs: store.countPendingJobs(),
+          triggerTurn: false,
+          links: links.map((link) => link.pathname),
+          partial: summary.includes("Partial observation"),
         },
         null,
         2,
