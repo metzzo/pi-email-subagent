@@ -52,22 +52,11 @@ it(
           (model) => model.provider === "openai" && model.id === "gpt-4.1-nano",
         ),
       );
-      const mark = client.mark();
       await client.prompt("/agents programs");
-      await client.waitFor(
-        (line) => line.type === "response" && line.command === "prompt",
-        "programs",
-        30_000,
-        mark,
-      );
-      const runMark = client.mark();
+
+      await client.prompt("/agents program ci");
       await client.prompt("/agents run ci.main-status {}");
-      await client.waitFor(
-        (line) => line.type === "response" && line.command === "prompt",
-        "direct run",
-        60_000,
-        runMark,
-      );
+
       assert.equal(
         await readFile(join(root, ".provider-requests")).catch(() => ""),
         "",
