@@ -91,6 +91,14 @@ try {
   assert.equal(proof.job.binding.script, installedScript); assert.equal(proof.job.id, proof.accepted.envelope.id);
   assert.equal(proof.accepted.recipientKind, "mechanistic"); assert.equal(proof.outcome.kind, "notification"); assert.equal(proof.outcome.inReplyTo, undefined);
 
+  const observer = join(root, "test/e2e/helpers/provider-request-observer-extension.ts");
+  const direct = PiRpcClient.launch({ piBin: pi, cwd: consumer, agentDir, model: "openai/gpt-4.1-nano", extensions: [observer], discoverExtensions: true, approveProject: true, env: { OPENAI_API_KEY: "deterministic-unused", PI_OFFLINE: "1" } });
+  try {
+    const commands = await direct.getState(); assert.equal(commands.success, true);
+    await direct.prompt("/agents run monitor.package-smoke {}");
+    assert.equal(await readFile(join(consumer, ".provider-requests")).catch(() => ""), "");
+  } finally { await direct.close().catch(() => undefined); }
+
   const settings = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8")) as { packages?: unknown[] };
   assert.equal(settings.packages?.length, 1, "package install was not persisted in the isolated agent directory");
   console.log(`package smoke passed on supported Pi ${SUPPORTED_PI_VERSION}: ${pack.files.length} files, /agents loaded and real Python job ${proof.job.id} succeeded from packed artifact`);

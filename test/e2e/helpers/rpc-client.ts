@@ -76,6 +76,7 @@ export interface LaunchOptions {
   env?: Record<string, string>;
   /** Explicitly approve the disposable project configuration. */
   approveProject?: boolean;
+  discoverExtensions?: boolean;
 }
 
 export class PiRpcClient {
@@ -141,7 +142,7 @@ export class PiRpcClient {
   }
 
   static launch(options: LaunchOptions): PiRpcClient {
-    const args = ["-ne"];
+    const args = options.discoverExtensions ? [] : ["-ne"];
     for (const extension of options.extensions) args.push("-e", extension);
     args.push("--mode", "rpc");
     if (!options.persistSession) args.push("--no-session");
