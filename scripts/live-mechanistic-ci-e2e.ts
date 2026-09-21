@@ -201,11 +201,18 @@ async function main(): Promise<number> {
         Number(line.match(new RegExp(`([0-9]+) ${name}`))?.[1] ?? 0),
       ]),
     );
+    const categorySum = Object.values(categories).reduce(
+      (sum, value) => sum + value,
+      0,
+    );
+    const hasCategories = line.startsWith("GitHub Actions observed:");
     if (
+      !hasCategories ||
       !Object.values(categories).every(
         (value) => Number.isInteger(value) && value >= 0,
       ) ||
-      false
+      categorySum > 100 ||
+      (categorySum === 0 && !line.includes("no runs found"))
     )
       throw new Error("invalid category counts");
     if (
