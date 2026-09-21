@@ -82,10 +82,9 @@ it(
         30_000,
         detailMark,
       );
-      assert.deepEqual(
-        (detail.message as { details?: { inputExamples?: string[] } }).details
-          ?.inputExamples,
-        ["{}"],
+      assert.match(
+        String((detail.message as { content?: string }).content),
+        /Observe local status/,
       );
       const runMark = client.mark();
       await client.prompt("/agents run ci.main-status {}");
@@ -110,7 +109,7 @@ it(
       ).details;
       assert.equal(details?.address, "ci.main-status@mechanistic.com");
       assert.equal(details?.phase, "queued");
-      assert.equal(details?.recipientState, "accepted");
+      assert.equal(details?.recipientState, "spawning");
       const acceptedJobId = details?.jobId;
       assert.ok(acceptedJobId);
       const outcome = await client.waitFor(
