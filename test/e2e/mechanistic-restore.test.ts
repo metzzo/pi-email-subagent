@@ -122,6 +122,14 @@ it(
       assert.ok(bClose);
       assert.equal(bClose.code, 143);
       assert.equal(bClose.signal, null);
+      assert.equal(
+        b
+          .events()
+          .some((event) =>
+            ["agent_start", "agent_end", "agent_settled"].includes(event.type),
+          ),
+        false,
+      );
       assert.equal(await readFile(calls, "utf8"), "generation\n");
       const journal = join(agent, "subagents", sessionId!, "mail.jsonl");
       const storeBefore = new MailStore(journal);
@@ -211,8 +219,34 @@ it(
       assert.equal(await readFile(effects, "utf8"), id + "\n");
       assert.equal(await readFile(calls, "utf8"), "generation\n");
     } finally {
-      for (const client of [a, b, c]) client?.kill("SIGKILL");
-      await rm(root, { recursive: true, force: true });
+      const clients = [a, b, c].filter((client): client is PiRpcClient =>
+        Boolean(client),
+      );
+      const unresolved: string[] = [];
+      for (const [index, client] of clients.entries()) {
+        let closed = false;
+        try {
+          await client.close();
+        } catch {
+          /* bounded fallback below */
+        }
+        closed = Boolean(await closeWithin(client, 3000));
+        if (!closed) {
+          client.kill("SIGTERM");
+          closed = Boolean(await closeWithin(client, 5000));
+        }
+        if (!closed) {
+          client.kill("SIGKILL");
+          closed = Boolean(await closeWithin(client, 5000));
+        }
+        if (!closed) unresolved.push(String(index));
+      }
+      if (unresolved.length === 0)
+        await rm(root, { recursive: true, force: true });
+      else
+        throw new Error(
+          `restore cleanup unresolved root=${root} clients=${unresolved.join(",")}`,
+        );
     }
   },
 );
