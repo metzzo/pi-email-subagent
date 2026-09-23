@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { it } from "node:test";
-import { discoverAndLoadExtensions, VERSION } from "@earendil-works/pi-coding-agent";
-import { SUPPORTED_PI_VERSION } from "../../src/pi-compat.ts";
+import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
+
+it("reports missing capabilities through the real Pi extension loader", async () => {
+  const agentDir = await mkdtemp(join(tmpdir(), "pi-email-compat-loader-"));
+  const probe = join(agentDir, "incompatible.ts");
+  try {
+    await writeFile(probe, `
+      import { assertExtensionApiFeatures } from ${JSON.stringify(resolve("src/pi-compat.ts"))};
+      export default function () { assertExtensionApiFeatures(undefined); }
+    `);
+    const result = await discoverAndLoadExtensions([probe], process.cwd(), agentDir);
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0]!.error, /public Pi ExtensionAPI surface; missing: ExtensionAPI\.registerTool/);
+  } finally { await rm(agentDir, { recursive: true, force: true }); }
+});
 
 it("renders prompt contracts through the real Pi extension loader", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-prompt-loader-"));
@@ -26,7 +39,6 @@ it("strict mechanistic contracts through the real Pi extension loader", async ()
 });
 
 it("loads the packaged extension with tools, command, and renderers and no conflicts", async () => {
-  assert.equal(VERSION, SUPPORTED_PI_VERSION, "the canonical host loader uses the exact tested Pi version");
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-extension-load-"));
   const result = await discoverAndLoadExtensions([resolve("src/index.ts")], process.cwd(), agentDir);
   assert.deepEqual(result.errors, []);

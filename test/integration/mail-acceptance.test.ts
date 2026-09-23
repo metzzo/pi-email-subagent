@@ -15,7 +15,7 @@ for (const fault of ["registry", "publication", "failure-finalization"] as const
   it(`preserves accepted mail at the tool boundary after ${fault} failure`, async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-email-acceptance-"));
     const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
-    const model = runtime.getModel("openai-codex", "gpt-5.4-mini")!;
+    const model = runtime.getModels().find((candidate) => candidate.input.includes("text") && /^[a-z0-9.-]+$/.test(candidate.id))!;
     assert.ok(model);
     const mainAddress = `main@${model.id}.com`;
     const session = SessionManager.inMemory(root);

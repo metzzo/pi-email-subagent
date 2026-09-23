@@ -509,7 +509,7 @@ it("emits one worker settlement after a real overflow compaction retry with mult
   }
 });
 
-it("binds worker extension lifecycle and collapses nested AgentSession settlements into one worker settlement", async () => {
+it("binds worker extension lifecycle and collapses deferred AgentSession settlements into one worker settlement", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-nested-settlement-"));
   const observed: SimpleStreamOptions[] = [];
   const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
@@ -534,24 +534,16 @@ it("binds worker extension lifecycle and collapses nested AgentSession settlemen
     effects: {},
     factory(pi) {
       let triggered = false;
-      let releaseOuter: (() => void) | undefined;
       pi.on("session_start", () => { sessionStarts += 1; });
-      pi.on("agent_settled", async () => {
-        if (releaseOuter) {
-          const release = releaseOuter;
-          releaseOuter = undefined;
-          release();
-          return;
-        }
+      pi.on("agent_settled", () => {
         if (triggered) return;
         triggered = true;
-        await new Promise<void>((resolve) => {
-          releaseOuter = resolve;
-          pi.sendMessage(
-            { customType: "nested-settlement-probe", content: "continue once", display: true },
-            { deliverAs: "steer", triggerTurn: true },
-          );
-        });
+        // Pi defers this run until all settlement handlers return. Waiting for
+        // its settlement inside this handler would deadlock the host.
+        pi.sendMessage(
+          { customType: "nested-settlement-probe", content: "continue once", display: true },
+          { deliverAs: "steer", triggerTurn: true },
+        );
       });
     },
   };
@@ -1007,8 +999,8 @@ it("never writes shared settings while two workers start and change effort indep
   const snapshot = WorkerSettingsSnapshot.capture(cwd, agentDir, true);
   assert.deepEqual(snapshot.loadIssues, []);
   const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
-  const model = runtime.getModel("openai-codex", "gpt-5.4-mini") ?? runtime.getModels()[0];
-  assert.ok(model);
+  const model = runtime.getModels().find((candidate) => candidate.reasoning && candidate.thinkingLevelMap?.xhigh != null && candidate.thinkingLevelMap?.off !== null);
+  assert.ok(model, "the settings isolation test needs a model that supports xhigh");
   const low = new SdkWorker(runtime, model, snapshot);
   const high = new SdkWorker(runtime, model, snapshot);
   const start = async (worker: SdkWorker, effort: AgentRecord["effort"], suffix: string) => {
@@ -1035,7 +1027,7 @@ it("never writes shared settings while two workers start and change effort indep
     assert.equal(lowSession.settingsManager.getFollowUpMode(), "all");
     assert.equal(lowSession.settingsManager.getDefaultThinkingLevel(), "low");
     assert.equal(highSession.settingsManager.getDefaultThinkingLevel(), "high");
-    assert.deepEqual(lowSession.settingsManager.getRetrySettings(), { enabled: true, maxRetries: 4, baseDelayMs: 7 });
+    assert.deepEqual(lowSession.settingsManager.getRetrySettings(), { enabled: true, maxRetries: 4, baseDelayMs: 7, maxAgentDelayMs: 60_000 });
     assert.deepEqual(lowSession.settingsManager.getProviderRetrySettings(), { timeoutMs: 5_001, maxRetries: 2, maxRetryDelayMs: 2_001 });
     assert.equal(lowSession.settingsManager.getTransport(), "websocket");
     assert.equal(lowSession.settingsManager.getHttpIdleTimeoutMs(), 3_001);
@@ -1101,7 +1093,7 @@ it("recreates worker-local effective settings when a persistent session resumes"
     const manager = (resumed as unknown as { session: { settingsManager: import("@earendil-works/pi-coding-agent").SettingsManager } }).session.settingsManager;
     assert.equal(manager.getSteeringMode(), "all");
     assert.equal(manager.getDefaultThinkingLevel(), "high");
-    assert.deepEqual(manager.getRetrySettings(), { enabled: true, maxRetries: 2, baseDelayMs: 9 });
+    assert.deepEqual(manager.getRetrySettings(), { enabled: true, maxRetries: 2, baseDelayMs: 9, maxAgentDelayMs: 60_000 });
     await manager.flush();
     assert.deepEqual(await readFile(settingsPath), before);
   } finally {
@@ -1174,8 +1166,8 @@ it("loads effective global and only trusted project retry/transport settings int
           getWebSocketConnectTimeoutMs(): unknown;
         } } };
         assert.deepEqual(internal.session.settingsManager.getRetrySettings(), trusted
-          ? { enabled: true, maxRetries: 4, baseDelayMs: 5 }
-          : { enabled: true, maxRetries: 1, baseDelayMs: 3 });
+          ? { enabled: true, maxRetries: 4, baseDelayMs: 5, maxAgentDelayMs: 60_000 }
+          : { enabled: true, maxRetries: 1, baseDelayMs: 3, maxAgentDelayMs: 60_000 });
         const settled = new Promise<void>((resolve) => {
           const unsubscribe = worker.subscribe((event) => {
             if (event.type === "settled") { unsubscribe(); resolve(); }

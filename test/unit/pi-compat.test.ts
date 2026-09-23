@@ -1,35 +1,14 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
-import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import {
-  assertExtensionApiFeatures,
-  assertPiVersion,
-  assertSupportedPiRuntime,
-  SUPPORTED_PI_VERSION,
-} from "../../src/pi-compat.ts";
+import { assertExtensionApiFeatures } from "../../src/pi-compat.ts";
 
-it("accepts the exact installed Pi version", () => {
-  assert.equal(PiCodingAgent.VERSION, SUPPORTED_PI_VERSION);
-  assert.doesNotThrow(() => assertSupportedPiRuntime());
-  assert.doesNotThrow(() => assertPiVersion({ VERSION: SUPPORTED_PI_VERSION }));
-});
-
-it("rejects wrong, missing, and hostile Pi version values without echoing unsafe text", () => {
-  for (const version of ["0.84.2", "0.85.0", "0.86.0"]) {
-    assert.throws(
-      () => assertPiVersion({ VERSION: version }),
-      { message: `pi-email-subagent requires exact Pi 0.85.1; actual ${version}. Install Pi 0.85.1 or use an extension release tested for your Pi version.` },
-    );
+it("checks capabilities independently of the host version", () => {
+  for (const VERSION of [undefined, "0.85.1", "0.87.1", "0.100.0", "1.0.0", "99.0.0"]) {
+    assert.doesNotThrow(() => assertExtensionApiFeatures({ ...extensionApi(), VERSION }));
   }
-  assert.throws(
-    () => assertPiVersion({ VERSION: "bad\n<unsafe>" }),
-    (error: unknown) => {
-      assert.match(String(error), /actual missing or invalid/i);
-      assert.doesNotMatch(String(error), /<unsafe>/);
-      return true;
-    },
-  );
-  assert.throws(() => assertPiVersion({}), /actual missing or invalid/i);
+  for (const surface of [undefined, null, 1]) {
+    assert.throws(() => assertExtensionApiFeatures(surface), /ExtensionAPI\.registerTool/);
+  }
 });
 
 function extensionApi(): Record<string, unknown> {
@@ -45,7 +24,7 @@ function extensionApi(): Record<string, unknown> {
   };
 }
 
-it("checks only the public ExtensionAPI facade after the exact version gate", () => {
+it("checks only the public ExtensionAPI facade", () => {
   assert.doesNotThrow(() => assertExtensionApiFeatures(extensionApi()));
   const incomplete = extensionApi();
   delete incomplete.sendMessage;

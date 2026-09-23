@@ -44,8 +44,8 @@
  *                                              silence until a mailbox-
  *                                              enforcement prompt arrives
  */
-import type { Api, AssistantMessage, Context, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, TranscriptContext, ToolCall, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const MOCK_PROVIDER_ID = "mock-e2e";
@@ -57,7 +57,7 @@ export const MOCK_MAIN_ADDRESS = "main@mock-e2e.com";
 process.env.PI_EMAIL_MOCK_PROVIDER_AUTH ??= "configured";
 const RATE_ADDRESSES = ["scout.e2e", "scout.two", "scout.three", "scout.four"].map((name) => `${name}@mock-e2e.com`);
 
-type ToolCallPlan = { name: string; arguments: Record<string, unknown> };
+type ToolCallPlan = { name: string; arguments: ToolCall["arguments"] };
 type Plan = { toolCalls: ToolCallPlan[] } | { text: string };
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -493,10 +493,10 @@ function planWorker(messages: readonly Message[]): Plan {
         const paths = /WORK PATH ([^\s<]+) WRITE ([^\s<]+)/.exec(lastText);
         if (!paths) return { text: "WORKER MISSING PATHS" };
         return { toolCalls: [
-          { name: "read", arguments: { path: paths[1] } },
-          { name: "edit", arguments: { path: paths[1], edits: [{ oldText: "before\n", newText: "after\n" }] } },
-          { name: "edit", arguments: { path: paths[1], edits: [{ oldText: "SENTINEL_MISSING", newText: "SENTINEL_SECRET_REPLACEMENT" }] } },
-          { name: "write", arguments: { path: paths[2], content: "PRIVATE E2E WRITE BODY\n" } },
+          { name: "read", arguments: { path: paths[1]! } },
+          { name: "edit", arguments: { path: paths[1]!, edits: [{ oldText: "before\n", newText: "after\n" }] } },
+          { name: "edit", arguments: { path: paths[1]!, edits: [{ oldText: "SENTINEL_MISSING", newText: "SENTINEL_SECRET_REPLACEMENT" }] } },
+          { name: "write", arguments: { path: paths[2]!, content: "PRIVATE E2E WRITE BODY\n" } },
           { name: "bash", arguments: { command: "true" } },
         ] };
       }
@@ -571,7 +571,7 @@ function emptyUsage() {
   };
 }
 
-function streamMock(model: Model<Api>, context: Context, options?: SimpleStreamOptions) {
+function streamMock(model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) {
   const stream = createAssistantMessageEventStream();
   void (async () => {
     const output: AssistantMessage = {
@@ -586,8 +586,9 @@ function streamMock(model: Model<Api>, context: Context, options?: SimpleStreamO
     } as AssistantMessage;
     try {
       stream.push({ type: "start", partial: output });
-      const system = context.systemPrompt ?? "";
-      const messages = context.messages ?? [];
+      const system = getCurrentSystemPrompt(context.messages);
+      // System deltas may follow the newest conversational message in Pi 0.87+.
+      const messages = context.messages.filter((message) => message.role !== "system");
       const lastMessage = messages.at(-1);
       const lastText = messageText(lastMessage);
       const mainInstruction = lastUserInstruction(messages);

@@ -1,6 +1,6 @@
 /** Deterministic duplicate-model providers for provider-routing RPC tests. */
-import type { Api, AssistantMessage, Context, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, TranscriptContext, ToolCall, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const ROUTING_MODEL_ID = "shared";
@@ -10,7 +10,7 @@ export const ALPHA_ADDRESS = "worker.alpha@shared.com";
 export const BETA_ADDRESS = "worker.beta@shared.com";
 export const NEW_ADDRESS = "worker.after-restart@shared.com";
 
-interface ToolCallPlan { name: string; arguments: Record<string, unknown> }
+interface ToolCallPlan { name: string; arguments: ToolCall["arguments"] }
 type Plan = { toolCalls: ToolCallPlan[] } | { text: string };
 let toolCallSequence = 0;
 
@@ -130,7 +130,7 @@ function usage() {
   };
 }
 
-function stream(model: Model<Api>, context: Context, _options?: SimpleStreamOptions) {
+function stream(model: Model<Api>, context: TranscriptContext, _options?: SimpleStreamOptions) {
   const events = createAssistantMessageEventStream();
   const output = {
     role: "assistant",
@@ -142,9 +142,10 @@ function stream(model: Model<Api>, context: Context, _options?: SimpleStreamOpti
     stopReason: "stop",
     timestamp: Date.now(),
   } as AssistantMessage;
-  const plan = (context.systemPrompt ?? "").includes("Main Agent Coordination")
-    ? planMain(context.messages ?? [])
-    : planWorker(context.messages ?? []);
+  const messages = context.messages.filter((message) => message.role !== "system");
+  const plan = getCurrentSystemPrompt(context.messages).includes("Main Agent Coordination")
+    ? planMain(messages)
+    : planWorker(messages);
   events.push({ type: "start", partial: output });
   if ("text" in plan) {
     output.content.push({ type: "text", text: plan.text });

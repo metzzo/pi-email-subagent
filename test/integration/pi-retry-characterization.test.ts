@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Context, ToolCall, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
@@ -25,7 +25,7 @@ type ProviderStep =
   | { kind: "error"; message: string }
   | { kind: "text"; text: string }
   | { kind: "thinking"; thinking: string }
-  | { kind: "tool"; id: string; name: string; arguments: Record<string, unknown> };
+  | { kind: "tool"; id: string; name: string; arguments: ToolCall["arguments"] };
 
 type RelevantEvent =
   | { type: "agent_start" | "agent_settled" }
@@ -523,8 +523,8 @@ describe("real Pi retry lifecycle characterization", { concurrency: false }, () 
         try {
           await run.session.prompt("observe settings");
           assert.deepEqual(run.session.settingsManager.getRetrySettings(), trusted
-            ? { enabled: true, maxRetries: 4, baseDelayMs: 5 }
-            : { enabled: true, maxRetries: 1, baseDelayMs: 3 });
+            ? { enabled: true, maxRetries: 4, baseDelayMs: 5, maxAgentDelayMs: 60_000 }
+            : { enabled: true, maxRetries: 1, baseDelayMs: 3, maxAgentDelayMs: 60_000 });
           assert.deepEqual(run.calls[0], trusted
             ? { transport: "websocket", timeoutMs: 5_555, websocketConnectTimeoutMs: 8_888, maxRetries: 6, maxRetryDelayMs: 6_666 }
             : { transport: "sse", timeoutMs: 1_111, websocketConnectTimeoutMs: 4_444, maxRetries: 2, maxRetryDelayMs: 2_222 });

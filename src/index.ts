@@ -9,7 +9,7 @@ import { AgentBroker } from "./broker.ts";
 import { DEFAULT_MODEL_POLICY, isThinkingLevel, loadConfig } from "./config.ts";
 import { createMainCoordinationTools } from "./main-tools.ts";
 import { WorkerRuntimeFactory, type WorkerRuntimeSnapshot } from "./model-runtime.ts";
-import { assertExtensionApiFeatures, assertSupportedPiRuntime } from "./pi-compat.ts";
+import { assertExtensionApiFeatures } from "./pi-compat.ts";
 import { budgetPromptAdditions, formatAlert, mainCoordinatorPrompt } from "./prompts.ts";
 import { isMechanisticAddress } from "./mechanistic.ts";
 import { deadlineSignal, lifecycleDuration } from "./runtime-timers.ts";
@@ -48,7 +48,6 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 }
 
 export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
-  assertSupportedPiRuntime();
   assertExtensionApiFeatures(pi);
   const ui = new UIController();
   let broker: AgentBroker | undefined;
@@ -515,6 +514,12 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       broker.fetchUnanswered(broker.mainAddress).length,
       effectiveConfig ? { ...effectiveConfig, modelPolicy: additions.modelPolicy } : undefined,
     );
+    if (event.systemPromptOptions?.sections) {
+      // Persist guidance in the transcript so automatic mail-triggered turns,
+      // which do not emit before_agent_start, retain the coordinator contract.
+      event.systemPromptOptions.sections.email_coordination = prompt;
+      return;
+    }
     return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
   });
 

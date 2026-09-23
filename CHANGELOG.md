@@ -14,11 +14,13 @@ Initial `0.1.0` release candidate (unpublished).
 
 ### Fixed
 
+- Persist main coordinator guidance as a structured system-prompt section so automatic mail-triggered turns retain it on current Pi.
+
 - Repair a missing final mail-journal newline atomically before recovery or later appends, preserving accepted mail across subsequent restarts.
 - Preserve `EMAIL_DELIVERY_FAILED` and the accepted mail ID through registry, publication, and failure-finalization errors; final bookkeeping failure does not undo routed delivery or invite resubmission.
 - Check turn/token budgets before assistant continuation and native Pi retries while retaining per-delivery/enforcement baselines. Reported token exhaustion prevents another assistant request; admitted responses can still overshoot the token limit.
 - Share model input-budget interpretation between mail and prompts so lockstep context/output metadata preserves complete configured instructions. Insufficient capacity rejects worker mail before acceptance and blocks startup instead of removing required policy or role instructions.
-- Restore extension loading across the Pi upgrade by moving the exact runtime guard, development pins, and CI baseline together, with the current supported baseline at 0.85.1. Keep rejection of other host versions and the public ExtensionAPI checks. Add Pi's undeclared `pi-server` SDK dependency only for development tests.
+- Restore startup after Pi upgrades by removing the exact-version gate. Keep public ExtensionAPI checks and wildcard host peers, with no upper version bound. Update development tests and provider fixtures for Pi 0.87.1 transcript system messages.
 - Mail journal appends now use one file descriptor with exact pre-offset rollback; any append rejection poisons that store instance until restart so later writes cannot follow a torn fragment. Reply-reservation fault coverage exercises tears in both journal lines. Registry save failures remove their temporary file.
 - A request journaled as delivered no longer reports ordinary success when its exact worker generation loses prompt/steer admission: `SendEmailResult.deliveryUncertain` preserves the stable ID and open obligation for same-identity recovery. Worker mailbox closures are generation-token bound, reserved replies remain pending in reply waits, and new-identity runtime preflight is bounded before acceptance.
 - Cleanup never disposes a Pi session while idle, streaming, compaction, admitted-prompt, or active-tool quiescence is false; caller deadlines retain the exact-address quarantine while the authoritative observation continues. Namespace acquisition now releases and fails visibly if its owner-transition guard cannot be removed.
@@ -32,7 +34,7 @@ Initial `0.1.0` release candidate (unpublished).
 - Worker settlement now waits for the tracked top-level prompt operation after public AgentSession settlement, correctly collapsing reentrant runs and overflow compact-and-retry starts without leaving recovered workers failed/running. Cleanup emits exactly one `session_shutdown`, repeatedly aborts work that appears during settlement, and rejects sparse worker-extension tool declarations before disposal is certified.
 - Prepared the public repository surface by removing the internal planning archive from published history, ignoring generated `.test-workspaces` evidence, generalizing exact-owner recovery guidance, and adding a prominent trusted-worker/cost warning.
 - The default model-selection policy is now catalog-neutral: it uses only advertised available model IDs, honors explicit available-model requests without silent substitution, and supports complete administrator replacement through `modelPolicy`.
-- The exact tested host baseline is Pi 0.85.1 with TypeBox 1.3.7. Startup rejects any other public Pi `VERSION` before extension registration or broker/state construction, while required Pi packages remain wildcard host peers.
+- The exact tested host baseline is Pi 0.87.1 with TypeBox 1.3.7. Development pins provide reproducibility only; startup checks required public APIs without imposing a host version bound.
 - Exact worker request-model matching now includes nested `samplingParams`; after admission, a detached clone is deeply frozen for worker use while provider/runtime-owned catalog models remain mutable.
 - `wait_for_replies` keeps its 120-second default and early completion but permits one bounded wait of up to 3600 seconds. Coordination guidance reuses identities only for continuing work in the same feature, worktree, or review-repair cycle.
 - The optional paid live-provider helper now waits for final main settlement plus a bounded grace, rejects RPC/tool/extension and canonical namespace inconsistencies, preserves unsafe state, and removes only Pi session/tool-settled namespaces after secret-free evidence is saved and read back.
@@ -113,7 +115,7 @@ Initial `0.1.0` release candidate (unpublished).
 - The npm package excludes internal implementation plans and enforces one shared entry-count, tarball-size, required-file, forbidden-path, and package-local Markdown-link policy in local smoke and CI.
 - Conversation and persisted-diff readers use the supported `SessionManager.open(...).getBranch()` path instead of Pi test-only parsing exports.
 - The Pi RPC E2E client now decodes split UTF-8 safely and rejects malformed or unterminated JSONL stdout records.
-- The `0.1.0` release candidate is CI/load-tested against Pi 0.85.1; wildcard host peers do not imply compatibility with untested Pi versions.
+- The `0.1.0` release candidate is CI/load-tested against Pi 0.87.1; wildcard host peers allow later versions without guaranteeing compatibility with future API changes.
 
 #### Security
 

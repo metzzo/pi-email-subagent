@@ -29,7 +29,7 @@ npm run validate
 
 `npm run validate` runs TypeScript checking, the production dependency-license policy, all deterministic unit/integration/real-RPC E2E tests, and a clean packed-artifact install/load smoke. Required tests use a scripted mock provider and do not incur model charges.
 
-The development dependencies pin Pi 0.85.1. They also include `@earendil-works/pi-server@0.85.1` because Pi's unbundled SDK imports it without declaring the dependency. This is a test-only workaround; the bundled Pi CLI supplies the extension runtime and needs no extra global installation.
+The development dependencies pin Pi 0.87.1 for reproducible tests, not as a runtime version restriction. They also include `@earendil-works/pi-server@0.87.1` because Pi's unbundled SDK imports it without declaring the dependency. This is a test-only workaround; the bundled Pi CLI supplies the extension runtime and needs no extra global installation.
 
 Useful focused commands:
 

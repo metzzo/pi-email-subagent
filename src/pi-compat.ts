@@ -1,7 +1,3 @@
-import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-
-export const SUPPORTED_PI_VERSION = "0.85.1";
-
 interface Feature {
   path: string;
   present: (surface: unknown) => boolean;
@@ -31,28 +27,11 @@ function callable(surface: unknown, key: string): boolean {
   return typeof member(surface, key) === "function";
 }
 
-function supportedVersionError(actual: unknown): Error {
-  const shown = typeof actual === "string" && /^[0-9A-Za-z.+-]{1,64}$/.test(actual)
-    ? actual
-    : "missing or invalid";
-  return new Error(
-    `pi-email-subagent requires exact Pi ${SUPPORTED_PI_VERSION}; actual ${shown}. `
-    + `Install Pi ${SUPPORTED_PI_VERSION} or use an extension release tested for your Pi version.`,
-  );
-}
-
 function extensionSurfaceError(missing: readonly string[]): Error {
   return new Error(
-    `pi-email-subagent requires the Pi ${SUPPORTED_PI_VERSION} ExtensionAPI surface; missing: ${missing.join(", ")}. `
-    + `Install Pi ${SUPPORTED_PI_VERSION} or use an extension release tested for your Pi version.`,
+    `pi-email-subagent requires the public Pi ExtensionAPI surface; missing: ${missing.join(", ")}. `
+    + "Update Pi to a version providing these APIs.",
   );
-}
-
-/** Exact supported-version gate. Internal host exports are not duplicated as speculative descriptors. */
-export function assertPiVersion(codingAgent: Record<string, unknown>): void {
-  if (member(codingAgent, "VERSION") !== SUPPORTED_PI_VERSION) {
-    throw supportedVersionError(member(codingAgent, "VERSION"));
-  }
 }
 
 /** Verify only the public ExtensionAPI facade supplied to this extension. */
@@ -61,8 +40,4 @@ export function assertExtensionApiFeatures(pi: unknown): void {
     .filter((feature) => !feature.present(pi))
     .map((feature) => `ExtensionAPI.${feature.path}`);
   if (missing.length > 0) throw extensionSurfaceError(missing);
-}
-
-export function assertSupportedPiRuntime(): void {
-  assertPiVersion(PiCodingAgent as unknown as Record<string, unknown>);
 }

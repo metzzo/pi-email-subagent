@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
-import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt, type AssistantMessage } from "@earendil-works/pi-ai";
 import { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { AgentBroker } from "../../src/broker.ts";
 import { DEFAULT_CONFIG } from "../../src/config.ts";
@@ -25,7 +25,7 @@ for (const contextWindow of [128_000, 5_000]) {
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow, maxTokens: contextWindow,
       }],
       streamSimple(model, context) {
-        prompt = context.systemPrompt ?? "";
+        prompt = getCurrentSystemPrompt(context.messages);
         const stream = createAssistantMessageEventStream();
         const message: AssistantMessage = {
           role: "assistant", content: [{ type: "text", text: "Notification read." }],

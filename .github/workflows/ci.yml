@@ -20,8 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # Wildcard peers are host-provided; 0.1.0 support is validated only on this Pi line.
-        pi: ["0.85.1"]
+        # Reproducible test baseline, not a runtime version restriction.
+        pi: ["0.87.1"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:

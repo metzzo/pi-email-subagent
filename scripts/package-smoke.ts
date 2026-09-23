@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { assertPackageMarkdownLinks, assertPackageSurface, type PackResult } from "./package-policy.ts";
-import { SUPPORTED_PI_VERSION } from "../src/pi-compat.ts";
 import { PiRpcClient } from "../test/e2e/helpers/rpc-client.ts";
 import { MailStore, parseMailEvent } from "../src/mail-store.ts";
 
@@ -49,7 +48,8 @@ try {
     PATH: `${join(root, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
   };
   const hostVersion = run(pi, ["--version"], { cwd: consumer, env }).stdout.trim();
-  assert.equal(hostVersion, SUPPORTED_PI_VERSION, "packed smoke must use the exact tested Pi host version");
+  const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+  assert.equal(hostVersion, pkg.devDependencies["@earendil-works/pi-coding-agent"], "packed smoke must use the development Pi baseline");
   const installedPackage = join(consumer, "node_modules", "pi-email-subagent");
   run(pi, ["install", installedPackage], { cwd: consumer, env });
   const rpc = run(pi, ["--mode", "rpc", "--no-session"], {
@@ -116,7 +116,7 @@ try {
 
   const settings = JSON.parse(await readFile(join(agentDir, "settings.json"), "utf8")) as { packages?: unknown[] };
   assert.equal(settings.packages?.length, 1, "package install was not persisted in the isolated agent directory");
-  console.log(`package smoke passed on supported Pi ${SUPPORTED_PI_VERSION}: ${pack.files.length} files, packed direct command passed with job ${directJobId}; old helper job ${proof.job.id} also succeeded`);
+  console.log(`package smoke passed on Pi ${hostVersion}: ${pack.files.length} files, packed direct command passed with job ${directJobId}; old helper job ${proof.job.id} also succeeded`);
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

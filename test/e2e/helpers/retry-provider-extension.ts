@@ -2,8 +2,8 @@
  * Deterministic provider used only by provider-retry E2E tests.
  * Pi owns every retry. This script never retries, re-prompts, or replays work.
  */
-import type { Api, AssistantMessage, Context, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, TranscriptContext, ToolCall, Message, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 export const RETRY_PROVIDER_ID = "mock-provider-retry";
@@ -11,7 +11,7 @@ export const RETRY_MODEL_ID = "mock-provider-retry";
 export const RETRY_WORKER_ADDRESS = "worker.provider-retry@mock-provider-retry.com";
 process.env.PI_EMAIL_RETRY_PROVIDER_AUTH ??= "configured";
 
-interface ToolCallPlan { name: string; arguments: Record<string, unknown> }
+interface ToolCallPlan { name: string; arguments: ToolCall["arguments"] }
 type Plan = { toolCalls: ToolCallPlan[] } | { text: string } | { error: string };
 
 let toolCallSequence = 0;
@@ -74,11 +74,10 @@ function planMain(messages: readonly Message[]): Plan {
   const ids = correlationIds(messages);
 
   if (last?.role === "toolResult") {
-    if (last.toolName === "send_email") {
-      return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: [ids.at(-1)], timeout_seconds: 30, collect: true } }] };
-    }
-    if (last.toolName === "manage_agent" && instruction.includes("RESTART")) {
-      return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: [ids.at(-1)], timeout_seconds: 30, collect: true } }] };
+    if (last.toolName === "send_email" || (last.toolName === "manage_agent" && instruction.includes("RESTART"))) {
+      const id = ids.at(-1);
+      if (!id) throw new Error("Expected a correlated request before waiting for replies");
+      return { toolCalls: [{ name: "wait_for_replies", arguments: { request_ids: [id], timeout_seconds: 30, collect: true } }] };
     }
     if (last.toolName === "wait_for_replies") {
       return { text: instruction.includes("RESTART") ? "E2E PROVIDER EXPLICIT RECOVERY COMPLETE" : instruction.includes("EXHAUST") ? "E2E PROVIDER EXHAUSTED" : "E2E PROVIDER RECOVERED" };
@@ -207,7 +206,7 @@ function emptyUsage() {
   };
 }
 
-function streamRetryProvider(model: Model<Api>, context: Context, options?: SimpleStreamOptions) {
+function streamRetryProvider(model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) {
   const stream = createAssistantMessageEventStream();
   const output = {
     role: "assistant",
@@ -219,9 +218,10 @@ function streamRetryProvider(model: Model<Api>, context: Context, options?: Simp
     stopReason: "stop",
     timestamp: Date.now(),
   } as AssistantMessage;
-  const plan = (context.systemPrompt ?? "").includes("Main Agent Coordination")
-    ? planMain(context.messages ?? [])
-    : planWorker(context.messages ?? []);
+  const messages = context.messages.filter((message) => message.role !== "system");
+  const plan = getCurrentSystemPrompt(context.messages).includes("Main Agent Coordination")
+    ? planMain(messages)
+    : planWorker(messages);
   stream.push({ type: "start", partial: output });
   if ("error" in plan) {
     output.stopReason = options?.signal?.aborted ? "aborted" : "error";
