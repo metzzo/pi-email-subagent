@@ -28,9 +28,14 @@ export default async function contractExtension(pi: ExtensionAPI): Promise<void>
     { ...valid, tools: ["x".repeat(256)] }, { ...valid, tools: ["same", "same"] },
     { ...valid, effects: undefined }, { ...valid, effects: [] }, { ...valid, effects: {} },
     { ...valid, effects: { extra: "read" } }, { ...valid, effects: { contract_observe: "unknown" } },
-    { ...valid, tools: ["bash"], effects: { bash: "write" } },
+    { ...valid, tools: ["bash"], effects: { bash: "read" } },
+    { ...valid, tools: ["read"], effects: { read: "write" } },
+    { ...valid, tools: ["send_email"], effects: { send_email: "read" } },
   ];
   for (const value of invalid) { const result = collect([value]); assert.equal(result.registrations.length, 0); assert.equal(result.issues.length, 1); }
+  const overrides = { ...valid, tools: ["read", "bash"], effects: { read: "read", bash: "write" } };
+  assert.equal(collect([overrides]).registrations.length, 1);
+  assert.equal(collect([overrides, { ...overrides, name: "collision" }]).issues.length, 1);
   assert.equal(collect([valid, valid]).issues.length, 1);
   assert.equal(collect([valid, { ...valid, name: "collision" }]).issues.length, 1);
   const many = Array.from({ length: 17 }, (_, i) => ({ ...valid, name: `program-${i}`, tools: [], effects: {} }));

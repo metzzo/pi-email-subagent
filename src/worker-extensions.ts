@@ -53,7 +53,9 @@ function registrationIssue(value: unknown): string | undefined {
     || tools.some((tool) => !Object.hasOwn(effects, tool))) {
     return "Ignored a worker extension registration with invalid tool effects.";
   }
-  if (tools.some((tool) => RESERVED_TOOL_NAMES.includes(tool as typeof RESERVED_TOOL_NAMES[number]))) {
+  if (tools.some((tool) => RESERVED_TOOL_NAMES.includes(tool as typeof RESERVED_TOOL_NAMES[number])
+    && !(tool === "read" && effects[tool] === "read")
+    && !(tool === "bash" && effects[tool] === "write"))) {
     return "Ignored a worker extension registration that claimed a reserved tool name.";
   }
   return undefined;
