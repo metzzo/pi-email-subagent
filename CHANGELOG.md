@@ -14,6 +14,8 @@ Initial `0.1.0` release candidate (unpublished).
 
 ### Fixed
 
+- Restore missing main coordinator guidance in automatic mail requests when Pi refreshes away run-only prompt sections; retain the existing transcript guidance for user-triggered runs.
+- Serialize main mailbox fetches behind in-flight mail delivery so a fast automatic mail-triggered turn sees the pushed request after its delivery journal write.
 - Persist main coordinator guidance as a structured system-prompt section so automatic mail-triggered turns retain it on current Pi.
 
 - Repair a missing final mail-journal newline atomically before recovery or later appends, preserving accepted mail across subsequent restarts.
@@ -29,6 +31,7 @@ Initial `0.1.0` release candidate (unpublished).
 
 ### Changed
 
+- Make main mailbox fetching conditional on a positive displayed unanswered count or incoming mail, and replace workers' unconditional start/before-idle fetch rule with incoming-mail/broker-reminder guidance. Automatic main delivery, worker idle reminders, and structured reply obligations are unchanged.
 - Permit protocol-v2 worker extensions to override built-in `read` and `bash` only with their existing effects (`read` and `write`, respectively). Other reserved names and mismatched effects remain rejected; profile allowlists and exact declared-tool checks are unchanged.
 - The default `worker` role profile now lists `compact_and_continue`, so the optional protocol-v2 `pi-compact-warning` extension's checkpoint/compact/resume handoff activates in default workers. Without that extension installed the entry is inert: Pi ignores unknown tool names and the worker logs the omission. Read-only default roles (`scout`, `reviewer`) deliberately exclude it because its honest session-mutating `write` effect would flip their writability classification; use a custom profile to opt them in.
 - Added bounded protocol-v2 opt-in worker extension factories: ordinary discovery remains disabled, collectors register synchronously, each tool requires a trusted (non-sandboxing) `read`/`write` effect declaration and activates only when named in the effective role/address profile, and every factory API rejects immediate or lifecycle-time registration outside its immutable declaration before the existing post-bind exact check.

@@ -292,6 +292,62 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
     }
   });
 
+  it("answers a pushed main request without startup or before-idle mailbox polling", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId, sessionFile } = await start({ persistSession: true });
+    try {
+      assert.ok(sessionFile);
+      const emptyMark = client.mark();
+      await client.prompt("E2E PING");
+      await client.waitFor(assistantText("E2E PONG"), "empty-mailbox main response", 90_000, emptyMark);
+      await client.waitForSettlement(emptyMark);
+      assert.equal(client.events().slice(emptyMark).some((line) => line.type === "tool_execution_start" && line.toolName === "fetch_emails"), false);
+
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE MAIN REQUEST NOWAIT");
+      const delegated = sendResult(await client.waitFor(toolEnd("send_email"), "main delegation", 90_000, mark));
+      const pushed = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as any)?.customType === "pi-email-subagent.email"
+          && (line.message as any)?.details?.subject === "Answer this pushed main request",
+        "automatically pushed response-required main request", 90_000, mark,
+      );
+      const request = (pushed.message as any).details;
+      assert.equal(request.requiresResponse, true);
+      assert.equal(request.from, WORKER_ADDRESS);
+      const pushIndex = client.events().indexOf(pushed);
+      const fetched = await client.waitFor(toolEnd("fetch_emails"), "main fetch after push", 90_000, pushIndex);
+      assert.deepEqual((fetched.result as any).details.emails.map((email: any) => email.id), [request.id]);
+      const answered = await client.waitFor(
+        (line) => toolEnd("send_email")(line) && sendResult(line)?.envelope?.inReplyTo === request.id,
+        "main structured reply to pushed request", 90_000, pushIndex,
+      );
+      assert.equal(sendResult(answered).envelope.completion.status, "completed");
+      assert.equal(sendResult(answered).envelope.message, "Main answered the automatically pushed request.", "main guidance survives automatic mail turns and their tool continuations");
+      await client.waitForSettlement(client.events().indexOf(answered));
+      await eventuallyRegistry(agentDir, sessionId, (value) => value.agents[0]?.state === "idle", "worker settled after main response");
+      assert.equal(await client.close(), 0, client.stderr);
+
+      const fetches = client.events().filter((line) => line.type === "tool_execution_start" && line.toolName === "fetch_emails");
+      assert.equal(fetches.length, 1, "main fetches only in response to the pushed request");
+      assert.ok(client.events().indexOf(fetches[0]!) > pushIndex);
+      const entries = await readSessionEntries(sessionFile!);
+      const coordination = entries.find((entry) => entry.type === "message" && entry.message?.role === "system"
+        && entry.message.sections?.email_coordination)?.message.sections.email_coordination;
+      assert.match(coordination, /Current unanswered main-thread requests: 0/);
+      assert.match(coordination, /fetch_emails only when the unanswered count shown is above 0 or a mail message arrived/i);
+      assert.equal(emailCustomEntries(entries, request.id).length, 1);
+      const store = new MailStore(join(agentDir, "subagents", sessionId, "mail.jsonl"));
+      await store.init();
+      assert.equal(store.get(request.id)?.answeredBy, sendResult(answered).envelope.id);
+      assert.ok(store.get(delegated.correlationId)?.answeredBy, "the original worker request is answered too");
+      assert.deepEqual(store.unanswered(request.to), []);
+      assert.deepEqual(store.unanswered(WORKER_ADDRESS), []);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
   it("collects a pre-wait reply with no duplicate custom message through observed final settlement", { timeout: 240_000 }, async () => {
     const { client, agentDir, sessionFile } = await start({ persistSession: true });
     try {
@@ -938,6 +994,45 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       const requests = journal.filter((event) => event.type === "email.created" && event.email?.kind === "request");
       assert.deepEqual(requests.map((event) => event.email.id), [sent.correlationId]);
       assert.equal(journal.some((event) => event.type === "email.answered" && event.id === sent.correlationId), false);
+    } finally {
+      await client.close().catch(() => undefined);
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("answers after the real worker idle reminder without an unconditional before-idle fetch", { timeout: 240_000 }, async () => {
+    const { client, agentDir, sessionId } = await start();
+    try {
+      const mark = client.mark();
+      await client.prompt("E2E DELEGATE REMINDER ONCE");
+      const sent = sendResult(await client.waitFor(toolEnd("send_email"), "reminder request", 90_000, mark));
+      const waited = waitResult(await client.waitFor(toolEnd("wait_for_replies"), "reply after idle reminder", 120_000, mark));
+      assert.equal(waited.complete, true);
+      assert.equal(waited.timedOut, false);
+      assert.deepEqual(waited.items.map((item) => [item.requestId, item.state]), [[sent.correlationId, "answered"]]);
+      assert.ok(waited.items[0]?.reply?.id);
+      await client.waitForSettlement(mark);
+      const registry = await eventuallyRegistry(agentDir, sessionId,
+        (value) => value.agents[0]?.state === "idle" && Boolean(value.agents[0]?.sessionFile), "worker answered after reminder");
+      assert.equal(await client.close(), 0, client.stderr);
+
+      const entries = await readSessionEntries(registry.agents[0].sessionFile);
+      const content = (entry: Record<string, any>) => JSON.stringify(entry.message?.content ?? "");
+      const idleIndex = entries.findIndex((entry) => entry.message?.role === "assistant" && content(entry).includes("WORKER WAITING FOR REMINDER"));
+      const reminders = entries.filter((entry) => entry.message?.role === "user" && content(entry).includes("<mailbox-enforcement"));
+      assert.equal(reminders.length, 1, "the broker issues one real idle reminder");
+      const reminderIndex = entries.indexOf(reminders[0]!);
+      const fetches = entries.filter((entry) => entry.message?.role === "toolResult" && entry.message.toolName === "fetch_emails");
+      assert.equal(fetches.length, 1, "the worker does not poll before its initial idle attempt or after replying");
+      assert.ok(idleIndex >= 0 && idleIndex < reminderIndex);
+      assert.ok(entries.indexOf(fetches[0]!) > reminderIndex, "the first fetch follows the broker reminder");
+      assert.deepEqual(fetches[0]!.message.details.emails.map((email: any) => email.id), [sent.correlationId]);
+      const store = new MailStore(join(agentDir, "subagents", sessionId, "mail.jsonl"));
+      await store.init();
+      const replyId = waited.items[0]!.reply!.id;
+      assert.equal(store.get(sent.correlationId)?.answeredBy, replyId);
+      assert.equal(store.get(replyId)?.completion?.status, "completed");
+      assert.deepEqual(store.unanswered(WORKER_ADDRESS), []);
     } finally {
       await client.close().catch(() => undefined);
       await rm(agentDir, { recursive: true, force: true });
