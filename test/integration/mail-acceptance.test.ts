@@ -61,7 +61,7 @@ for (const fault of ["registry", "publication", "failure-finalization"] as const
       }
       armed = true;
       const sender = fault === "failure-finalization" ? record.address : mainAddress;
-      const [send] = createWorkerMailTools({
+      const [send, fetch] = createWorkerMailTools({
         sendEmail: (input, signal) => broker.send(sender, input, signal),
         fetchEmails: () => broker.fetchUnansweredBatch(sender),
       });
@@ -81,6 +81,13 @@ for (const fault of ["registry", "publication", "failure-finalization"] as const
       await recovered.init();
       assert.equal(recovered.list().length, 1);
       assert.equal(recovered.list()[0]!.deliveryState, "queued");
+      assert.match(fetch.description, /Main: call only when the displayed unanswered count is above 0 or a mail message arrived in this conversation/);
+      assert.match(fetch.description, /Workers: call when mail arrives or a broker reminder requests it/);
+      assert.deepEqual(fetch.promptGuidelines, [
+        "Answer every returned response-required email with reply_to and structured completion; ordinary assistant text is not a reply.",
+        "Do not fetch unconditionally at startup or before idle; workers with unanswered mail receive broker reminders.",
+      ]);
+      assert.doesNotMatch(fetch.description, /at the beginning|before stopping|before becoming idle/i);
     } finally {
       armed = false;
       if (fault !== "publication") {

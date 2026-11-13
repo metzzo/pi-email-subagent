@@ -67,7 +67,9 @@ describe("mail prompts", () => {
     assert.match(prompt, /unsolicited high mail cannot interrupt busy main/i);
     assert.match(prompt, /stable ID.*never resend accepted work/is);
     assert.match(prompt, /Pi owns live retries.*same identity\/session\/provider/is);
-    assert.match(prompt, /fetch_emails at the start and before idle/i);
+    assert.match(prompt, /7\. Call fetch_emails only when the unanswered count shown is above 0 or a mail message arrived in this conversation/i);
+    assert.match(prompt, /answer every returned response-required email; ordinary assistant text is not a reply/i);
+    assert.doesNotMatch(prompt, /at the start|before idle/i);
     assert.match(prompt, /background or detached processes/i);
     assert.equal((prompt.match(/^\d+\. /gm) ?? []).length, 8);
     assert.doesNotMatch(prompt, /Crash-recovery delivery|Required email etiquette|Pi agent retry and failure recovery/);
@@ -110,6 +112,16 @@ describe("mail prompts", () => {
     assert.match(prompt, /Current unanswered main-thread requests: 2/);
     assert.ok(Buffer.byteLength(prompt, "utf8") < 15_000);
   });
+
+  for (const unanswered of [0, 2]) {
+    it(`keeps main fetching conditional with ${unanswered} displayed unanswered requests`, () => {
+      const prompt = mainCoordinatorPrompt("main@gpt-5.6-sol.com", "gpt-5.6-sol", "high", ["gpt-5.6-sol"], unanswered);
+      assert.match(prompt, /7\. Call fetch_emails only when the unanswered count shown is above 0 or a mail message arrived in this conversation/i);
+      assert.match(prompt, new RegExp(`Current unanswered main-thread requests: ${unanswered}\\.`));
+      assert.match(prompt, /answer every returned response-required email; ordinary assistant text is not a reply/i);
+      assert.doesNotMatch(prompt, /at the start|before idle|when mail arrives or a broker reminder/i);
+    });
+  }
 
   it("bounds configured capability intent by complete parsed entries", () => {
     const config: SubagentConfig = structuredClone(DEFAULT_CONFIG);
@@ -161,6 +173,9 @@ describe("mail prompts", () => {
     const agent = record();
     agent.instructions = "Implement focused changes and validate them.";
     const prompt = subagentPrompt(agent, "main@gpt-5.6-sol.com", ["gpt-5.6-sol"]);
+    assert.match(prompt, /7\. Call fetch_emails when mail arrives or a broker reminder requests it/i);
+    assert.match(prompt, /answer every returned response-required email; ordinary assistant text is not a reply/i);
+    assert.doesNotMatch(prompt, /at the start|before idle|unanswered count shown/i);
     assert.match(prompt, /Nested delegation is unsupported/i);
     assert.match(prompt, /Authorized implementation means make the changes and run appropriate validation/i);
     assert.match(prompt, /read-only request forbids edits/i);

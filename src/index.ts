@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { existsSync, writeFileSync } from "node:fs";
-import type { Model } from "@earendil-works/pi-ai";
+import { getCurrentSystemMessage, type Model } from "@earendil-works/pi-ai";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import * as PiTui from "@earendil-works/pi-tui";
@@ -103,7 +103,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     },
     fetchEmails: async () => {
       const active = await ensureBroker(currentContext);
-      return active.fetchUnansweredBatch(active.mainAddress);
+      return active.fetchMainUnansweredBatch();
     },
   });
 
@@ -498,15 +498,14 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("before_agent_start", (event, ctx) => {
-    currentContext = ctx;
+  function coordinatorPrompt(ctx: ExtensionContext): string | undefined {
     if (!broker || !ctx.model) return;
     const additions = budgetPromptAdditions(
       effectiveConfig?.modelPolicy ?? DEFAULT_MODEL_POLICY,
       undefined,
       ctx.model,
     );
-    const prompt = mainCoordinatorPrompt(
+    return mainCoordinatorPrompt(
       broker.mainAddress,
       ctx.model.id,
       pi.getThinkingLevel(),
@@ -514,13 +513,32 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
       broker.fetchUnanswered(broker.mainAddress).length,
       effectiveConfig ? { ...effectiveConfig, modelPolicy: additions.modelPolicy } : undefined,
     );
+  }
+
+  pi.on("before_agent_start", (event, ctx) => {
+    currentContext = ctx;
+    const prompt = coordinatorPrompt(ctx);
+    if (!prompt) return;
     if (event.systemPromptOptions?.sections) {
-      // Persist guidance in the transcript so automatic mail-triggered turns,
-      // which do not emit before_agent_start, retain the coordinator contract.
+      // Record guidance alongside the user-triggered run's prompt sections.
       event.systemPromptOptions.sections.email_coordination = prompt;
       return;
     }
     return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
+  });
+
+  pi.on("context_with_system", (event, ctx) => {
+    // Automatic mail turns skip before_agent_start. Pi can drop run-only
+    // sections on their next response, so restore missing guidance per request.
+    if (getCurrentSystemMessage(event.messages)?.sections?.email_coordination) return;
+    const prompt = coordinatorPrompt(ctx);
+    if (!prompt) return;
+    return { messages: [...event.messages, {
+      role: "system" as const,
+      content: "",
+      sections: { email_coordination: prompt },
+      timestamp: Date.now(),
+    }] };
   });
 
   pi.on("agent_settled", (_event, ctx) => {

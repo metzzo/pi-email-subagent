@@ -16,6 +16,8 @@
  *   user "E2E DELEGATE SLOW <ms> WAIT TIMEOUT"       → one zero-second wait, then late-reply turn
  *   user "E2E DELEGATE REVIEWER ..."                → send_email to the reviewer
  *   user "E2E DELEGATE BOTH ..."                    → two parallel send_email calls
+ *   user "E2E DELEGATE MAIN REQUEST NOWAIT"          → worker sends a request that main answers after push
+ *   user "E2E DELEGATE REMINDER ONCE"                → worker first idles without fetching, then answers the reminder
  *   user "E2E DELEGATE WORK"                        → writable worker performs edit/write/bash
  *   user "E2E WATCHDOG IDLE|RUN PATH <path>"         → writable worker runs a real silent Bash child
  *   user "E2E CLEANUP START|STOP ..."                 → writable worker runs/stops a parent+descendant process
@@ -198,6 +200,18 @@ function planMain(messages: readonly Message[]): Plan {
         return { toolCalls: [{ name: "manage_agent", arguments: { address: MOCK_WORKER_ADDRESS, action: "archive" } }] };
       }
     }
+    if (last.toolName === "fetch_emails" && instruction.includes("MAIN REQUEST")) {
+      return { toolCalls: unansweredPairs(lastText).map((pair) => ({
+        name: "send_email",
+        arguments: {
+          to: pair.from,
+          reply_to: pair.replyTo,
+          message: "Main answered the automatically pushed request.",
+          priority: "low",
+          completion: { status: "completed", summary: "Main request answered.", artifacts: [], validation: ["Fetched the pushed request by its exact mail ID"], remaining: [] },
+        },
+      })) };
+    }
     if (last.toolName === "send_email") {
       if (instruction.includes("NOWAIT")) return { text: "E2E SENT" };
       const ids = correlationIds(messages);
@@ -220,6 +234,9 @@ function planMain(messages: readonly Message[]): Plan {
     return { text: "E2E PONG" };
   }
 
+  if (lastText.includes("<agent-email") && instruction.includes("MAIN REQUEST") && unansweredPairs(lastText).length > 0) {
+    return { toolCalls: [{ name: "fetch_emails", arguments: {} }] };
+  }
   if (lastText.includes('<agent-email') && lastText.includes('kind="notification"') && lastText.includes("Urgent unsolicited notification")) {
     return { text: "E2E UNSOLICITED HIGH SEEN" };
   }
@@ -365,7 +382,11 @@ function planMain(messages: readonly Message[]): Plan {
     const priority = lastText.includes("HIGH") ? "high" : "low";
     const crash = lastText.includes("CRASH") ? " CRASH" : "";
     const ignore = lastText.includes("IGNORE") ? " IGNORE" : "";
-    const message = lastText.includes("NESTED")
+    const message = lastText.includes("MAIN REQUEST")
+      ? "MAIN REQUEST: send a response-required request to main and answer this original request."
+      : lastText.includes("REMINDER ONCE")
+        ? "REMINDER ONCE: initially stop without fetching or replying; answer after the broker idle reminder."
+      : lastText.includes("NESTED")
       ? "NESTED PARENT: delegate one response-required child request, wait for its exact result, then answer upstream."
       : lastText.includes("UNSOLICITED HIGH")
         ? "UNSOLICITED HIGH STRUCTURED BLOCKED: send one high notification plus one structured blocked reply."
@@ -515,6 +536,18 @@ function planWorker(messages: readonly Message[]): Plan {
             : { status: "completed", summary: "Mailbox work completed.", artifacts: [], validation: ["Fetched and answered the exact request"], remaining: [] },
         },
       }));
+      if (pairs.length > 0 && lastText.includes("MAIN REQUEST")) {
+        replies.unshift({
+          name: "send_email",
+          arguments: {
+            to: pairs[0]!.from,
+            subject: "Answer this pushed main request",
+            message: "A response-required request delivered without main polling.",
+            priority: "low",
+            requires_response: true,
+          },
+        });
+      }
       if (pairs.length > 0 && lastText.includes("UNSOLICITED HIGH")) {
         replies.unshift({
           name: "send_email",
@@ -553,6 +586,9 @@ function planWorker(messages: readonly Message[]): Plan {
       { name: "send_email", arguments: { to: MOCK_REVIEWER_ADDRESS, subject: "Nested LLM must be rejected", message: "No child may be created", priority: "low" } },
       { name: "send_email", arguments: { to: "monitor.route@mechanistic.com", subject: "Authorized Python notification", message: JSON.stringify({ notify_to: MOCK_WORKER_ADDRESS }), priority: "low" } },
     ] };
+  }
+  if (lastText.includes("<agent-email") && lastText.includes("REMINDER ONCE")) {
+    return { text: "WORKER WAITING FOR REMINDER" };
   }
   if (lastText.includes("<mailbox-enforcement") || lastText.includes("<agent-email")) {
     return { toolCalls: [{ name: "fetch_emails", arguments: {} }] };

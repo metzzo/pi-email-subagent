@@ -2933,6 +2933,12 @@ export class AgentBroker {
     return selected;
   }
 
+  async fetchMainUnansweredBatch(): Promise<{ emails: EmailEnvelope[]; total: number }> {
+    // Presentation can start a main turn before its delivery journal write
+    // settles. Read behind that same queue so the triggered fetch sees it.
+    return this.withMailSerialization(async () => this.fetchUnansweredBatch(this.mainAddress));
+  }
+
   fetchUnansweredBatch(
     addressInput: string,
     authority?: WorkerMailboxAuthority,
