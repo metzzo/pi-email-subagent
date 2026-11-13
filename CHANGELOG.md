@@ -14,6 +14,7 @@ Initial `0.1.0` release candidate (unpublished).
 
 ### Fixed
 
+- Align the shared `fetch_emails` tool description and prompt guidelines with conditional main/worker fetching instead of requiring startup/before-idle polling.
 - Restore missing main coordinator guidance in automatic mail requests when Pi refreshes away run-only prompt sections; retain the existing transcript guidance for user-triggered runs.
 - Serialize main mailbox fetches behind in-flight mail delivery so a fast automatic mail-triggered turn sees the pushed request after its delivery journal write.
 - Persist main coordinator guidance as a structured system-prompt section so automatic mail-triggered turns retain it on current Pi.

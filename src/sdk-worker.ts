@@ -113,9 +113,12 @@ export function createWorkerMailTools(config: Pick<WorkerStartConfig, "sendEmail
     name: "fetch_emails",
     label: "Fetch unanswered emails",
     description:
-      "Return response-required emails in your mailbox that do not yet have a successful reply. Call at the beginning of mailbox work and before stopping; answer with reply_to and structured completion.",
+      "Return response-required emails in your mailbox that do not yet have a successful reply. Main: call only when the displayed unanswered count is above 0 or a mail message arrived in this conversation. Workers: call when mail arrives or a broker reminder requests it. Answer with reply_to and structured completion.",
     promptSnippet: "List your unanswered response-required virtual emails.",
-    promptGuidelines: ["Before becoming idle, call fetch_emails() and substantively answer every returned request."],
+    promptGuidelines: [
+      "Answer every returned response-required email with reply_to and structured completion; ordinary assistant text is not a reply.",
+      "Do not fetch unconditionally at startup or before idle; workers with unanswered mail receive broker reminders.",
+    ],
     executionMode: "sequential" as const,
     parameters: Type.Object({}, { additionalProperties: false }),
     async execute() {
