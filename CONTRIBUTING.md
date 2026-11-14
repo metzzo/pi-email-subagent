@@ -29,7 +29,9 @@ npm run validate
 
 `npm run validate` runs TypeScript checking, the production dependency-license policy, all deterministic unit/integration/real-RPC E2E tests, and a clean packed-artifact install/load smoke. Required tests use a scripted mock provider and do not incur model charges.
 
-The development dependencies pin Pi 0.87.1 for reproducible tests, not as a runtime version restriction. They also include `@earendil-works/pi-server@0.87.1` because Pi's unbundled SDK imports it without declaring the dependency. This is a test-only workaround; the bundled Pi CLI supplies the extension runtime and needs no extra global installation.
+The development dependencies pin Pi 1.5.2 and TypeBox 1.3.27 for reproducible tests, not as a runtime version restriction. The same source is tested on Pi 0.87.1 and 1.5.2. Pi 1.5 no longer uses the experimental server package, so no direct `pi-server` dependency is needed. Pi core imports resolve to the running host through its extension loader; runtime dependencies not aliased by that loader must remain compatible with both hosts.
+
+To check the older SDK, run `npm install --no-save --package-lock=false @earendil-works/pi-agent-core@0.87.1 @earendil-works/pi-ai@0.87.1 @earendil-works/pi-coding-agent@0.87.1 @earendil-works/pi-tui@0.87.1 @earendil-works/pi-server@0.87.1 typebox@1.3.7`, then `npm run check && npm test && npm run test:integration && npm run test:e2e`. Restore the committed development tree afterward with `npm ci`. The temporary server install supplies an undeclared import in the older unbundled SDK; it is not retained in the 1.5.2 tree. Test helpers isolate their Pi child processes with temporary agent directories.
 
 Useful focused commands:
 

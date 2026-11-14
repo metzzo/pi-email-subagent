@@ -13,10 +13,10 @@ describe("release contract truth", () => {
     for (const [name, range] of Object.entries(pkg.peerDependencies)) if (name.startsWith("@earendil-works/pi-")) assert.equal(range, "*", name);
     assert.doesNotMatch(await text("src/pi-compat.ts"), /VERSION|assertPiVersion/);
     for (const [name, pinned] of Object.entries(pkg.devDependencies)) if (name.startsWith("@earendil-works/pi-")) assert.equal(pinned, version, name);
-    assert.ok((await text(".github/workflows/ci.yml")).includes(`pi: ["${version}"]`));
-    assert.ok((await text("README.md")).includes(`tested on Pi ${version} on Node`));
+    assert.ok((await text(".github/workflows/ci.yml")).includes(`pi: ["${version}", "0.87.1"]`));
+    assert.ok((await text("README.md")).includes(`tested on pi 0.87.1 and ${version} on Node`));
     assert.ok((await text("CONTRIBUTING.md")).includes(`development dependencies pin Pi ${version}`));
-    assert.ok((await text("CONTRIBUTING.md")).includes(`@earendil-works/pi-server@${version}`));
+    assert.equal(pkg.devDependencies["@earendil-works/pi-server"], undefined, "obsolete server package is not a runtime dependency");
     assert.ok((await text("CHANGELOG.md")).includes(`exact tested host baseline is Pi ${version}`));
     assert.match(await text("scripts/package-smoke.ts"), /pkg\.devDependencies/);
   });

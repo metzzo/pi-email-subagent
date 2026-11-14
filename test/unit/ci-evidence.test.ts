@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { it } from "node:test";
 
-it("CI surfaces the full redirected test report without changing validation or uploading session data", async () => {
+it("CI validates both SDKs and surfaces full reports without uploading session data", async () => {
   const workflow = await readFile(".github/workflows/ci.yml", "utf8");
-  assert.match(workflow, /- run: npm run validate\n/);
+  assert.match(workflow, /if: matrix\.pi == '1\.5\.2'\n\s+run: npm run validate\n/);
+  assert.match(workflow, /if: matrix\.pi == '0\.87\.1'\n\s+run: npm run check && npm run check:licenses && npm test && npm run test:integration && npm run test:e2e\n/);
   const report = workflow.match(/- name: Surface the redirected test report on failure\n        if: failure\(\)\n        run: \|\n([\s\S]*?)(?=      - name:)/)![1]!.replace(/^          /gm, "");
   const root = await mkdtemp(join(tmpdir(), "ci-evidence-"));
   try {
