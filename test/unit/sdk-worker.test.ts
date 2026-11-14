@@ -479,20 +479,6 @@ describe("SDK worker failures", () => {
     await assert.rejects(awaitPromptAcceptance(async () => undefined), /without being accepted/);
   });
 
-  it("starts batches only for independent deliveries, not enforcement prompts", async () => {
-    const worker = new SdkWorker({} as never);
-    const work = emptyWorkState();
-    const session = { isIdle: true, prompt: async (_message: string, options: any) => { options.preflightResult(true); } };
-    const markers: unknown[] = [];
-    const internal = worker as unknown as { session: typeof session; sessionManager: { appendCustomEntry(type: string, data: unknown): void }; record: any };
-    internal.session = session; internal.sessionManager = { appendCustomEntry: (_type, data) => { markers.push(data); } };
-    internal.record = { work, activity: [], usage: {}, state: "idle" };
-    await worker.prompt("delivery"); assert.equal(work.currentBatchId, 1);
-    await worker.prompt("enforcement", { newBatch: false }); assert.equal(work.currentBatchId, 1);
-    await worker.prompt("next delivery"); assert.equal(work.currentBatchId, 2);
-    assert.equal(markers.length, 2);
-  });
-
   it("keeps visible final assistant text in activity without attaching it to settlement", () => {
     const worker = new SdkWorker({} as never);
     const record = { work: emptyWorkState(), activity: [], usage: {}, state: "idle" } as any;

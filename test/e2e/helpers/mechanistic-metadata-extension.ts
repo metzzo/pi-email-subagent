@@ -39,7 +39,9 @@ export default function mechanisticMetadata(pi: ExtensionAPI): void {
         // A real registered provider can interpret arbitrary metadata in its
         // callback, so even this catalog annotation must remain exact there.
         const config = ctx.modelRegistry.getRegisteredProviderConfig(current.provider)!;
-        config.models![0]!.compat = compat;
+        const registered = config.models![0]!;
+        assert.ok(!("type" in registered) || registered.type === undefined || registered.type === "chat", "expected a registered chat model");
+        registered.compat = compat;
       } else {
         // Write the actual persisted overlay consumed by Pi's ModelRuntime,
         // reproducing catalog refresh without a network or model request.

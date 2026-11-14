@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import extension from "../../../src/index.ts";
 import { AgentBroker } from "../../../src/broker.ts";
 import { MailStore } from "../../../src/mail-store.ts";
@@ -33,9 +33,15 @@ MailStore.prototype.finishJob = async function (job: MechanisticJob, mail: Email
 };
 
 export default function mechanisticProbe(pi: ExtensionAPI): void {
-  const tools = new Map<string, Parameters<ExtensionAPI["registerTool"]>[0]>();
+  // These production tools use only the shared ExtensionContext fields.
+  // Call with the real command context, not a fabricated tool context.
+  type RegisteredTool = Parameters<ExtensionAPI["registerTool"]>[0];
+  type CommandTool = Omit<RegisteredTool, "execute"> & {
+    execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionCommandContext) => ReturnType<RegisteredTool["execute"]>;
+  };
+  const tools = new Map<string, CommandTool>();
   extension(new Proxy(pi, { get(target, key, receiver) {
-    if (key === "registerTool") return (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => { tools.set(tool.name, tool); target.registerTool(tool); };
+    if (key === "registerTool") return (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => { tools.set(tool.name, tool as unknown as CommandTool); target.registerTool(tool); };
     const value = Reflect.get(target, key, receiver); return typeof value === "function" ? value.bind(target) : value;
   } }));
   pi.registerCommand("mechanistic-run", {

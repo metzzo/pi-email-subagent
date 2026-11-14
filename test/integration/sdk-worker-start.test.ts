@@ -232,6 +232,64 @@ it("constructs and disposes an isolated real AgentSession with only explicit wor
   await omitted.dispose();
 });
 
+it("admits only started runs and preserves batch IDs on both Pi preflight APIs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-handled-input-"));
+  const observed: SimpleStreamOptions[] = [];
+  const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+  runtime.registerProvider("admission-probe", {
+    baseUrl: "http://127.0.0.1:9/admission-probe", apiKey: "deterministic-test-key", api: "admission-probe",
+    models: [{ id: "admission-model", name: "Admission Model", reasoning: false, input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000 }],
+    streamSimple: successfulStream(observed),
+  });
+  const model = runtime.getModel("admission-probe", "admission-model")!;
+  let handled = 0;
+  const registration: WorkerExtensionRegistration = {
+    protocolVersion: 2, name: "handled-input", tools: [], effects: {},
+    factory(pi) {
+      pi.on("input", (event) => {
+        if (event.text.startsWith("Handled by")) { handled += 1; return { action: "handled" }; }
+      });
+    },
+  };
+  const worker = new SdkWorker(runtime, model, WorkerSettingsSnapshot.capture(root, root, false), [registration]);
+  try {
+    await worker.start({
+      record: workerRecord(model), model, cwd: root, agentDir: root,
+      sessionDir: join(root, "sessions"), projectTrusted: false,
+      systemPrompt: "Handled input must not admit mailbox work.",
+      sendEmail: async () => { throw new Error("not called"); },
+      fetchEmails: () => ({ emails: [], total: 0 }),
+    });
+    const before = worker.getSnapshot().record.work;
+    await assert.rejects(worker.prompt("Handled by the real input hook"), /rejected during preflight/);
+    assert.equal(handled, 1);
+    assert.equal(observed.length, 0, "handled input never reaches the model provider");
+    assert.deepEqual(worker.getSnapshot().record.work, before, "rejected admission restores the work ledger");
+    const run = async (message: string, newBatch = true) => {
+      const settled = new Promise<void>((resolve) => {
+        const unsubscribe = worker.subscribe((event) => {
+          if (event.type === "settled") { unsubscribe(); resolve(); }
+        });
+      });
+      await worker.prompt(message, { newBatch });
+      await settled;
+    };
+    await run("delivery");
+    assert.equal(worker.getSnapshot().record.work?.currentBatchId, 1);
+    await run("enforcement", false);
+    assert.equal(worker.getSnapshot().record.work?.currentBatchId, 1);
+    await run("next delivery");
+    assert.equal(worker.getSnapshot().record.work?.currentBatchId, 2);
+    assert.equal(observed.length, 3);
+    const entries = SessionManager.open(worker.getSessionFile()!).getEntries();
+    assert.equal(entries.filter((entry) => entry.type === "custom" && entry.customType === "pi-email-subagent-work-batch").length, 2);
+  } finally {
+    await worker.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("activates compact_and_continue for the default worker profile and tolerates a missing extension", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-email-sdk-worker-default-compact-"));
   const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
