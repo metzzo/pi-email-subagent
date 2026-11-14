@@ -194,6 +194,14 @@ export default function mechanisticProbe(pi: ExtensionAPI): void {
     description: "Persist restored production job evidence without replaying an invocation",
     handler: async (_args, ctx) => {
       assert.ok(broker);
+      // A journal reader can see the terminal append before transact() has
+      // applied it to this broker's memory. Inspect the settled live state,
+      // not that earlier cross-process visibility boundary.
+      const deadline = Date.now() + 15_000;
+      while (broker.mailStore.listJobs().some((job) => job.phase !== "terminal")) {
+        if (Date.now() >= deadline) throw new Error("Restored jobs did not settle before inspection");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       const jobs = broker.mailStore.listJobs();
       const inspections = [];
       for (const address of new Set(jobs.map((job) => job.address))) {
