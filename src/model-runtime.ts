@@ -107,6 +107,9 @@ function assertStaticNativeProvider(providerId: string, provider: NativeProvider
 }
 
 function requestModelSnapshot(model: Model<Api>, registered: boolean): RequestModelSnapshot {
+  const samplingParamsByThinkingLevel = "samplingParamsByThinkingLevel" in model
+    ? model.samplingParamsByThinkingLevel
+    : undefined;
   const {
     id,
     name,
@@ -135,6 +138,7 @@ function requestModelSnapshot(model: Model<Api>, registered: boolean): RequestMo
     contextWindow,
     maxTokens,
     ...(samplingParams !== undefined ? { samplingParams } : {}),
+    ...(samplingParamsByThinkingLevel !== undefined ? { samplingParamsByThinkingLevel } : {}),
     ...(compat !== undefined ? { compat } : {}),
   }) as RequestModelSnapshot;
   // Pi 0.85.1 does not consume this remote-catalog annotation. Its background
