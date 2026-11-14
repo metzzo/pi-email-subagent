@@ -3,7 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { it } from "node:test";
-import { discoverAndLoadExtensions } from "@earendil-works/pi-coding-agent";
+import { discoverAndLoadExtensions, keyHint, keyText } from "@earendil-works/pi-coding-agent";
+
+const messageKeys = { keyHint, keyText };
 
 it("reports missing capabilities through the real Pi extension loader", async () => {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-email-compat-loader-"));
@@ -87,7 +89,7 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   const emailComponent = emailRenderer({
     role: "custom", customType: "pi-email-subagent.email", content: "", display: true,
     details: envelope, timestamp: Date.now(),
-  } as never, { expanded: true, outputPad: 0 }, theme);
+  } as never, { expanded: true, outputPad: 0, ...messageKeys }, theme);
   const emailOutput = emailComponent!.render(100).join("\n");
   assert.match(emailOutput, /Conversation preview is loading.*Full transcript/s);
   assert.doesNotMatch(emailOutput, /clipboard|https:\/\/bad\.invalid|\x1b|\x07/);
@@ -167,6 +169,6 @@ it("loads the packaged extension with tools, command, and renderers and no confl
   const fallback = emailRenderer({
     role: "custom", customType: "pi-email-subagent.email", content: "Mail without details", display: true,
     timestamp: Date.now(),
-  }, { expanded: false, outputPad: 0 }, theme);
+  }, { expanded: false, outputPad: 0, ...messageKeys }, theme);
   assert.equal(fallback!.render(100).join("\n").trim(), "Mail without details");
 });

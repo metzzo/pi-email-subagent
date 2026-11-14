@@ -5,7 +5,9 @@ import { EFFORT_LEVELS, MAX_REPLY_WAIT_SECONDS, MAX_TIMER_DELAY_MS } from "./con
 const { Type } = TypeBox;
 
 export const PrioritySchema = PiAi.StringEnum(["high", "low"] as const);
-export const EffortSchema = PiAi.StringEnum(EFFORT_LEVELS);
+// Pi 1.5 returns a pi-schema value rather than a TypeBox type. Preserve
+// the same JSON Schema and its static effort type on both hosts.
+export const EffortSchema = Type.Unsafe<(typeof EFFORT_LEVELS)[number]>(PiAi.StringEnum(EFFORT_LEVELS));
 export const ReplyStatusSchema = PiAi.StringEnum(["completed", "partial", "blocked"] as const);
 export const MAX_COMPLETION_SUMMARY_BYTES = 4_096;
 export const MAX_COMPLETION_ENTRY_BYTES = 2_048;

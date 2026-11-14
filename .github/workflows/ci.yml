@@ -20,8 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # Reproducible test baseline, not a runtime version restriction.
-        pi: ["0.87.1"]
+        # Both SDK baselines run the same source and regression tests.
+        pi: ["1.5.2", "0.87.1"]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -33,7 +33,7 @@ jobs:
       - run: npm ci
       - name: Verify the supported Pi development pins
         env:
-          SUPPORTED_PI_VERSION: ${{ matrix.pi }}
+          SUPPORTED_PI_VERSION: "1.5.2"
         run: |
           node - <<'NODE'
           const pkg = require('./package.json');
@@ -42,18 +42,25 @@ jobs:
             '@earendil-works/pi-ai',
             '@earendil-works/pi-coding-agent',
             '@earendil-works/pi-tui',
-            '@earendil-works/pi-server',
           ];
           for (const name of names) {
             if (pkg.devDependencies[name] !== process.env.SUPPORTED_PI_VERSION) {
               throw new Error(`${name} must be pinned to supported Pi ${process.env.SUPPORTED_PI_VERSION}`);
             }
           }
-          if (pkg.devDependencies.typebox !== '1.3.7') {
-            throw new Error('typebox must be pinned to the supported Pi host version 1.3.7');
+          if (pkg.devDependencies.typebox !== '1.3.27') {
+            throw new Error('typebox must be pinned to the supported Pi host version 1.3.27');
           }
           NODE
-      - run: npm run validate
+      - name: Install the older SDK without changing the committed pins
+        if: matrix.pi == '0.87.1'
+        run: npm install --no-save --package-lock=false @earendil-works/pi-agent-core@0.87.1 @earendil-works/pi-ai@0.87.1 @earendil-works/pi-coding-agent@0.87.1 @earendil-works/pi-tui@0.87.1 @earendil-works/pi-server@0.87.1 typebox@1.3.7
+      - name: Validate the pinned baseline and coverage gate
+        if: matrix.pi == '1.5.2'
+        run: npm run validate
+      - name: Check compatibility with the older SDK
+        if: matrix.pi == '0.87.1'
+        run: npm run check && npm run check:licenses && npm test && npm run test:integration && npm run test:e2e
       - name: Surface the redirected test report on failure
         if: failure()
         run: |

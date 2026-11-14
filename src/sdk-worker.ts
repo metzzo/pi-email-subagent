@@ -195,6 +195,7 @@ export class SdkWorker implements WorkerTransport {
   private workerSettlementPending = false;
   private workerSettlementObserved = false;
   private sessionShutdownEmitted = false;
+  private promptPreparations = 0;
   private startGeneration = 0;
   private startOperation?: Promise<void>;
   private runFailure?: string;
@@ -299,10 +300,13 @@ export class SdkWorker implements WorkerTransport {
       agentDir: config.agentDir,
       settingsManager: settings,
       noExtensions: true,
-      extensionFactories: enabledWorkerExtensions.map((registration) => ({
-        name: registration.name,
-        factory: guardWorkerExtensionFactory(registration),
-      })),
+      extensionFactories: [
+        (pi) => { pi.on("before_agent_start", () => { this.promptPreparations += 1; }); },
+        ...enabledWorkerExtensions.map((registration) => ({
+          name: registration.name,
+          factory: guardWorkerExtensionFactory(registration),
+        })),
+      ],
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -590,6 +594,7 @@ export class SdkWorker implements WorkerTransport {
     const session = this.requiredSession();
     if (!session.isIdle) throw new Error("Worker is not idle; use steer or follow-up delivery.");
     const previousWork = clone(this.record!.work ??= emptyWorkState());
+    const preparationsBeforePrompt = this.promptPreparations;
     const startsBatch = options.newBatch !== false;
     const batchId = startsBatch ? beginBatch(this.record!.work) : (this.record!.work.currentBatchId ?? beginBatch(this.record!.work));
     let admissionFinished = false;
@@ -610,17 +615,32 @@ export class SdkWorker implements WorkerTransport {
           const operation = session.prompt(message, {
             source: "extension",
             expandPromptTemplates: false,
-            preflightResult: (success) => {
+            preflightResult: (disposition: boolean | "handled" | "queued" | "started") => {
+              // Legacy true also means extension-handled input. Only a prompt
+              // prepared for a run is admitted; 1.5 reports that as started.
+              const success = disposition === "started"
+                || (disposition === true && this.promptPreparations > preparationsBeforePrompt);
               try {
-                const vetoInvalidAdmission = (): void => {
-                  if (!this.disposed && this.session === session) return;
+                const admissionStillValid = (): boolean => {
+                  if (!this.disposed && this.session === session) return true;
                   preflightResult(false);
-                  // Pi 0.84.2 invokes this callback synchronously immediately
-                  // before _runAgentPrompt. Throwing is the admission veto that
-                  // prevents a late old-generation model run from starting.
+                  if (disposition === "started") {
+                    // New hosts are already busy here. Throwing would bypass
+                    // their run-finally and leave them busy forever. Request
+                    // public startup abort and let the host finish normally.
+                    const abort = session.abort();
+                    this.promptOperations.add(abort);
+                    const finishAbort = () => { this.promptOperations.delete(abort); };
+                    abort.then(finishAbort, finishAbort);
+                    return false;
+                  }
+                  // Legacy hosts start immediately after this callback and
+                  // require a synchronous throw to veto the old generation.
                   throw new Error("Worker prompt was cancelled by cleanup before Pi preflight admission.");
                 };
-                if (success) vetoInvalidAdmission();
+                // Legacy true may still start a run even when preparation was
+                // interrupted by cleanup. Always veto that raw acceptance.
+                if ((disposition === true || success) && !admissionStillValid()) return;
                 if (success && startsBatch) this.sessionManager?.appendCustomEntry("pi-email-subagent-work-batch", {
                   batchId,
                   startedAt: this.record!.work!.batchStartedAt,
@@ -628,7 +648,7 @@ export class SdkWorker implements WorkerTransport {
                 // Keep the actual Pi acceptance call as the final guarded
                 // action even if a synchronous session entry hook re-entered
                 // cleanup while the batch marker was appended.
-                if (success) vetoInvalidAdmission();
+                if ((disposition === true || success) && !admissionStillValid()) return;
                 preflightResult(success);
               } finally {
                 // For accepted prompts Pi starts _runAgentPrompt immediately

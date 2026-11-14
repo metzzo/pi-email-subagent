@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { AgentBroker } from "../../src/broker.ts";
-import { DEFAULT_CONFIG } from "../../src/config.ts";
+import { createAssistantMessageEventStream, type AssistantMessage } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_LIFECYCLE } from "../../src/config.ts";
 import { SdkWorker } from "../../src/sdk-worker.ts";
-import type { LlmAgentRecord as AgentRecord, WorkerStartConfig } from "../../src/types.ts";
-import { emptyWorkState } from "../../src/work-ledger.ts";
-import { eventually, FakeMainAdapter, fakeModel } from "../helpers/fakes.ts";
+import { WorkerSettingsSnapshot } from "../../src/settings-snapshot.ts";
+import type { LlmAgentRecord } from "../../src/types.ts";
+import type { WorkerExtensionRegistration } from "../../src/worker-extensions.ts";
 
 function deferred() {
   let resolve!: () => void;
@@ -16,183 +17,95 @@ function deferred() {
   return { promise, resolve };
 }
 
-interface RunCounters {
-  provider: number;
-  tools: number;
-  mail: number;
-}
-
-class PinnedPreflightSession {
-  isIdle = true;
-  isStreaming = false;
-  disposed = 0;
-  promptCount = 0;
-  readonly entered = deferred();
-  readonly release = deferred();
-  private readonly run = deferred();
-
-  constructor(
-    private readonly oldGeneration: boolean,
-    readonly counters: RunCounters,
-  ) {}
-
-  async prompt(_message: string, options: { preflightResult(success: boolean): void }): Promise<void> {
-    const promptNumber = this.promptCount++;
-    if (this.oldGeneration && promptNumber === 0) {
-      // A pinned-accurate Pi 0.84.2 handled-input preflight: accepted without
-      // entering _runAgentPrompt. This creates the worker without a provider run.
-      options.preflightResult(true);
-      return;
-    }
-    if (this.oldGeneration) {
-      this.entered.resolve();
-      await this.release.promise;
-    }
-    // Pi 0.84.2 calls preflightResult(true) synchronously immediately before
-    // _runAgentPrompt. If the callback throws, the following old run is vetoed.
-    options.preflightResult(true);
-    this.isIdle = false;
-    this.isStreaming = true;
-    this.counters.provider += 1;
-    await this.run.promise;
-    this.isStreaming = false;
-    this.isIdle = true;
-  }
-
-  async abort(): Promise<void> {
-    this.isStreaming = false;
-    this.isIdle = true;
-    this.run.resolve();
-  }
-
-  dispose(): void { this.disposed += 1; }
-}
-
-function pinnedWorker(session: PinnedPreflightSession): SdkWorker {
-  const worker = new SdkWorker({} as never);
-  worker.start = async (config: WorkerStartConfig): Promise<void> => {
-    const record = structuredClone(config.record) as AgentRecord;
-    record.state = "idle";
-    record.work ??= emptyWorkState();
-    const internal = worker as unknown as {
-      record: AgentRecord;
-      session: PinnedPreflightSession;
-      sessionManager: { appendCustomEntry(type: string, data: unknown): void };
-      cwd: string;
-    };
-    internal.record = record;
-    internal.session = session;
-    internal.sessionManager = { appendCustomEntry: () => undefined };
-    internal.cwd = config.cwd;
-  };
-  return worker;
-}
-
-function brokerAt(root: string, sessions: PinnedPreflightSession[], counters: RunCounters[]) {
-  return new AgentBroker({
-    cwd: root,
-    agentDir: root,
-    namespaceDir: join(root, "state"),
-    config: structuredClone(DEFAULT_CONFIG),
-    models: [fakeModel("gpt-5.4")],
-    mainAdapter: new FakeMainAdapter(),
-    workerFactory: () => {
-      const generationCounters = { provider: 0, tools: 0, mail: 0 };
-      const session = new PinnedPreflightSession(sessions.length === 0, generationCounters);
-      counters.push(generationCounters);
-      sessions.push(session);
-      return pinnedWorker(session);
-    },
-    projectTrusted: true,
+async function settledPrompt(worker: SdkWorker, message: string) {
+  const settled = new Promise<void>((resolve) => {
+    const unsubscribe = worker.subscribe((event) => {
+      if (event.type === "settled") { unsubscribe(); resolve(); }
+    });
   });
-}
-
-const ADDRESS = "worker.prompt-preflight@gpt-5.4.com";
-
-async function seedHandledWorker(broker: AgentBroker): Promise<void> {
-  await broker.send(broker.mainAddress, {
-    to: ADDRESS,
-    subject: "Preserved obligation",
-    message: "Remain unanswered until the next safe generation.",
-    priority: "low",
-  });
+  await worker.prompt(message);
+  await settled;
 }
 
 describe("Pi prompt preflight cleanup ownership", () => {
-  it("manual stop joins and vetoes late old-generation preflight before G+1 runs", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-email-preflight-stop-"));
-    const sessions: PinnedPreflightSession[] = [];
-    const counters: RunCounters[] = [];
-    const broker = brokerAt(root, sessions, counters);
-    await broker.init();
-    try {
-      await seedHandledWorker(broker);
-      const oldWorker = (broker as unknown as { workers: Map<string, SdkWorker> }).workers.get(ADDRESS)!;
-      const oldSession = sessions[0]!;
-      const promptOutcome = oldWorker.prompt("delayed Pi preflight").then(
-        () => "resolved" as const,
-        () => "rejected" as const,
-      );
-      await oldSession.entered.promise;
-
-      let stopSettled = false;
-      const stopping = broker.stop(ADDRESS).then(() => { stopSettled = true; });
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.equal(stopSettled, false, "stop cannot release the exact worker during prompt preflight");
-      assert.equal(oldSession.disposed, 0);
-
-      oldSession.release.resolve();
-      await stopping;
-      assert.equal(await promptOutcome, "rejected");
-      assert.deepEqual(counters[0], { provider: 0, tools: 0, mail: 0 });
-      assert.equal(oldSession.disposed, 1);
-
-      await broker.restart(ADDRESS);
-      assert.equal(sessions.length, 2);
-      assert.deepEqual(counters[1], { provider: 1, tools: 0, mail: 0 }, "only G+1 reaches the provider");
-    } finally {
-      for (const session of sessions) session.release.resolve();
-      await broker.shutdown().catch(() => undefined);
-    }
-  });
-
-  it("broker shutdown joins and vetoes late preflight before a restored G+1 runs", async () => {
-    const root = await mkdtemp(join(tmpdir(), "pi-email-preflight-shutdown-"));
-    const oldSessions: PinnedPreflightSession[] = [];
-    const oldCounters: RunCounters[] = [];
-    const first = brokerAt(root, oldSessions, oldCounters);
-    await first.init();
-    await seedHandledWorker(first);
-    const oldWorker = (first as unknown as { workers: Map<string, SdkWorker> }).workers.get(ADDRESS)!;
-    const oldSession = oldSessions[0]!;
-    const promptOutcome = oldWorker.prompt("delayed shutdown preflight").then(
-      () => "resolved" as const,
-      () => "rejected" as const,
-    );
-    await oldSession.entered.promise;
-
-    let shutdownSettled = false;
-    const shuttingDown = first.shutdown().then(() => { shutdownSettled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    assert.equal(shutdownSettled, false, "shutdown retains namespace ownership through prompt preflight");
-    assert.equal(oldSession.disposed, 0);
-    oldSession.release.resolve();
-    await shuttingDown;
-    assert.equal(await promptOutcome, "rejected");
-    assert.deepEqual(oldCounters[0], { provider: 0, tools: 0, mail: 0 });
-
-    const nextSessions: PinnedPreflightSession[] = [oldSession];
-    const nextCounters: RunCounters[] = [oldCounters[0]!];
-    const next = brokerAt(root, nextSessions, nextCounters);
-    await next.init();
-    try {
-      assert.equal(nextSessions.length, 2);
-      await eventually(() => {
-        assert.deepEqual(nextCounters[1], { provider: 1, tools: 0, mail: 0 }, "restored G+1 alone reaches the provider");
+  for (const operation of ["cleanup", "dispose"] as const) {
+    it(`${operation} joins real Pi preflight and vetoes the old run before a persisted replacement runs`, { timeout: 30_000 }, async () => {
+      const root = await mkdtemp(join(tmpdir(), "pi-email-real-preflight-"));
+      const entered = deferred();
+      const release = deferred();
+      let providerStarts = 0;
+      const runtime = await ModelRuntime.create({ authPath: join(root, "auth.json"), modelsPath: null });
+      runtime.registerProvider("preflight-probe", {
+        api: "preflight-probe", apiKey: "deterministic-test-key", baseUrl: "http://127.0.0.1:9/preflight-probe",
+        models: [{ id: "preflight-model", name: "Preflight Model", reasoning: false, input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 2_000 }],
+        streamSimple(model) {
+          providerStarts += 1;
+          const stream = createAssistantMessageEventStream();
+          const message: AssistantMessage = {
+            role: "assistant", content: [{ type: "text", text: "Real generation completed." }],
+            api: model.api, provider: model.provider, model: model.id, stopReason: "stop", timestamp: Date.now(),
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          };
+          stream.push({ type: "done", reason: "stop", message });
+          stream.end();
+          return stream;
+        },
       });
-    } finally {
-      for (const session of nextSessions) session.release.resolve();
-      await next.shutdown();
-    }
-  });
+      const model = runtime.getModel("preflight-probe", "preflight-model")!;
+      const now = new Date().toISOString();
+      const record: LlmAgentRecord = {
+        kind: "llm", address: "reader.preflight@preflight-model.com", name: "reader", taskSlug: "preflight",
+        provider: model.provider, modelId: model.id, effort: "low", tools: ["read", "send_email", "fetch_emails"],
+        state: "paused", createdAt: now, updatedAt: now, enforcementAttempts: 0, lifecycle: { ...DEFAULT_LIFECYCLE },
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }, activity: [],
+      };
+      let preparations = 0;
+      const registration: WorkerExtensionRegistration = {
+        protocolVersion: 2, name: "real-preflight-gate", tools: [], effects: {},
+        factory(pi) {
+          pi.on("before_agent_start", async () => {
+            if (++preparations === 2) { entered.resolve(); await release.promise; }
+          });
+        },
+      };
+      const snapshot = WorkerSettingsSnapshot.capture(root, root, false);
+      const oldWorker = new SdkWorker(runtime, model, snapshot, [registration]);
+      let replacement: SdkWorker | undefined;
+      const start = (worker: SdkWorker, workerRecord: LlmAgentRecord) => worker.start({
+        record: workerRecord, model, cwd: root, agentDir: root, sessionDir: join(root, "sessions"), projectTrusted: false,
+        systemPrompt: "Use only this exact worker generation.",
+        sendEmail: async () => { throw new Error("provider never calls mail tools"); },
+        fetchEmails: () => ({ emails: [], total: 0 }),
+      });
+      try {
+        await start(oldWorker, record);
+        await settledPrompt(oldWorker, "Create a genuine persisted session");
+        assert.equal(providerStarts, 1);
+        const sessionFile = oldWorker.getSessionFile();
+        assert.ok(sessionFile);
+        const promptOutcome = oldWorker.prompt("Hold the old run in real Pi preflight").then(() => "resolved", () => "rejected");
+        await entered.promise;
+        let stopped = false;
+        const stopping = oldWorker[operation]().then(() => { stopped = true; });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(stopped, false, "cleanup must retain ownership while real preflight is pending");
+        release.resolve();
+        await stopping;
+        assert.equal(await promptOutcome, "rejected");
+        assert.equal(providerStarts, 1, "the cancelled old prompt never reaches the model");
+        replacement = new SdkWorker(runtime, model, snapshot);
+        await start(replacement, oldWorker.getSnapshot().record);
+        assert.equal(replacement.getSessionFile(), sessionFile, "replacement resumes the genuine session");
+        await settledPrompt(replacement, "Only the replacement may run");
+        assert.equal(providerStarts, 2, "only the replacement adds a model request");
+      } finally {
+        release.resolve();
+        await oldWorker.dispose();
+        await replacement?.dispose();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
 });

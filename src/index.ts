@@ -520,7 +520,7 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
     const prompt = coordinatorPrompt(ctx);
     if (!prompt) return;
     if (event.systemPromptOptions?.sections) {
-      // Record guidance alongside the user-triggered run's prompt sections.
+      // Both user- and custom-message runs carry structured sections on 1.5.
       event.systemPromptOptions.sections.email_coordination = prompt;
       return;
     }
@@ -528,8 +528,8 @@ export default function piEmailSubagentExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("context_with_system", (event, ctx) => {
-    // Automatic mail turns skip before_agent_start. Pi can drop run-only
-    // sections on their next response, so restore missing guidance per request.
+    // On 0.87 automatic mail turns skip before_agent_start. Restore missing
+    // run-only guidance per request; 1.5 also injects it for custom starts.
     if (getCurrentSystemMessage(event.messages)?.sections?.email_coordination) return;
     const prompt = coordinatorPrompt(ctx);
     if (!prompt) return;

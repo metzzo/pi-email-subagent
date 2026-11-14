@@ -14,6 +14,7 @@ Initial `0.1.0` release candidate (unpublished).
 
 ### Fixed
 
+- Support both Pi 0.87.1 and 1.5.2 prompt admission APIs without admitting extension-handled input as a worker run. Cancel invalidated 1.5 startup through public abort rather than throwing out of its disposition callback and leaving the host permanently busy. The exact tested host baseline is Pi 1.5.2, with compatibility tested on Pi 0.87.1; remove the obsolete direct experimental server development dependency.
 - Align the shared `fetch_emails` tool description and prompt guidelines with conditional main/worker fetching instead of requiring startup/before-idle polling.
 - Restore missing main coordinator guidance in automatic mail requests when Pi refreshes away run-only prompt sections; retain the existing transcript guidance for user-triggered runs.
 - Serialize main mailbox fetches behind in-flight mail delivery so a fast automatic mail-triggered turn sees the pushed request after its delivery journal write.

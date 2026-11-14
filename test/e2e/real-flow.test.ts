@@ -324,6 +324,15 @@ describe("real end-to-end email flow", { concurrency: false }, () => {
       assert.equal(sendResult(answered).envelope.completion.status, "completed");
       assert.equal(sendResult(answered).envelope.message, "Main answered the automatically pushed request.", "main guidance survives automatic mail turns and their tool continuations");
       await client.waitForSettlement(client.events().indexOf(answered));
+      // Main's reply can settle before the worker's original reply is delivered.
+      // An idle registry snapshot alone is not proof that this mail arrived.
+      const originalReply = await client.waitFor(
+        (line) => line.type === "message_start"
+          && (line.message as any)?.customType === "pi-email-subagent.email"
+          && (line.message as any)?.details?.inReplyTo === delegated.correlationId,
+        "original worker reply after main response", 90_000, mark,
+      );
+      await client.waitForSettlement(client.events().indexOf(originalReply));
       await eventuallyRegistry(agentDir, sessionId, (value) => value.agents[0]?.state === "idle", "worker settled after main response");
       assert.equal(await client.close(), 0, client.stderr);
 
