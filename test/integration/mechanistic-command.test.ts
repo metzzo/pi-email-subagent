@@ -127,7 +127,14 @@ it("a failing command observer cannot throw into publication or fail unrelated a
     const failed = await client.waitFor((line) => line.type === "message_end" && JSON.stringify(line.message).includes("command observation failed"), "isolated observer failure", 3000);
     assert.match(JSON.stringify(failed.message), new RegExp(`${id}.*do not resend or replay`));
     await client.waitFor((line) => line.type === "message_end" && JSON.stringify(line.message).includes("OBSERVATION_FINISHED") && JSON.stringify(line.message).includes(id), "original work continues safely", 5000);
-    const jobs = (await journal(f.agent)).listJobs();
+    // RPC message_end precedes the broker's durable delivery acknowledgement.
+    // Observe that acknowledgement, not just the visible message, before asserting.
+    let jobs = (await journal(f.agent)).listJobs();
+    const deliveryDeadline = Date.now() + 5000;
+    while (jobs.some((job) => job.outcomeDeliveryState !== "delivered") && Date.now() < deliveryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      jobs = (await journal(f.agent)).listJobs();
+    }
     assert.equal(jobs.length, 2); assert.ok(jobs.every((job) => job.result === "success" && job.cleanup?.state === "confirmed" && job.outcomeDeliveryState === "delivered"));
     assert.equal(existsSync(f.env.UX_MODEL_CALLS), false);
   } catch (error) {

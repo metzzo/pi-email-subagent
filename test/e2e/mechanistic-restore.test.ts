@@ -45,7 +45,9 @@ it(
       resolve("src/index.ts"),
       resolve("test/helpers/mechanistic-ux-provider.ts"),
     ];
-    const env = { UX_MODEL_CALLS: calls, OPENAI_API_KEY: "unused" };
+    // The registered provider is entirely local. Do not let CLI startup await
+    // unrelated remote catalog refresh before it attaches the RPC input reader.
+    const env = { UX_MODEL_CALLS: calls, OPENAI_API_KEY: "unused", PI_OFFLINE: "1" };
     let a: PiRpcClient | undefined,
       b: PiRpcClient | undefined,
       c: PiRpcClient | undefined;
